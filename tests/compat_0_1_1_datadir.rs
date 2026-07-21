@@ -90,26 +90,32 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// resolution.
 static FIXTURE_TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Pure composer for a tempdir basename from its four uniqueness components: the
+/// pid (cross-process), a caller `tag` (readability), a nanosecond timestamp
+/// (cross-run), and a process-global monotonic sequence number (per-call
+/// uniqueness, independent of clock resolution). Kept side-effect-free so the
+/// `seq` invariant can be locked deterministically in a unit test that pins
+/// pid/tag/nanos and varies only `seq` — see
+/// `temp_dir_name_is_unique_at_identical_pid_tag_and_nanos`.
+fn compose_temp_dir_name(pid: u32, tag: &str, nanos: u128, seq: u64) -> String {
+    format!("aletheiadb-compat-0_1_1-{pid}-{tag}-{nanos}-{seq}")
+}
+
 /// Build a collision-proof tempdir path under `std::env::temp_dir()`. Composes
 /// the pid (cross-process), a caller `tag` (readability), a nanosecond timestamp
 /// (cross-run), and a process-global monotonic sequence number (per-call
-/// uniqueness, independent of clock resolution). Every fixture-copy / temp-dir
-/// constructor in this file routes through here so no two calls can ever return
-/// the same path within one process. We do not depend on the `tempfile` crate
-/// (not a dev-dependency), so we build the path by hand.
+/// uniqueness, independent of clock resolution) via `compose_temp_dir_name`.
+/// Every fixture-copy / temp-dir constructor in this file routes through here so
+/// no two calls can ever return the same path within one process. We do not
+/// depend on the `tempfile` crate (not a dev-dependency), so we build the path
+/// by hand.
 fn unique_temp_dir(tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let seq = FIXTURE_TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let unique = format!(
-        "aletheiadb-compat-0_1_1-{}-{}-{}-{}",
-        std::process::id(),
-        tag,
-        nanos,
-        seq
-    );
+    let unique = compose_temp_dir_name(std::process::id(), tag, nanos, seq);
     std::env::temp_dir().join(unique)
 }
 
@@ -692,22 +698,48 @@ fn check_bool(db: &AletheiaDB, id: u64, key: &str, expected: bool, violations: &
     }
 }
 
-/// Regression lock for the test-harness tempdir race.
+/// Deterministic regression lock for the tempdir-race fix's `seq` invariant.
 ///
-/// This pins the structural hole that caused the two 0.1.1 compat tests to
-/// intermittently open each other's fixture directory on macOS: the tempdir
-/// path used to derive ONLY from pid + a nanosecond clock, so two constructors
-/// racing within one coarse-resolution tick (both tests run concurrently in the
-/// same binary, hence the same pid) computed the SAME path and clobbered each
-/// other's copy. `unique_temp_dir`'s process-global monotonic counter closes
-/// that hole: no two calls in one process can return the same path, regardless
-/// of clock resolution.
+/// This is the REAL lock (the concurrency smoke test below cannot catch a
+/// clock-only revert on a ns-resolution clock like Linux's — 64 threads get 64
+/// distinct nanos, so it would pass even with `seq` dropped). Here we pin an
+/// IDENTICAL pid/tag/nanos — the exact coarse-clock collision that struck macOS
+/// — so that ONLY the monotonic `seq` can distinguish the two names. If a future
+/// change drops `seq` from `compose_temp_dir_name`, these two names become equal
+/// and this assertion trips deterministically on EVERY platform, with no
+/// reliance on clock resolution.
+#[test]
+fn temp_dir_name_is_unique_at_identical_pid_tag_and_nanos() {
+    // Pins the structural hole: at an IDENTICAL pid/tag/nanos (the exact
+    // coarse-clock collision that struck macOS), only the monotonic seq
+    // distinguishes the two names. If a future change drops seq from
+    // compose_temp_dir_name, these become equal and this fails
+    // deterministically on EVERY platform (no reliance on clock resolution).
+    let a = compose_temp_dir_name(1234, "fixture", 42, 0);
+    let b = compose_temp_dir_name(1234, "fixture", 42, 1);
+    assert_ne!(
+        a, b,
+        "temp-dir name must vary by seq at identical pid/tag/nanos"
+    );
+}
+
+/// Real-uniqueness smoke test for `unique_temp_dir` under concurrency.
+///
+/// The two 0.1.1 compat tests once intermittently opened each other's fixture
+/// directory on macOS: the tempdir path used to derive ONLY from pid + a
+/// nanosecond clock, so two constructors racing within one coarse-resolution
+/// tick (both tests run concurrently in the same binary, hence the same pid)
+/// computed the SAME path and clobbered each other's copy. `unique_temp_dir`'s
+/// process-global monotonic counter closes that hole.
 ///
 /// This test spawns many threads that each ask for one path at once and asserts
-/// they are all distinct. It is deterministic on the fixed code (the atomic
-/// guarantees uniqueness) and does NOT depend on any real fixture. A future
-/// revert to clock-only naming would collide under this concurrency and fail
-/// here.
+/// they are all distinct, exercising that the atomic yields distinct paths under
+/// real concurrency on the FIXED code. It does NOT depend on any real fixture.
+/// Note it does NOT by itself catch a clock-only revert (dropping `seq`): on a
+/// ns-resolution clock the racing threads observe distinct nanos and would pass
+/// even without the atomic. The deterministic
+/// `temp_dir_name_is_unique_at_identical_pid_tag_and_nanos` above is what
+/// actually locks the `seq` invariant cross-platform.
 #[test]
 fn fixture_temp_dirs_are_unique_under_concurrency() {
     use std::collections::HashSet;
