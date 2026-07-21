@@ -312,19 +312,23 @@ ALETHEIADB_AUTH_MODE=anonymous cargo run --bin aletheia-mcp --features mcp-serve
 | Category | Tools |
 |----------|-------|
 | **Nodes** | `get_node`, `create_node`, `update_node`, `delete_node`, `delete_node_cascade`, `retract_node`, `list_nodes`, `count_nodes` |
-| **Edges** | `get_edge`, `create_edge`, `update_edge`, `delete_edge`, `retract_edge`, `get_outgoing_edges`, `get_incoming_edges` |
+| **Edges** | `get_edge`, `create_edge`, `update_edge`, `delete_edge`, `retract_edge`, `get_outgoing_edges`, `get_incoming_edges`, `count_edges` |
 | **Batch** | `apply_batch` (ordered multi-op write batch committing all-or-nothing in one transaction; edge ops may reference batch-created nodes via `$alias`/`$<index>` local refs; see below) |
 | **Traversal** | `traverse` (multi-hop graph traversal; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
 | **Embeddings** | `embed_query`, `embed_text`, `semantic_search`, `create_node_with_embedding`, `update_node_embedding` (generate embeddings from text and run text-based semantic search; require the `embeddings` feature + a configured model, else return a structured unavailable/precondition error — see [docs/EMBEDDINGS.md](docs/EMBEDDINGS.md#mcp-embedding-tools)) |
 | **Semantic** | `semantic_path`, `concept_analogy`, `concept_mean`, `find_duplicate_candidates`, `semantic_horizon`, `context_aspects` (read-only analysis over the stable `semantic-search` cohort; gated on the `semantic-search` feature — return `FAILED_PRECONDITION` with `required_feature` when absent; see [docs/guides/mcp-semantic-search-tools.md](docs/guides/mcp-semantic-search-tools.md)) |
-| **Temporal** | `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time` (point-in-time find by label/property, no NodeId needed), `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown), `get_belief_revisions` (audit when/why the database changed its mind about a node/edge — classified revision sequence + confidence trajectory; requires the `semantic-temporal` feature; see below) |
+| **Temporal** | `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time` (point-in-time find by label/property, no NodeId needed), `get_node_at_valid_time`, `get_node_at_transaction_time`, `get_edge_at_valid_time`, `get_edge_at_transaction_time` (single-dimension point-in-time reads), `get_node_history`, `get_edge_history`, `diff_node_versions`, `diff_edge_versions` (version history + pairwise diff), `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown), `get_belief_revisions` (audit when/why the database changed its mind about a node/edge — classified revision sequence + confidence trajectory; requires the `semantic-temporal` feature; see below) |
 | **Changefeed** | `list_changes` (pull: what changed in a tx-time window), `await_changes` (push long-poll: block for the next committed changes; see below) |
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
 | **Lineage** | `lineage_upstream` / `lineage_downstream` (fact-to-fact derivation closure in both directions; the write tools take an optional `derived_from`) |
 | **Query** | `query` (execute a single read-only Cypher/AQL statement; see below) |
 | **Schema** | `get_schema` (node labels, edge types, and property keys, each with counts; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Stats** | `database_stats` (holistic snapshot: current size, bi-temporal depth + anchor/delta compression, hot/warm/cold tier distribution, WAL state; no arguments) |
+| **Constraints** | `enable_unique_constraint` (enable a uniqueness constraint on a label+property pair; fails fast on existing duplicates), `list_unique_constraints` (list active uniqueness constraints) |
+| **Namespaces** | `list_namespaces`, `describe_namespace`, `create_namespace` (agent-scoped namespaces — register/list/describe scopes with O(1) current-state node/edge counts; writing to an unknown namespace auto-registers it; see Namespaces guide) |
+| **Audit** | `audit_export` (produce a SIGNED, self-contained bi-temporal + provenance audit export of one node/edge, verifiable OFFLINE with only the signer's public key — for compliance, GDPR/CCPA subject-access, legal discovery; optional `redact_keys`) |
+| **GDPR crypto-shred (Admin)** | `designate_subject`, `erase_subject` (the only Admin-class tools; designate GDPR erasure targets then irreversibly destroy their key material — sealed payload becomes permanently undecryptable — returning a signed erasure attestation; require encryption configured; see [docs/guides/crypto-shred.md](docs/guides/crypto-shred.md)) |
 
 **Atomic multi-write batches (Issue #3231)**: `apply_batch` accepts an
 **ordered** array of write operations (`create_node`, `create_edge`,
@@ -1039,6 +1043,34 @@ unreadable, and pinning "now" excludes future-valid facts. MCP exposure and an
 `AS OF SNAPSHOT <name>` query DDL are a coordinated follow-up (this wave is
 Rust-API-only). See [docs/guides/snapshot-pin.md](docs/guides/snapshot-pin.md).
 
+### Encryption & Compliance
+
+Encryption-at-rest for on-disk data plus GDPR-oriented compliance tooling.
+All encryption is **opt-in behind feature flags** — a default build carries no
+encryption code or write-path overhead.
+
+- **Encryption-at-rest** (`encryption` feature, ADR-0028): transparent
+  authenticated encryption of persisted data (WAL, index persistence, cold
+  storage). See `src/encryption/` (`manager`, `cipher`, `key_provider`,
+  `rotation`).
+- **KMS / Vault key providers** (`encryption-aws-kms`, `encryption-vault`
+  features): envelope encryption with an external key-management service —
+  AWS KMS (`src/encryption/kms_provider.rs`) or HashiCorp Vault
+  (`src/encryption/vault_provider.rs`).
+- **Key rotation** (`src/encryption/rotation.rs`): rotate the data-encryption
+  key without re-encrypting the whole dataset.
+- **Hot-live enable** (`src/db/encryption_enable.rs`,
+  `AletheiaDB::enable_encryption`): turn encryption on for an already-running
+  database with no reopen required (paired disable engine in
+  `src/db/encryption_disable.rs`).
+- **GDPR crypto-shred** (`src/db/crypto_shred/`): designate an erasure subject
+  over whole entities or specific property keys, then irreversibly destroy the
+  per-subject key material so the sealed payload becomes permanently
+  undecryptable, emitting a signed erasure attestation. Exposed as the
+  Admin-class MCP tools `designate_subject` / `erase_subject`.
+
+**See [docs/ENCRYPTION.md](docs/ENCRYPTION.md), [docs/adr/0028-encryption-at-rest.md](docs/adr/0028-encryption-at-rest.md), and [docs/guides/crypto-shred.md](docs/guides/crypto-shred.md).**
+
 ### Feature Flags: Stable vs Experimental
 
 Semantic features are split between a stable cohort and four experimental
@@ -1289,18 +1321,38 @@ pub fn hot_path_function() {
 
 ## LLM Integration
 
-AletheiaDB is designed for LLM integration with temporal query patterns:
+AletheiaDB is designed for LLM integration with temporal query patterns.
 
-**Natural Language-Like Queries:**
+**Temporal query patterns (real API — illustrative snippets):**
+
 ```rust
-db.as_of("2024-01-15T10:00:00Z").find_node("Person", "name" == "Alice")
-db.between("2024-01-01", "2024-12-31").track_changes(node_id)
+// "What did we know about X at time T?"
+// Point-in-time reconstruction of a single entity (bi-temporal coordinate).
+let node = db.get_node_at_time(node_id, valid_time, transaction_time)?;
+
+// "Who was a Person named Alice, as of T?" — resolve entry points without a NodeId.
+let matches = db.find_nodes_at_time("Person", valid_time, transaction_time)?;
+
+// "How has Y changed?" — full version history of an entity.
+let history = db.get_node_history(node_id)?;
+
+// Bi-temporal graph traversal via the query builder
+// (as_of/between live on QueryBuilder and take two `Timestamp` args).
+let results = db.query()
+    .as_of(valid_time, transaction_time)
+    .start(alice_id)
+    .traverse("KNOWS")
+    .execute(&db)?;
+
+// Or express the same temporally-scoped question declaratively:
+let rows = db.execute_cypher(
+    "MATCH (n:Person {name: 'Alice'})-[:KNOWS]->(f) AS OF SYSTEM_TIME '2024-01-15T10:00:00Z' RETURN f",
+)?;
 ```
 
-**Query Patterns:**
-- "What did we know about X at time T?" → `db.as_of(T).get(X)`
-- "How has Y changed?" → `db.history(Y).changes()`
-- "When did we first record F?" → `db.first_occurrence(F)`
+The snippets above are illustrative; see the linked guides and `src/db/` for
+exact signatures (`get_node_at_time`, `find_nodes_at_time`, `get_node_history`,
+`QueryBuilder::as_of` / `between`, `execute_cypher`).
 
 **Integration Methods:**
 1. Direct Rust API (for embedded use)
@@ -1359,9 +1411,9 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 
 ### Vector Search (SUPERRAG) - Remaining Phases
 
-**Status**: Phases 1-4 complete (storage, indexing, temporal, hybrid queries), Phase 5 pending
+**Status**: Phases 1-4 complete (storage, indexing, temporal, hybrid queries); Phase 5 partially landed — vector index persistence has shipped (`src/storage/index_persistence/vector.rs`; HNSW meta/mappings persistence — see [docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md)).
 
-**Phase 5 will add:**
+**Phase 5 remaining:**
 - Streaming temporal queries
 - Incremental index updates
 - Advanced optimization techniques
@@ -1377,7 +1429,7 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 ### Query Language
 
 - ✅ Cypher-like temporal extensions (implemented)
-- SQL:2011 temporal syntax (planned)
+- ✅ SQL:2011 temporal syntax (implemented, behind the `sql` feature — `parse_sql`, `FOR SYSTEM_TIME AS OF` / `FOR VALID_TIME AS OF`; see `src/sql/`)
 - ✅ Time-aware pattern matching (implemented)
 
 ### Advanced Features
