@@ -233,3 +233,124 @@ fn with_memory_budget_terminates_on_a_multi_row_query() {
     }
     assert!(saw_exhausted, "expected a memory_bytes termination");
 }
+
+// ---- 7. LLM self-correction loop (AC5) ----
+//
+// The issue's headline differentiator: an over-limit error must carry enough
+// structured information for a caller (an LLM) to tighten its query and succeed
+// within the same session, without human help. This test performs exactly that
+// loop programmatically: run an over-limit query, read the error's structured
+// `dimension`/`limit`/`consumed`, then re-issue a scoped-down query that fits —
+// and assert it succeeds. It also pins the retriability contract that tells a
+// caller *whether* to retry (timeout) vs *repair* (row/memory).
+
+/// Destructure a `ResourceExhausted` into its structured fields, as a caller
+/// inspecting the #3234 `details` payload would.
+fn resource_exhausted_parts(err: &Error) -> Option<(&'static str, u64, u64, bool)> {
+    match err {
+        Error::Query(QueryError::ResourceExhausted {
+            dimension,
+            limit,
+            consumed,
+            retriable,
+        }) => Some((dimension, *limit, *consumed, *retriable)),
+        _ => None,
+    }
+}
+
+#[test]
+fn over_limit_error_details_let_a_caller_self_correct_in_one_retry() {
+    let db = AletheiaDB::new().expect("db");
+    let hub = seed_star(&db, 10);
+
+    // Attempt 1: a query that over-runs a tight protective row cap.
+    let cap = 2usize;
+    let first = db
+        .query()
+        .start(hub)
+        .traverse("KNOWS")
+        .with_max_rows(cap)
+        .execute(&db)
+        .expect("execute should succeed lazily")
+        .collect::<Result<Vec<_>, _>>();
+
+    let err = first.expect_err("the drain must surface the row-cap breach");
+    let (dimension, limit, consumed, retriable) =
+        resource_exhausted_parts(&err).expect("must be a ResourceExhausted error");
+
+    // The caller reads the structured details to decide how to adapt.
+    assert_eq!(dimension, "result_rows");
+    assert_eq!(limit, cap as u64);
+    assert!(
+        consumed > limit,
+        "consumed ({consumed}) must exceed the limit ({limit}) to justify tightening"
+    );
+    // A result-cap breach is a caller fault to REPAIR, not retry blindly.
+    assert!(!retriable, "a row-cap breach must be non-retriable");
+
+    // Attempt 2 (the self-correction): bound the query's own output to the cap
+    // the error just disclosed, so it now fits. In an agent loop this is the
+    // "read details -> shrink scope" step; here `limit` came straight off the
+    // error payload.
+    let rows = db
+        .query()
+        .start(hub)
+        .traverse("KNOWS")
+        .limit(limit as usize)
+        .with_max_rows(cap)
+        .execute(&db)
+        .expect("execute should succeed lazily")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("the tightened query must succeed within the disclosed cap");
+    assert_eq!(
+        rows.len(),
+        cap,
+        "the corrected query returns exactly the capped number of rows"
+    );
+}
+
+#[test]
+fn timeout_error_is_retriable_but_resource_caps_are_not() {
+    let db = AletheiaDB::new().expect("db");
+    let hub = seed_star(&db, 50);
+
+    // A wall-clock timeout is retriable: re-running a read is safe, and a
+    // backed-off retry may land inside budget. Force one deterministically:
+    // `with_timeout` fixes the deadline at `execute()` time, and the result
+    // stream is lazy, so sleeping past the (1 ms) deadline before draining
+    // makes the guard's pre-pull check at row 0 fire regardless of row count.
+    let lazy = db
+        .query()
+        .start(hub)
+        .traverse("KNOWS")
+        .with_timeout(std::time::Duration::from_millis(1))
+        .execute(&db)
+        .expect("execute lazily");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let timeout_err = lazy
+        .collect::<Result<Vec<_>, _>>()
+        .expect_err("the deadline elapsed before the drain, so the guard must fire");
+    let (dimension, _, _, retriable) =
+        resource_exhausted_parts(&timeout_err).expect("ResourceExhausted");
+    assert_eq!(dimension, "wall_clock_timeout");
+    assert!(
+        retriable,
+        "a wall-clock timeout must be retriable: {timeout_err:?}"
+    );
+
+    // A memory-budget breach is deterministic: the same request reproduces the
+    // same oversized result, so it is non-retriable (repair, don't retry).
+    let mem_err = db
+        .query()
+        .start(hub)
+        .traverse("KNOWS")
+        .with_memory_budget(1)
+        .execute(&db)
+        .expect("execute lazily")
+        .collect::<Result<Vec<_>, _>>()
+        .expect_err("memory budget must trip");
+    let (dimension, _, _, retriable) =
+        resource_exhausted_parts(&mem_err).expect("ResourceExhausted");
+    assert_eq!(dimension, "memory_bytes");
+    assert!(!retriable, "a memory-budget breach must be non-retriable");
+}
