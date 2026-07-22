@@ -99,7 +99,7 @@ existing in-crate suites and only referenced here:
   the Internal-variant body shape is covered by the `src/http/error.rs`
   `IntoResponse` unit tests, not positively pinned over the wire.
 
-The 44-tool inventory + access classes are mirrored as a golden constant
+The 74-tool inventory + access classes are mirrored as a golden constant
 (`tool_inventory_golden_is_stable`, cross-crate mirror) and drift-checked live
 in-crate (`live_tool_inventory_matches_golden`); a porter must keep both in
 lockstep with the server. See `inventory.json` for the full per-route/per-tool

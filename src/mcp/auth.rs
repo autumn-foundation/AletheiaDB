@@ -108,6 +108,17 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     ("diff_edge_versions", AccessClass::Read),
     // Belief-revision audit (Issue #3362) — read-only.
     ("get_belief_revisions", AccessClass::Read),
+    // Temporal drift-alarm reads (Issue #3367) — read-only.
+    ("list_drift_monitors", AccessClass::Read),
+    ("query_drift_alarms", AccessClass::Read),
+    // Contradiction genealogy (Issue #3352) — read-only.
+    ("contradiction_genealogy", AccessClass::Read),
+    ("find_contradictions", AccessClass::Read),
+    // Counterfactual replay (Issue #3357) — read-only (view, real DB unmutated).
+    ("counterfactual_replay", AccessClass::Read),
+    // Trust propagation reads (Issue #3382) — read-only.
+    ("trust_breakdown", AccessClass::Read),
+    ("list_trust_policies", AccessClass::Read),
     ("hybrid_query", AccessClass::Read),
     ("query", AccessClass::Read),
     ("get_schema", AccessClass::Read),
@@ -143,6 +154,10 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     ("update_node_embedding", AccessClass::Write),
     // Namespace creation — a write (Issue #3349, PR3b).
     ("create_namespace", AccessClass::Write),
+    // Temporal drift-alarm writes (Issue #3367).
+    ("create_drift_monitor", AccessClass::Write),
+    ("delete_drift_monitor", AccessClass::Write),
+    ("resolve_drift_alarm", AccessClass::Write),
     // ---- Admin: GDPR crypto-shred designation & irreversible erasure
     // (Issue #3359, Slice 4b) — the first Admin-class MCP tools. Erasure
     // destroys per-subject key material, an irreversible privileged op.

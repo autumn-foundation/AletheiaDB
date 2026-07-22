@@ -115,6 +115,13 @@ endpoints over the shared persisted store (`{data_dir}/auth/keys.json`).
 | `get_edge_history` | read |
 | `diff_edge_versions` | read |
 | `get_belief_revisions` | read |
+| `list_drift_monitors` | read |
+| `query_drift_alarms` | read |
+| `contradiction_genealogy` | read |
+| `find_contradictions` | read |
+| `counterfactual_replay` | read |
+| `trust_breakdown` | read |
+| `list_trust_policies` | read |
 | `hybrid_query` | read |
 | `query` | read |
 | `get_schema` | read |
@@ -142,6 +149,9 @@ endpoints over the shared persisted store (`{data_dir}/auth/keys.json`).
 | `create_node_with_embedding` | write |
 | `update_node_embedding` | write |
 | `create_namespace` | write |
+| `create_drift_monitor` | write |
+| `delete_drift_monitor` | write |
+| `resolve_drift_alarm` | write |
 | `designate_subject` | admin |
 | `erase_subject` | admin |
 

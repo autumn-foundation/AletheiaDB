@@ -924,6 +924,105 @@ fn build_scenarios(fx: &Fixture) -> Vec<Scenario> {
                 move |_| json!({"entity_kind": "node", "id": id})
             }
         ),
+        // Deferred MCP-registry batch tools (Issue #3367 / #3352 / #3357 /
+        // #3382). The bench build lacks the `semantic-temporal` /
+        // `semantic-reasoning` features, so each returns a tolerated
+        // FAILED_PRECONDITION (isError) — present only to satisfy the runtime
+        // registry-completeness assertion (AC2), like `get_belief_revisions`.
+        s!(
+            "temporal__create_drift_monitor",
+            "create_drift_monitor",
+            "temporal",
+            "typical",
+            false,
+            move |_| json!({
+                "property_key": "embedding",
+                "metric": "cosine",
+                "threshold": 0.5,
+                "window_micros": 3_600_000_000_u64
+            })
+        ),
+        s!(
+            "temporal__list_drift_monitors",
+            "list_drift_monitors",
+            "temporal",
+            "typical",
+            false,
+            move |_| json!({})
+        ),
+        s!(
+            "temporal__delete_drift_monitor",
+            "delete_drift_monitor",
+            "temporal",
+            "typical",
+            false,
+            move |_| json!({"id": 1})
+        ),
+        s!(
+            "temporal__query_drift_alarms",
+            "query_drift_alarms",
+            "temporal",
+            "typical",
+            false,
+            move |_| json!({})
+        ),
+        s!(
+            "temporal__resolve_drift_alarm",
+            "resolve_drift_alarm",
+            "temporal",
+            "typical",
+            false,
+            {
+                let id = f.person_id;
+                move |_| json!({"alarm_id": id})
+            }
+        ),
+        s!(
+            "temporal__contradiction_genealogy",
+            "contradiction_genealogy",
+            "temporal",
+            "typical",
+            false,
+            {
+                let id = f.person_id;
+                move |_| json!({"entity_kind": "node", "id": id, "property": "name"})
+            }
+        ),
+        s!(
+            "temporal__find_contradictions",
+            "find_contradictions",
+            "temporal",
+            "typical",
+            false,
+            move |_| json!({})
+        ),
+        s!(
+            "temporal__counterfactual_replay",
+            "counterfactual_replay",
+            "temporal",
+            "typical",
+            false,
+            move |_| json!({"name": "cf-bench", "exclude_source": "poisoned-feed"})
+        ),
+        s!(
+            "reasoning__trust_breakdown",
+            "trust_breakdown",
+            "reasoning",
+            "typical",
+            false,
+            {
+                let id = f.person_id;
+                move |_| json!({"entity_kind": "node", "id": id, "version": 1})
+            }
+        ),
+        s!(
+            "reasoning__list_trust_policies",
+            "list_trust_policies",
+            "reasoning",
+            "typical",
+            false,
+            move |_| json!({})
+        ),
         // ---- Traversal depth sweep (AC3) ----
         s!(
             "traverse__depth1",

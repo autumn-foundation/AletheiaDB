@@ -1018,7 +1018,7 @@ fn forged_principal_on_destructive_op_is_ignored() {
 /// adding a Write/Metrics tool) must touch this literal list too.
 #[test]
 fn write_and_metrics_sets_match_hardcoded_snapshot() {
-    const EXPECTED_WRITE: [&str; 15] = [
+    const EXPECTED_WRITE: [&str; 18] = [
         "create_node",
         "update_node",
         "delete_node",
@@ -1035,6 +1035,10 @@ fn write_and_metrics_sets_match_hardcoded_snapshot() {
         "update_node_embedding",
         // Namespace creation (Issue #3349, PR3b).
         "create_namespace",
+        // Temporal drift-alarm writes (Issue #3367).
+        "create_drift_monitor",
+        "delete_drift_monitor",
+        "resolve_drift_alarm",
     ];
     const EXPECTED_METRICS: [&str; 1] = ["database_stats"];
     // GDPR crypto-shred designation & erasure (Issue #3359, Slice 4b) — the
@@ -1084,8 +1088,8 @@ fn write_and_metrics_sets_match_hardcoded_snapshot() {
     // Everything else must be Read (no fifth class sneaking in).
     assert_eq!(
         TOOL_ACCESS_CLASSES.len(),
-        actual_write.len() + actual_metrics.len() + actual_admin.len() + 46,
-        "Read tool count changed (expected 46); if a tool was added or \
+        actual_write.len() + actual_metrics.len() + actual_admin.len() + 53,
+        "Read tool count changed (expected 53); if a tool was added or \
          removed, re-verify its classification and update this count"
     );
 }
@@ -1109,27 +1113,27 @@ fn classification_uses_known_classes_only() {
 // 6. Live tool-inventory golden (drift detection for the external mirror)
 //
 // The external `tests/parity_mcp.rs::tool_inventory_golden_is_stable` test can
-// only validate a hardcoded 64-tool constant against itself, because the live
+// only validate a hardcoded 74-tool constant against itself, because the live
 // registry (`list_tools_for_test` / `TOOL_ACCESS_CLASSES`) is `pub(crate)` and
 // unreachable from an external test crate. This in-crate test closes that gap:
 // it derives the LIVE advertised `(tool_name, access_class)` set from the
-// registry and asserts it equals a hardcoded golden snapshot of the 64 pairs.
+// registry and asserts it equals a hardcoded golden snapshot of the 74 pairs.
 // A tool that is added, removed, renamed, or reclassified FAILS here — the
 // authoritative drift detector the external mirror points back to.
 // ============================================================================
 
 /// AC3 (drift): the LIVE advertised MCP tool inventory — every name paired
 /// with the `AccessClass` the registry assigns it — must equal this hardcoded
-/// golden set of exactly 64 pairs. Adding, dropping, renaming, or
+/// golden set of exactly 74 pairs. Adding, dropping, renaming, or
 /// reclassifying a tool changes the live set and fails this assertion; update
 /// the golden here AND the external mirror (`tests/parity_mcp.rs`) +
 /// `tests/parity/inventory.json` deliberately when that happens.
 #[test]
 fn live_tool_inventory_matches_golden() {
-    /// The 64 `(tool_name, access_class)` pairs the server is expected to
+    /// The 74 `(tool_name, access_class)` pairs the server is expected to
     /// advertise, derived from the current live `TOOL_ACCESS_CLASSES`.
-    const GOLDEN: [(&str, AccessClass); 64] = [
-        // Read (46)
+    const GOLDEN: [(&str, AccessClass); 74] = [
+        // Read (53)
         ("get_node", AccessClass::Read),
         ("list_nodes", AccessClass::Read),
         ("count_nodes", AccessClass::Read),
@@ -1168,6 +1172,17 @@ fn live_tool_inventory_matches_golden() {
         ("diff_edge_versions", AccessClass::Read),
         // Belief-revision audit (Issue #3362).
         ("get_belief_revisions", AccessClass::Read),
+        // Temporal drift-alarm reads (Issue #3367).
+        ("list_drift_monitors", AccessClass::Read),
+        ("query_drift_alarms", AccessClass::Read),
+        // Contradiction genealogy (Issue #3352).
+        ("contradiction_genealogy", AccessClass::Read),
+        ("find_contradictions", AccessClass::Read),
+        // Counterfactual replay (Issue #3357).
+        ("counterfactual_replay", AccessClass::Read),
+        // Trust propagation reads (Issue #3382).
+        ("trust_breakdown", AccessClass::Read),
+        ("list_trust_policies", AccessClass::Read),
         ("hybrid_query", AccessClass::Read),
         ("query", AccessClass::Read),
         ("get_schema", AccessClass::Read),
@@ -1182,7 +1197,7 @@ fn live_tool_inventory_matches_golden() {
         ("describe_namespace", AccessClass::Read),
         // Metrics (1)
         ("database_stats", AccessClass::Metrics),
-        // Write (15)
+        // Write (18)
         ("create_node", AccessClass::Write),
         ("update_node", AccessClass::Write),
         ("delete_node", AccessClass::Write),
@@ -1199,6 +1214,10 @@ fn live_tool_inventory_matches_golden() {
         ("update_node_embedding", AccessClass::Write),
         // Namespace creation (Issue #3349, PR3b).
         ("create_namespace", AccessClass::Write),
+        // Temporal drift-alarm writes (Issue #3367).
+        ("create_drift_monitor", AccessClass::Write),
+        ("delete_drift_monitor", AccessClass::Write),
+        ("resolve_drift_alarm", AccessClass::Write),
         // Admin (2) — GDPR crypto-shred designation & erasure (Issue #3359).
         ("designate_subject", AccessClass::Admin),
         ("erase_subject", AccessClass::Admin),
@@ -1209,7 +1228,7 @@ fn live_tool_inventory_matches_golden() {
         .iter()
         .map(|(name, class)| ((*name).to_string(), class.to_string()))
         .collect();
-    assert_eq!(golden.len(), 64, "golden must be 64 unique tool names");
+    assert_eq!(golden.len(), 74, "golden must be 74 unique tool names");
 
     // Live set derived from the advertised registry + classification table.
     let server = AletheiaMcpServer::new(db());
@@ -1227,7 +1246,7 @@ fn live_tool_inventory_matches_golden() {
     assert_eq!(
         live, golden,
         "the LIVE advertised MCP tool inventory drifted from the golden \
-         64-pair set — a tool was added, removed, renamed, or reclassified. \
+         74-pair set — a tool was added, removed, renamed, or reclassified. \
          Update GOLDEN here, tests/parity_mcp.rs::TOOL_INVENTORY, and \
          tests/parity/inventory.json deliberately."
     );

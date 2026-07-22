@@ -8079,6 +8079,898 @@ impl AletheiaMcpServer {
         }
     }
 
+    // ========================================================================
+    // Temporal drift-alarm management (Issue #3367 / PR #3728).
+    //
+    // Advertised unconditionally (Design A). Real handlers gate on
+    // `semantic-temporal`; a `#[cfg(not(...))]` twin returns a structured
+    // FAILED_PRECONDITION with `{tool, required_feature}`.
+    // ========================================================================
+
+    /// Structured FAILED_PRECONDITION for a `semantic-temporal`-gated tool when
+    /// the feature is not compiled into this build.
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn semantic_temporal_unavailable(&self, tool: &str) -> CallToolResult {
+        self.error_result(
+            McpError::new(
+                McpErrorCode::FailedPrecondition,
+                format!(
+                    "Tool '{tool}' requires the `semantic-temporal` feature, which is not \
+                     compiled into this build. Rebuild AletheiaDB with `--features \
+                     semantic-temporal` to enable it."
+                ),
+            )
+            .details(json!({ "tool": tool, "required_feature": "semantic-temporal" })),
+        )
+    }
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_create_drift_monitor(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_temporal_unavailable("create_drift_monitor")
+    }
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_list_drift_monitors(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_temporal_unavailable("list_drift_monitors")
+    }
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_delete_drift_monitor(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_temporal_unavailable("delete_drift_monitor")
+    }
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_query_drift_alarms(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_temporal_unavailable("query_drift_alarms")
+    }
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_resolve_drift_alarm(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_temporal_unavailable("resolve_drift_alarm")
+    }
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_contradiction_genealogy(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_temporal_unavailable("contradiction_genealogy")
+    }
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_find_contradictions(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_temporal_unavailable("find_contradictions")
+    }
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_counterfactual_replay(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_temporal_unavailable("counterfactual_replay")
+    }
+
+    /// Parse a `cosine` / `euclidean` / `angular` metric token.
+    #[cfg(feature = "semantic-temporal")]
+    fn parse_drift_metric(
+        &self,
+        s: &str,
+    ) -> std::result::Result<crate::index::vector::temporal::DriftMetric, String> {
+        use crate::index::vector::temporal::DriftMetric;
+        match s.trim().to_ascii_lowercase().as_str() {
+            "cosine" => Ok(DriftMetric::Cosine),
+            "euclidean" => Ok(DriftMetric::Euclidean),
+            "angular" => Ok(DriftMetric::Angular),
+            other => Err(format!(
+                "metric must be 'cosine', 'euclidean', or 'angular', got '{other}'"
+            )),
+        }
+    }
+
+    /// Lowercase token for a drift metric.
+    #[cfg(feature = "semantic-temporal")]
+    fn drift_metric_str(m: crate::index::vector::temporal::DriftMetric) -> &'static str {
+        use crate::index::vector::temporal::DriftMetric;
+        match m {
+            DriftMetric::Cosine => "cosine",
+            DriftMetric::Euclidean => "euclidean",
+            DriftMetric::Angular => "angular",
+        }
+    }
+
+    /// Serialize a [`DriftMonitor`] to its documented JSON shape.
+    #[cfg(feature = "semantic-temporal")]
+    fn drift_monitor_to_json(
+        &self,
+        m: &crate::experimental::temporal::drift_alarm::DriftMonitor,
+    ) -> serde_json::Value {
+        use crate::experimental::temporal::drift_alarm::EvalMode;
+        let spec = &m.spec;
+        let (mode, interval): (&str, serde_json::Value) = match spec.mode {
+            EvalMode::OnWrite => ("on_write", serde_json::Value::Null),
+            EvalMode::Scheduled { interval } => (
+                "scheduled",
+                json!(u64::try_from(interval.as_micros()).unwrap_or(u64::MAX)),
+            ),
+        };
+        json!({
+            "id": m.id.get(),
+            "created_at": Self::format_timestamp_rfc3339(m.created_at),
+            "spec": {
+                "property_key": spec.property_key,
+                "label": spec.label,
+                "entities": spec
+                    .entities
+                    .as_ref()
+                    .map(|v| v.iter().map(|n| n.as_u64()).collect::<Vec<_>>()),
+                "metric": Self::drift_metric_str(spec.metric),
+                "threshold": spec.threshold,
+                "window_micros": u64::try_from(spec.window.as_micros()).unwrap_or(u64::MAX),
+                "target": spec.target.as_str(),
+                "mode": mode,
+                "scheduled_interval_micros": interval,
+            },
+        })
+    }
+
+    /// Serialize a [`DriftAlarm`] to its documented JSON shape.
+    #[cfg(feature = "semantic-temporal")]
+    fn drift_alarm_to_json(
+        &self,
+        a: &crate::experimental::temporal::drift_alarm::DriftAlarm,
+    ) -> serde_json::Value {
+        json!({
+            "alarm_id": a.alarm_id.as_u64(),
+            "monitor_id": a.monitor_id.get(),
+            "entity": a.entity.map(|n| n.as_u64()),
+            "label": a.label,
+            "measured_distance": a.measured_distance,
+            "threshold": a.threshold,
+            "metric": Self::drift_metric_str(a.metric),
+            "compared_now": Self::format_timestamp_rfc3339(a.compared_now),
+            "compared_past": Self::format_timestamp_rfc3339(a.compared_past),
+            "from_version": a.from_version.map(|v| v.as_u64()),
+            "to_version": a.to_version.map(|v| v.as_u64()),
+            "resolved": a.resolved,
+            "fired_at": Self::format_timestamp_rfc3339(a.fired_at),
+        })
+    }
+
+    /// Handle `create_drift_monitor` (Write, Issue #3367).
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_create_drift_monitor(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::experimental::temporal::drift_alarm::{DriftMonitorSpec, DriftTarget, EvalMode};
+
+        let req: CreateDriftMonitorRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let metric = match self.parse_drift_metric(&req.metric) {
+            Ok(m) => m,
+            Err(msg) => return self.invalid_argument(&msg),
+        };
+        let target = match req.target.as_str() {
+            "per_entity" => DriftTarget::PerEntity,
+            "label_centroid" => DriftTarget::LabelCentroid,
+            other => {
+                return self.invalid_argument(&format!(
+                    "target must be 'per_entity' or 'label_centroid', got '{other}'"
+                ));
+            }
+        };
+        let mode = match req.mode.as_str() {
+            "on_write" => EvalMode::OnWrite,
+            "scheduled" => match req.scheduled_interval_micros {
+                Some(us) => EvalMode::Scheduled {
+                    interval: std::time::Duration::from_micros(us),
+                },
+                None => {
+                    return self
+                        .invalid_argument("mode 'scheduled' requires scheduled_interval_micros");
+                }
+            },
+            other => {
+                return self.invalid_argument(&format!(
+                    "mode must be 'on_write' or 'scheduled', got '{other}'"
+                ));
+            }
+        };
+        let entities = match req.entities {
+            Some(ids) => {
+                let mut out = Vec::with_capacity(ids.len());
+                for raw in ids {
+                    match NodeId::new(raw) {
+                        Ok(id) => out.push(id),
+                        Err(e) => return self.invalid_argument(&e.to_string()),
+                    }
+                }
+                Some(out)
+            }
+            None => None,
+        };
+
+        let spec = DriftMonitorSpec {
+            property_key: req.property_key,
+            label: req.label,
+            entities,
+            metric,
+            threshold: req.threshold,
+            window: std::time::Duration::from_micros(req.window_micros),
+            target,
+            mode,
+        };
+
+        match self.db.create_drift_monitor(spec) {
+            Ok(monitor) => self.success_json(self.drift_monitor_to_json(&monitor)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Handle `list_drift_monitors` (Read, Issue #3367).
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_list_drift_monitors(&self, args: serde_json::Value) -> CallToolResult {
+        let _req: ListDriftMonitorsRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        let monitors = self.db.list_drift_monitors();
+        let list: Vec<serde_json::Value> = monitors
+            .iter()
+            .map(|m| self.drift_monitor_to_json(m))
+            .collect();
+        self.success_json(json!({ "monitors": list, "count": monitors.len() }))
+    }
+
+    /// Handle `delete_drift_monitor` (Write, Issue #3367).
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_delete_drift_monitor(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::experimental::temporal::drift_alarm::MonitorId;
+        let req: DeleteDriftMonitorRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        match self.db.delete_drift_monitor(MonitorId::new(req.id)) {
+            Ok(()) => self.success_json(json!({ "deleted": true, "id": req.id })),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Handle `query_drift_alarms` (Read, Issue #3367).
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_query_drift_alarms(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::experimental::temporal::drift_alarm::{
+            DEFAULT_ALARM_QUERY_LIMIT, DriftAlarmFilter, MonitorId,
+        };
+        let req: QueryDriftAlarmsRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let time_range = match (&req.time_range_start, &req.time_range_end) {
+            (Some(s), Some(e)) => {
+                let start = match self.parse_timestamp(s) {
+                    Ok(t) => t,
+                    Err(m) => return self.invalid_argument(&m),
+                };
+                let end = match self.parse_timestamp(e) {
+                    Ok(t) => t,
+                    Err(m) => return self.invalid_argument(&m),
+                };
+                Some((start, end))
+            }
+            (None, None) => None,
+            _ => {
+                return self.invalid_argument(
+                    "time_range_start and time_range_end must be provided together",
+                );
+            }
+        };
+
+        let filter = DriftAlarmFilter {
+            monitor_id: req.monitor_id.map(MonitorId::new),
+            label: req.label,
+            resolved: req.resolved,
+            time_range,
+            limit: req.limit.unwrap_or(DEFAULT_ALARM_QUERY_LIMIT),
+        };
+
+        match self.db.query_drift_alarms(&filter) {
+            Ok(alarms) => {
+                let list: Vec<serde_json::Value> =
+                    alarms.iter().map(|a| self.drift_alarm_to_json(a)).collect();
+                self.success_json(json!({ "alarms": list, "count": alarms.len() }))
+            }
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Handle `resolve_drift_alarm` (Write, Issue #3367).
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_resolve_drift_alarm(&self, args: serde_json::Value) -> CallToolResult {
+        let req: ResolveDriftAlarmRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        let alarm_id = match NodeId::new(req.alarm_id) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        match self.db.resolve_drift_alarm(alarm_id) {
+            Ok(a) => self.success_json(self.drift_alarm_to_json(&a)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    // ========================================================================
+    // Contradiction genealogy (Issue #3352 / PR #3742).
+    // ========================================================================
+
+    /// Serialize a [`ClaimRef`] to `{entity_kind, id, version}`.
+    #[cfg(feature = "semantic-temporal")]
+    fn claim_ref_to_json(
+        r: &crate::experimental::temporal::contradiction_genealogy::ClaimRef,
+    ) -> serde_json::Value {
+        let (kind, id) = Self::lineage_entity_parts(r.entity);
+        json!({ "entity_kind": kind, "id": id, "version": r.version.as_u64() })
+    }
+
+    /// Serialize a bi-temporal coordinate.
+    #[cfg(feature = "semantic-temporal")]
+    fn bitemporal_coord_to_json(
+        c: crate::experimental::temporal::contradiction_genealogy::BiTemporalCoordinate,
+    ) -> serde_json::Value {
+        json!({
+            "transaction_time": Self::format_timestamp_rfc3339(c.transaction_time),
+            "valid_time": Self::format_timestamp_rfc3339(c.valid_time),
+        })
+    }
+
+    /// Serialize a competing claim.
+    #[cfg(feature = "semantic-temporal")]
+    fn competing_claim_to_json(
+        &self,
+        c: &crate::experimental::temporal::contradiction_genealogy::CompetingClaim,
+    ) -> serde_json::Value {
+        json!({
+            "claim": Self::claim_ref_to_json(&c.claim),
+            "value_display": c.value_display,
+            "valid_from": Self::format_timestamp_rfc3339(c.valid_from),
+            "valid_to": c.valid_to.map(Self::format_timestamp_rfc3339),
+            "transaction_from": Self::format_timestamp_rfc3339(c.transaction_from),
+            "transaction_to": c.transaction_to.map(Self::format_timestamp_rfc3339),
+            "is_current": c.is_current,
+            "provenance": c.provenance.as_ref().map(|p| json!({
+                "source": p.source,
+                "confidence": p.confidence,
+                "note": p.note,
+            })),
+            "origin": c.origin.as_str(),
+            "supersedes": c.supersedes.map(|v| v.as_u64()),
+            "superseded_by": c.superseded_by.map(|v| v.as_u64()),
+        })
+    }
+
+    /// Serialize a divergence pair.
+    #[cfg(feature = "semantic-temporal")]
+    fn divergence_pair_to_json(
+        p: &crate::experimental::temporal::contradiction_genealogy::DivergencePair,
+    ) -> serde_json::Value {
+        json!({
+            "earlier": Self::claim_ref_to_json(&p.earlier),
+            "later": Self::claim_ref_to_json(&p.later),
+            "kind": p.kind.as_str(),
+            "coordinate": Self::bitemporal_coord_to_json(p.coordinate),
+            "overlapping_valid_from": Self::format_timestamp_rfc3339(p.overlapping_valid_from),
+            "overlapping_valid_to": p.overlapping_valid_to.map(Self::format_timestamp_rfc3339),
+        })
+    }
+
+    /// Serialize a per-source summary.
+    #[cfg(feature = "semantic-temporal")]
+    fn source_summary_to_json(
+        s: &crate::experimental::temporal::contradiction_genealogy::SourceSummary,
+    ) -> serde_json::Value {
+        json!({
+            "source": s.source,
+            "backs_values": s.backs_values,
+            "claim_count": s.claim_count,
+            "min_confidence": s.min_confidence,
+            "max_confidence": s.max_confidence,
+            "latest_confidence": s.latest_confidence,
+            "most_recent_assertion": Self::format_timestamp_rfc3339(s.most_recent_assertion),
+        })
+    }
+
+    /// Serialize a full [`ContradictionGenealogy`].
+    #[cfg(feature = "semantic-temporal")]
+    fn contradiction_genealogy_to_json(
+        &self,
+        g: &crate::experimental::temporal::contradiction_genealogy::ContradictionGenealogy,
+    ) -> serde_json::Value {
+        json!({
+            "entity": g.entity.map(|e| {
+                let (kind, id) = Self::lineage_entity_parts(e);
+                json!({ "entity_kind": kind, "id": id })
+            }),
+            "property": g.property,
+            "claims": g
+                .claims
+                .iter()
+                .map(|c| self.competing_claim_to_json(c))
+                .collect::<Vec<_>>(),
+            "pairs": g.pairs.iter().map(Self::divergence_pair_to_json).collect::<Vec<_>>(),
+            "divergence_point": g.divergence_point.map(Self::bitemporal_coord_to_json),
+            "sources": g.sources.iter().map(Self::source_summary_to_json).collect::<Vec<_>>(),
+            "narrative": g.narrative,
+            "truncated": g.truncated,
+        })
+    }
+
+    /// Serialize a [`ContradictionScan`].
+    #[cfg(feature = "semantic-temporal")]
+    fn contradiction_scan_to_json(
+        &self,
+        scan: &crate::experimental::temporal::contradiction_genealogy::ContradictionScan,
+    ) -> serde_json::Value {
+        let contradictions: Vec<serde_json::Value> = scan
+            .contradictions
+            .iter()
+            .map(|s| {
+                let (kind, id) = Self::lineage_entity_parts(s.entity);
+                json!({
+                    "entity": { "entity_kind": kind, "id": id },
+                    "property": s.property,
+                    "claim_count": s.claim_count,
+                    "divergence_point": Self::bitemporal_coord_to_json(s.divergence_point),
+                    "classification": s.classification.as_str(),
+                })
+            })
+            .collect();
+        json!({
+            "contradictions": contradictions,
+            "scanned_entities": scan.scanned_entities,
+            "sampled": scan.sampled,
+            "has_more": scan.has_more,
+            "next_offset": scan.next_offset,
+        })
+    }
+
+    /// Parse an `entity_kind` + id into an [`EntityId`], returning a structured
+    /// `INVALID_ARGUMENT` `CallToolResult` on a bad kind or out-of-range id.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); this is
+    // the established pattern for the MCP arg-parsing helpers (see the
+    // `parse_lineage_ref` cluster above).
+    #[cfg(feature = "semantic-temporal")]
+    #[allow(clippy::result_large_err)]
+    fn parse_entity_kind_ct(
+        &self,
+        kind: &str,
+        id: u64,
+    ) -> std::result::Result<crate::core::id::EntityId, CallToolResult> {
+        use crate::core::id::EntityId;
+        match kind.trim().to_ascii_lowercase().as_str() {
+            "node" => NodeId::new(id)
+                .map(EntityId::Node)
+                .map_err(|e| self.invalid_argument(&e.to_string())),
+            "edge" => EdgeId::new(id)
+                .map(EntityId::Edge)
+                .map_err(|e| self.invalid_argument(&e.to_string())),
+            other => Err(self.invalid_argument(&format!(
+                "entity_kind must be 'node' or 'edge', got '{other}'"
+            ))),
+        }
+    }
+
+    /// Handle `contradiction_genealogy` (Read, Issue #3352).
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_contradiction_genealogy(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::experimental::temporal::contradiction_genealogy::{
+            ClaimRef, ContradictionTarget, GenealogyOptions,
+        };
+
+        let req: ContradictionGenealogyRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let target = if let Some(claims) = req.claims {
+            let mut refs = Vec::with_capacity(claims.len());
+            for c in &claims {
+                let entity = match self.parse_entity_kind_ct(&c.entity_kind, c.id) {
+                    Ok(e) => e,
+                    Err(r) => return r,
+                };
+                let version = match VersionId::new(c.version) {
+                    Ok(v) => v,
+                    Err(e) => return self.invalid_argument(&e.to_string()),
+                };
+                refs.push(ClaimRef { entity, version });
+            }
+            ContradictionTarget::Claims(refs)
+        } else {
+            let kind = match &req.entity_kind {
+                Some(s) => s.as_str(),
+                None => {
+                    return self.invalid_argument(
+                        "provide either 'claims' or 'entity_kind' + 'id' + 'property'",
+                    );
+                }
+            };
+            let id = match req.id {
+                Some(i) => i,
+                None => {
+                    return self
+                        .invalid_argument("'id' is required when targeting a single entity");
+                }
+            };
+            let property = match req.property {
+                Some(p) => p,
+                None => {
+                    return self
+                        .invalid_argument("'property' is required when targeting a single entity");
+                }
+            };
+            let entity = match self.parse_entity_kind_ct(kind, id) {
+                Ok(e) => e,
+                Err(r) => return r,
+            };
+            ContradictionTarget::EntityProperty { entity, property }
+        };
+
+        let mut options = GenealogyOptions::new();
+        if let Some(ts) = req.as_of_transaction_time {
+            let t = match self.parse_timestamp(&ts) {
+                Ok(t) => t,
+                Err(m) => return self.invalid_argument(&m),
+            };
+            options = options.with_as_of_transaction_time(t);
+        }
+        if let Some(m) = req.max_claims {
+            options = options.with_max_claims(m);
+        }
+        if let Some(m) = req.max_sources {
+            options = options.with_max_sources(m);
+        }
+
+        match self.db.contradiction_genealogy(target, &options) {
+            Ok(g) => self.success_json(self.contradiction_genealogy_to_json(&g)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Handle `find_contradictions` (Read, Issue #3352).
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_find_contradictions(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::experimental::temporal::contradiction_genealogy::{
+            ContradictionScope, DEFAULT_CONTRADICTION_LIMIT, EntityKindScope,
+        };
+
+        let req: FindContradictionsRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let entity_kind = match req.entity_kind.trim().to_ascii_lowercase().as_str() {
+            "nodes" => EntityKindScope::Nodes,
+            "edges" => EntityKindScope::Edges,
+            "both" => EntityKindScope::Both,
+            other => {
+                return self.invalid_argument(&format!(
+                    "entity_kind must be 'nodes', 'edges', or 'both', got '{other}'"
+                ));
+            }
+        };
+
+        let valid_time_window = match (&req.valid_time_start, &req.valid_time_end) {
+            (Some(s), Some(e)) => {
+                let start = match self.parse_timestamp(s) {
+                    Ok(t) => t,
+                    Err(m) => return self.invalid_argument(&m),
+                };
+                let end = match self.parse_timestamp(e) {
+                    Ok(t) => t,
+                    Err(m) => return self.invalid_argument(&m),
+                };
+                Some((start, end))
+            }
+            (None, None) => None,
+            _ => {
+                return self.invalid_argument(
+                    "valid_time_start and valid_time_end must be provided together",
+                );
+            }
+        };
+        let transaction_time_window = match (&req.transaction_time_start, &req.transaction_time_end)
+        {
+            (Some(s), Some(e)) => {
+                let start = match self.parse_timestamp(s) {
+                    Ok(t) => t,
+                    Err(m) => return self.invalid_argument(&m),
+                };
+                let end = match self.parse_timestamp(e) {
+                    Ok(t) => t,
+                    Err(m) => return self.invalid_argument(&m),
+                };
+                Some((start, end))
+            }
+            (None, None) => None,
+            _ => {
+                return self.invalid_argument(
+                    "transaction_time_start and transaction_time_end must be provided together",
+                );
+            }
+        };
+
+        let scope = ContradictionScope {
+            entity_kind,
+            label: req.label,
+            property: req.property,
+            valid_time_window,
+            transaction_time_window,
+            limit: req.limit.unwrap_or(DEFAULT_CONTRADICTION_LIMIT),
+            offset: req.offset.unwrap_or(0),
+        };
+
+        match self.db.find_contradictions(&scope) {
+            Ok(scan) => self.success_json(self.contradiction_scan_to_json(&scan)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    // ========================================================================
+    // Counterfactual replay (Issue #3357 / PR #3743).
+    // ========================================================================
+
+    /// Serialize a [`DivergenceReport`], stamping the AC8 `counterfactual: true`
+    /// per-response marker.
+    #[cfg(feature = "semantic-temporal")]
+    fn counterfactual_report_to_json(
+        &self,
+        r: &crate::experimental::temporal::counterfactual::DivergenceReport,
+    ) -> serde_json::Value {
+        let entity_json = |e: &crate::core::id::EntityId| {
+            let (kind, id) = Self::lineage_entity_parts(*e);
+            json!({ "entity_kind": kind, "id": id })
+        };
+        json!({
+            "counterfactual": true,
+            "excluded_writes": r.excluded_writes(),
+            "unattributed_writes_encountered": r.unattributed_writes_encountered(),
+            "orphaned_updates": r.orphaned_updates(),
+            "entities_changed": r.entities_changed(),
+            "entities_removed": r.entities_removed(),
+            "changed_entities": r.changed_entities().iter().map(entity_json).collect::<Vec<_>>(),
+            "removed_entities": r.removed_entities().iter().map(entity_json).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Handle `counterfactual_replay` (Read, Issue #3357).
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_counterfactual_replay(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::experimental::temporal::counterfactual::{
+            CounterfactualConfig, CounterfactualError, ExclusionPredicate,
+        };
+
+        let CounterfactualReplayRequest {
+            name,
+            exclude_source,
+            exclude_sources,
+            within_transaction_from,
+            within_transaction_to,
+            max_replay_versions,
+        } = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let mut predicate = match (exclude_source, exclude_sources) {
+            (Some(s), None) => ExclusionPredicate::source(s),
+            (None, Some(list)) => {
+                if list.is_empty() {
+                    return self.invalid_argument("exclude_sources must be a non-empty array");
+                }
+                ExclusionPredicate::sources(list)
+            }
+            (None, None) => {
+                return self.invalid_argument(
+                    "provide exactly one of 'exclude_source' or 'exclude_sources'",
+                );
+            }
+            (Some(_), Some(_)) => {
+                return self.invalid_argument(
+                    "provide only one of 'exclude_source' or 'exclude_sources', not both",
+                );
+            }
+        };
+
+        let from =
+            match self.parse_opt_timestamp("within_transaction_from", &within_transaction_from) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+        let to = match self.parse_opt_timestamp("within_transaction_to", &within_transaction_to) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        if from.is_some() || to.is_some() {
+            predicate = predicate.within_transaction_time(from, to);
+        }
+
+        let mut config = CounterfactualConfig::default();
+        if let Some(cap) = max_replay_versions {
+            config.max_replay_versions = cap;
+        }
+
+        match self.db.counterfactual_replay(name, predicate, config) {
+            Ok(view) => self.success_json(self.counterfactual_report_to_json(view.report())),
+            Err(CounterfactualError::HistoryTooLarge { versions, cap }) => self.error_result(
+                McpError::new(
+                    McpErrorCode::FailedPrecondition,
+                    format!(
+                        "recorded history too large for counterfactual replay: {versions} \
+                         versions exceeds cap of {cap}"
+                    ),
+                )
+                .details(json!({ "versions": versions, "cap": cap })),
+            ),
+            Err(CounterfactualError::NotFound(m)) => {
+                self.error_result(McpError::new(McpErrorCode::NotFound, m))
+            }
+            Err(CounterfactualError::Internal(m)) => {
+                self.error_result(McpError::new(McpErrorCode::Internal, m))
+            }
+        }
+    }
+
+    // ========================================================================
+    // Trust propagation (Issue #3382 / PR #3748). Gated on `semantic-reasoning`.
+    // ========================================================================
+
+    /// Structured FAILED_PRECONDITION for a `semantic-reasoning`-gated tool when
+    /// the feature is not compiled into this build.
+    #[cfg(not(feature = "semantic-reasoning"))]
+    fn semantic_reasoning_unavailable(&self, tool: &str) -> CallToolResult {
+        self.error_result(
+            McpError::new(
+                McpErrorCode::FailedPrecondition,
+                format!(
+                    "Tool '{tool}' requires the `semantic-reasoning` feature, which is not \
+                     compiled into this build. Rebuild AletheiaDB with `--features \
+                     semantic-reasoning` to enable it."
+                ),
+            )
+            .details(json!({ "tool": tool, "required_feature": "semantic-reasoning" })),
+        )
+    }
+
+    #[cfg(not(feature = "semantic-reasoning"))]
+    fn handle_trust_breakdown(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_reasoning_unavailable("trust_breakdown")
+    }
+
+    #[cfg(not(feature = "semantic-reasoning"))]
+    fn handle_list_trust_policies(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_reasoning_unavailable("list_trust_policies")
+    }
+
+    /// Serialize a [`TrustBreakdown`] tree recursively.
+    #[cfg(feature = "semantic-reasoning")]
+    fn trust_breakdown_to_json(
+        &self,
+        b: &crate::experimental::reasoning::trust_propagation::TrustBreakdown,
+    ) -> serde_json::Value {
+        let (kind, id) = Self::lineage_entity_parts(b.reference.entity);
+        json!({
+            "reference": {
+                "entity_kind": kind,
+                "id": id,
+                "version": b.reference.version.as_u64(),
+            },
+            "status": b.status.as_str(),
+            "confidence": b.confidence,
+            "source": b.source.as_str(),
+            "combinator": b.combinator.map(|c| c.as_str()),
+            "truncated": b.truncated,
+            "children": b
+                .children
+                .iter()
+                .map(|c| self.trust_breakdown_to_json(c))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    /// Whether any node in a breakdown tree was truncated.
+    #[cfg(feature = "semantic-reasoning")]
+    fn trust_breakdown_has_more(
+        b: &crate::experimental::reasoning::trust_propagation::TrustBreakdown,
+    ) -> bool {
+        b.truncated || b.children.iter().any(Self::trust_breakdown_has_more)
+    }
+
+    /// Handle `trust_breakdown` (Read, Issue #3382).
+    #[cfg(feature = "semantic-reasoning")]
+    fn handle_trust_breakdown(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::core::id::EntityId;
+        use crate::core::lineage::LineageRef;
+        use crate::experimental::reasoning::trust_propagation::TrustOptions;
+
+        let req: TrustBreakdownRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let entity = match req.entity_kind.trim().to_ascii_lowercase().as_str() {
+            "node" => match NodeId::new(req.id) {
+                Ok(id) => EntityId::Node(id),
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            },
+            "edge" => match EdgeId::new(req.id) {
+                Ok(id) => EntityId::Edge(id),
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            },
+            other => {
+                return self.invalid_argument(&format!(
+                    "entity_kind must be 'node' or 'edge', got '{other}'"
+                ));
+            }
+        };
+        let version = match VersionId::new(req.version) {
+            Ok(v) => v,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        let root = LineageRef::new(entity, version);
+
+        let mut options = TrustOptions::new();
+        if let Some(d) = req.max_depth {
+            options = options.with_max_depth(d);
+        }
+        if let Some(n) = req.limit {
+            options = options.with_max_nodes(n);
+        }
+        if let Some(ts) = req.as_of_transaction_time {
+            let t = match self.parse_timestamp(&ts) {
+                Ok(t) => t,
+                Err(m) => return self.invalid_argument(&m),
+            };
+            options = options.with_as_of(t);
+        }
+
+        let breakdown = self.db.trust_breakdown(root, &options);
+        let mut response = self.trust_breakdown_to_json(&breakdown);
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert(
+                "has_more".to_string(),
+                json!(Self::trust_breakdown_has_more(&breakdown)),
+            );
+        }
+        self.success_json(response)
+    }
+
+    /// Handle `list_trust_policies` (Read, Issue #3382).
+    #[cfg(feature = "semantic-reasoning")]
+    fn handle_list_trust_policies(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::experimental::reasoning::trust_propagation::{
+            MissingConfidencePolicy, TrustPolicy,
+        };
+
+        let _req: ListTrustPoliciesRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let view = self.db.list_trust_policies();
+        let missing_str = |m: MissingConfidencePolicy| match m {
+            MissingConfidencePolicy::Zero => "zero",
+            MissingConfidencePolicy::Neutral => "neutral",
+            MissingConfidencePolicy::Ignore => "ignore",
+        };
+        let policy_json = |p: &TrustPolicy| json!({ "combinator": p.combinator.as_str(), "missing": missing_str(p.missing) });
+        let labels: Vec<serde_json::Value> = view
+            .labels
+            .iter()
+            .map(|(label, policy)| json!({ "label": label, "policy": policy_json(policy) }))
+            .collect();
+        self.success_json(json!({
+            "default": policy_json(&view.default),
+            "labels": labels,
+        }))
+    }
+
     /// Handle the `audit_export` tool (Issue #3358).
     ///
     /// Produces a signed, offline-verifiable evidence artifact of an entity's
@@ -9832,6 +10724,23 @@ impl AletheiaMcpServer {
             // unconditionally (Design A); the handler body gates on the
             // `semantic-temporal` feature.
             "get_belief_revisions" => self.handle_get_belief_revisions(args),
+            // Temporal drift-alarm management (Issue #3367). Advertised and
+            // dispatched unconditionally (Design A); handler bodies gate on the
+            // `semantic-temporal` feature.
+            "create_drift_monitor" => self.handle_create_drift_monitor(args),
+            "list_drift_monitors" => self.handle_list_drift_monitors(args),
+            "delete_drift_monitor" => self.handle_delete_drift_monitor(args),
+            "query_drift_alarms" => self.handle_query_drift_alarms(args),
+            "resolve_drift_alarm" => self.handle_resolve_drift_alarm(args),
+            // Contradiction genealogy (Issue #3352).
+            "contradiction_genealogy" => self.handle_contradiction_genealogy(args),
+            "find_contradictions" => self.handle_find_contradictions(args),
+            // Counterfactual replay (Issue #3357).
+            "counterfactual_replay" => self.handle_counterfactual_replay(args),
+            // Trust propagation (Issue #3382). Handler bodies gate on the
+            // `semantic-reasoning` feature.
+            "trust_breakdown" => self.handle_trust_breakdown(args),
+            "list_trust_policies" => self.handle_list_trust_policies(args),
             "hybrid_query" => self.handle_hybrid_query(args),
             "query" => self.handle_query(args),
             "get_schema" => self.handle_get_schema(args),
@@ -10121,6 +11030,19 @@ pub(crate) const BUDGETABLE_READ_TOOLS: &[&str] = &[
     "find_nodes_at_time",
     "get_node_history",
     "get_schema",
+    // Belief-revision audit (Issue #3362) — array-returning read, enrolled in
+    // the token budget for parity with its `get_node_history` sibling (#3353).
+    "get_belief_revisions",
+    // Deferred MCP-registry batch reads (Issue #3367 / #3352 / #3382) — each has
+    // a budgetable sibling and can return large arrays/trees, so budgetable.
+    // `counterfactual_replay` is deliberately EXCLUDED (its AC8 `counterfactual:
+    // true` marker must never be stripped by budget-ladder truncation), and
+    // `list_trust_policies` is small/bounded (like `list_vector_indexes`).
+    "list_drift_monitors",
+    "query_drift_alarms",
+    "contradiction_genealogy",
+    "find_contradictions",
+    "trust_breakdown",
     // Semantic-search analysis tools (Issue #2907) — all read-only and
     // potentially large, so budgetable.
     "semantic_path",
@@ -10159,6 +11081,12 @@ pub(crate) const RESOURCE_LIMITED_READ_TOOLS: &[&str] = &[
     "get_node_at_time",
     "get_edge_at_time",
     "find_nodes_at_time",
+    // Contradiction analysis (Issue #3352): `find_contradictions` runs an
+    // O(entities * versions^2) scan and `contradiction_genealogy` an
+    // O(versions^2) reconstruction — both potentially slow, so they enroll for
+    // the uniform wall-clock-timeout + result-byte-cap coverage (Issue #3368).
+    "contradiction_genealogy",
+    "find_contradictions",
     // Semantic-search analysis tools (Issue #2907): read-only, potentially slow
     // graph+vector scans. They carry their own per-operation bounds, but enroll
     // here for the uniform wall-clock-timeout + result-byte-cap coverage every
@@ -10712,6 +11640,82 @@ fn tool_definitions() -> Vec<Tool> {
              property key or a transaction-time coordinate. Requires the \
              `semantic-temporal` feature.",
             make_input_schema::<GetBeliefRevisionsRequest>(),
+        ),
+        Tool::new(
+            "create_drift_monitor",
+            "Declare a semantic-drift monitor (Issue #3367): watch a vector \
+             property and fire a durable, queryable alarm when meaning drifts \
+             past a threshold over a time window (per-entity or label-centroid; \
+             on-write or scheduled). Requires the `semantic-temporal` feature.",
+            make_input_schema::<CreateDriftMonitorRequest>(),
+        ),
+        Tool::new(
+            "list_drift_monitors",
+            "List all declared drift monitors and their specs (Issue #3367). \
+             Requires the `semantic-temporal` feature.",
+            make_input_schema::<ListDriftMonitorsRequest>(),
+        ),
+        Tool::new(
+            "delete_drift_monitor",
+            "Delete a drift monitor by id, removing it from future evaluation \
+             (Issue #3367). Requires the `semantic-temporal` feature.",
+            make_input_schema::<DeleteDriftMonitorRequest>(),
+        ),
+        Tool::new(
+            "query_drift_alarms",
+            "Query fired drift alarms (Issue #3367), filtered by monitor, label, \
+             resolved state, and fire-time window. Each alarm carries the measured \
+             distance, threshold, metric, both compared coordinates, and version \
+             refs. Requires the `semantic-temporal` feature.",
+            make_input_schema::<QueryDriftAlarmsRequest>(),
+        ),
+        Tool::new(
+            "resolve_drift_alarm",
+            "Resolve a drift alarm (Issue #3367) as a recorded, AS OF-stable \
+             update (the alarm is never deleted). Requires the `semantic-temporal` \
+             feature.",
+            make_input_schema::<ResolveDriftAlarmRequest>(),
+        ),
+        Tool::new(
+            "contradiction_genealogy",
+            "Reconstruct how conflicting claims about one fact evolved across \
+             bi-temporal history and provenance (Issue #3352): every competing \
+             claim's valid/transaction intervals, provenance, supersession chain, \
+             the divergence point, per-source trust summary, and a prose narrative. \
+             Requires the `semantic-temporal` feature.",
+            make_input_schema::<ContradictionGenealogyRequest>(),
+        ),
+        Tool::new(
+            "find_contradictions",
+            "Scan the database (by label / property / time window, paginated) for \
+             entity+property pairs holding conflicting values over overlapping \
+             valid-time intervals (Issue #3352). Requires the `semantic-temporal` \
+             feature.",
+            make_input_schema::<FindContradictionsRequest>(),
+        ),
+        Tool::new(
+            "counterfactual_replay",
+            "Materialize a read-only counterfactual view that excludes a source's \
+             writes and report the blast radius — which entities changed or were \
+             removed (Issue #3357). The real database is never mutated; the \
+             response carries a `counterfactual: true` marker. Requires the \
+             `semantic-temporal` feature.",
+            make_input_schema::<CounterfactualReplayRequest>(),
+        ),
+        Tool::new(
+            "trust_breakdown",
+            "Explain a fact's computed confidence as a tree over its derivation \
+             lineage (Issue #3382): each node's version-pinned reference, status, \
+             computed confidence, classification, and combinator. Requires the \
+             `semantic-reasoning` feature.",
+            make_input_schema::<TrustBreakdownRequest>(),
+        ),
+        Tool::new(
+            "list_trust_policies",
+            "List the active trust-propagation policies (Issue #3382): the \
+             database default combinator + missing-confidence rule and per-label \
+             overrides. Requires the `semantic-reasoning` feature.",
+            make_input_schema::<ListTrustPoliciesRequest>(),
         ),
         Tool::new(
             "hybrid_query",

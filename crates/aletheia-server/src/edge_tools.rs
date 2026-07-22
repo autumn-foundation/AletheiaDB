@@ -112,6 +112,15 @@ pub const DISPATCH_ROUTED_READ_TOOLS: &[(&str, AccessClass)] = &[
     ("hybrid_query", AccessClass::Read),
     ("query", AccessClass::Read),
     ("get_schema", AccessClass::Read),
+    // Belief-revision audit (Issue #3362) — budgetable (#3353), dispatch-routed.
+    ("get_belief_revisions", AccessClass::Read),
+    // Deferred MCP-registry batch reads (Issue #3367 / #3352 / #3382) —
+    // budgetable (#3353), dispatch-routed through dispatch_tool_json.
+    ("list_drift_monitors", AccessClass::Read),
+    ("query_drift_alarms", AccessClass::Read),
+    ("contradiction_genealogy", AccessClass::Read),
+    ("find_contradictions", AccessClass::Read),
+    ("trust_breakdown", AccessClass::Read),
     // Semantic-search analysis tools (Issue #2907): budgetable read tools that
     // forward raw args through dispatch_tool_json under the slow-read guard.
     ("semantic_path", AccessClass::Read),
@@ -160,6 +169,15 @@ pub const ALL_DISPATCH_ROUTED: &[(&str, AccessClass)] = &[
     ("hybrid_query", AccessClass::Read),
     ("query", AccessClass::Read),
     ("get_schema", AccessClass::Read),
+    // Belief-revision audit (Issue #3362) — budgetable (#3353), dispatch-routed.
+    ("get_belief_revisions", AccessClass::Read),
+    // Deferred MCP-registry batch reads (Issue #3367 / #3352 / #3382) —
+    // budgetable (#3353), dispatch-routed through dispatch_tool_json.
+    ("list_drift_monitors", AccessClass::Read),
+    ("query_drift_alarms", AccessClass::Read),
+    ("contradiction_genealogy", AccessClass::Read),
+    ("find_contradictions", AccessClass::Read),
+    ("trust_breakdown", AccessClass::Read),
     // Semantic-search analysis tools (Issue #2907) — budgetable, dispatch-routed.
     ("semantic_path", AccessClass::Read),
     ("concept_analogy", AccessClass::Read),
