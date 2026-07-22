@@ -11922,10 +11922,24 @@ mod database_stats_tests {
             keys(&value["resource_limits"]),
             vec![
                 "byte_cap_terminations",
+                // Issue #3368 engine lane: nested executor-guard termination
+                // counters (a distinct family from the top-level MCP-surface
+                // counters), always present.
+                "engine",
                 // Issue #3368 memory-budget dimension (default-off): additive
                 // counter, present even when the budget is never engaged.
                 "memory_terminations",
                 "override_rejections",
+                "timeout_terminations",
+            ]
+        );
+        // The nested engine block carries the four executor-guard dimensions.
+        assert_eq!(
+            keys(&value["resource_limits"]["engine"]),
+            vec![
+                "memory_terminations",
+                "override_rejections",
+                "row_cap_terminations",
                 "timeout_terminations",
             ]
         );
