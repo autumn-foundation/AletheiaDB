@@ -1569,19 +1569,27 @@ fn test_retract_node_no_concurrent_edge_commits_ok() {
 #[test]
 fn test_create_edge_write_skew_concurrent_delete_aborts() {
     // Issue #3416 Pt1 MIRROR interleaving (ordering ii). The edge creator
-    // validates endpoints BEFORE the WAL/apply phase; if a concurrent tx
-    // deletes an endpoint in the window between validate() and apply, the
-    // apply-time endpoint re-check must ABORT the edge tx so no dangling edge
-    // is committed. Driven deterministically (single thread) via the
-    // #[cfg(test)] pre-apply hook, which fires after the edge tx has validated
-    // but before it acquires historical.write().
+    // validates endpoints at `validate()` (before the commit-clock section); if a
+    // concurrent tx deletes an endpoint in the window between `validate()` and the
+    // commit-time endpoint re-check, that re-check must ABORT the edge tx so no
+    // dangling edge is committed.
+    //
+    // Post-#3413 the re-check runs BEFORE the WAL append, under `current_timestamp`
+    // (held across apply). The deterministic seam therefore moved from the old
+    // post-WAL pre-apply hook to the pre-commit-clock hook, which fires AFTER
+    // `validate()` but BEFORE the victim acquires `current_timestamp` — so a
+    // concurrent delete can commit (the victim holds no commit-clock lock yet) and
+    // the victim then aborts at its own pre-WAL re-check. Because the abort is now
+    // pre-WAL the rejected edge also leaves NO durable frame (the #3413
+    // abort-framing fix); the crash-recovery proof is in
+    // `tests/wal_abort_framing.rs`.
     use crate::api::transaction::write::commit_test_hooks;
     use std::cell::Cell;
     use std::sync::Arc;
 
     thread_local! {
-        // Only the edge tx's own commit thread arms this; every other commit
-        // in the process (including tx A's nested commit below, and unrelated
+        // Only the edge tx's own commit thread arms this; every other commit in
+        // the process (including tx A's nested commit below, and unrelated
         // concurrent tests) sees the hook as a no-op.
         static ARMED: Cell<bool> = const { Cell::new(false) };
     }
@@ -1602,12 +1610,13 @@ fn test_create_edge_write_skew_concurrent_delete_aborts() {
         .create_edge(x, victim, "POINTS_AT", PropertyMapBuilder::new().build())
         .unwrap();
 
-    // Pre-apply hook: exactly once, on the armed (edge-tx) thread, commit the
-    // concurrent tx A that deletes victim. B does not hold historical yet, so A
-    // acquires the guard and commits cleanly (victim has 0 committed edges).
+    // Pre-commit-clock hook: exactly once, on the armed (edge-tx) thread, commit
+    // the concurrent tx A that deletes victim. B has passed validate() but not yet
+    // acquired `current_timestamp`, so A acquires the clock and commits cleanly
+    // (victim has 0 committed edges); B then aborts at its own re-check.
     {
         let db_hook = Arc::clone(&db);
-        commit_test_hooks::set_pre_apply_hook(Arc::new(move || {
+        commit_test_hooks::set_pre_commit_clock_hook(Arc::new(move || {
             let armed = ARMED.with(|a| a.replace(false));
             if !armed {
                 return; // no-op for A's own commit and any other tx/thread
@@ -1621,7 +1630,7 @@ fn test_create_edge_write_skew_concurrent_delete_aborts() {
     ARMED.with(|a| a.set(true));
     let commit_result = tx_b.commit();
     ARMED.with(|a| a.set(false));
-    commit_test_hooks::clear_pre_apply_hook();
+    commit_test_hooks::clear_pre_commit_clock_hook();
 
     // The edge tx applied SECOND and must abort — no dangling edge.
     assert!(

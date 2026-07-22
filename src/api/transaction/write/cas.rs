@@ -9,12 +9,12 @@
 //! `UpdateNode`/`UpdateEdge` op carrying the full replacement property map, so
 //! there is **zero WAL on-disk format change**. If it fails, the whole
 //! transaction aborts with [`TransactionError::CasMismatch`] and applies nothing
-//! to in-memory state. A pure-CAS mismatch is rejected pre-WAL by the fast-path
-//! (see below), so the common single-threaded case writes nothing durable
-//! either; a mismatch that only manifests under the commit guard (a concurrent
-//! pure-CAS race, or any lease claim) still leaves a durable frame that would
-//! replay on crash absent WAL abort framing (#3413) — the same accepted caveat
-//! as the #3416 sibling write-skew checks.
+//! to in-memory state. A pure-CAS mismatch is also rejected pre-WAL by the
+//! fast-path (see below). Since Issue #3413 (WAL abort framing) the authoritative
+//! re-check ALSO runs before the WAL append (under `current_timestamp`), so a
+//! rejection of ANY kind — a concurrent pure-CAS race, or any lease/fenced
+//! claim — appends **no WAL frame** and can never be re-applied by crash
+//! recovery. The former "durable phantom frame on crash" caveat is closed.
 //!
 //! CAS uses **full-replace** semantics for the property map (like the #3549
 //! replace API, not the PATCH merge of `update_node`): a CAS is a conditional
@@ -25,12 +25,14 @@
 //!
 //! The **authoritative** precondition check lives in
 //! [`detect_cas_precondition_violations`], invoked from
-//! [`apply::apply_changes`](super::apply::apply_changes) **under the
-//! already-held `historical.write()` commit-serialization guard** — the same
-//! place the #3416 delete-orphan / dangling-endpoint write-skew re-checks run.
-//! Only re-reading the committed head **while holding the guard that serializes
-//! commits** makes the second of two concurrent claimants observe the first's
-//! new version and abort. Its abort is a non-retriable `CasMismatch` rather than
+//! `commit_with_timestamp_inner` **under the held `current_timestamp` lock,
+//! BEFORE the WAL append** (Issue #3413) — the same place the #3416
+//! delete-orphan / dangling-endpoint write-skew re-checks run. `current_timestamp`
+//! is held across apply, so it serializes commits end-to-end: re-reading the
+//! committed head under it makes the second of two concurrent claimants observe
+//! the first's new version and abort, and because the check precedes the WAL
+//! append a rejection leaves no durable frame. Its abort is a non-retriable
+//! `CasMismatch` rather than
 //! a retriable `SerializationFailure` (a lost claim must not be blindly retried),
 //! which is why CAS-target entities are **excluded** from the pre-lock
 //! snapshot-isolation conflict check.
@@ -49,11 +51,12 @@
 //!
 //! # Lock order
 //!
-//! The re-check reads the committed head from `historical` (already held) and,
-//! for a lease claim, the entity's committed properties from current storage (a
-//! leaf, order class 6/7) — never acquiring an earlier primitive while holding a
-//! later one, and adding no new lock site. Lease expiry is judged against the
-//! **commit HLC timestamp** taken under `current_timestamp`, not the tx snapshot.
+//! The re-check reads the committed head and (for a lease claim) the entity's
+//! committed properties from current storage (a leaf) while holding only
+//! `current_timestamp` (order class 1) — never acquiring an earlier primitive
+//! while holding a later one, and adding no new lock site. Lease expiry is judged
+//! against the **commit HLC timestamp** taken under `current_timestamp`, not the
+//! tx snapshot.
 
 use super::WriteTransaction;
 use super::validation;
@@ -447,11 +450,12 @@ impl WriteTransaction {
 }
 
 /// Commit-time re-check that every buffered CAS precondition still holds, run
-/// under the exclusive `historical.write()` guard (Issue #3577).
+/// under the held `current_timestamp` lock BEFORE the WAL append (Issue #3577;
+/// moved ahead of the WAL append by Issue #3413 so a rejection leaves no frame).
 ///
 /// For each precondition, the entity's committed head version is re-read from
-/// current storage (authoritative because the `historical.write()` guard
-/// serializes commits, so committed current state reflects every
+/// current storage (authoritative because `current_timestamp` is held across
+/// apply and so serializes commits, so committed current state reflects every
 /// earlier-committed transaction; `current_version` there tracks the historical
 /// head). The precondition passes iff:
 ///
@@ -461,16 +465,16 @@ impl WriteTransaction {
 ///
 /// On the first violation the whole transaction aborts with
 /// [`TransactionError::CasMismatch`] (MCP `FAILED_PRECONDITION`, non-retriable)
-/// and no buffered op is applied (this runs before any op is applied, mirroring
-/// the #3416 under-guard checks).
+/// and no buffered op is applied — and, because this runs before the WAL append,
+/// no durable frame is written either (mirroring the #3416 pre-WAL checks).
 ///
 /// # Locking
 ///
-/// Called while `historical.write()` (order class 3) is held. Reads the
-/// committed head and (for a lease branch) the entity's committed properties
-/// from current storage (a leaf, class 6/7) — the same leaf the #3416 under-guard
-/// checks read — never calling back into `historical`/`wal`/`current_timestamp`,
-/// adding no new lock site, and introducing no lock-order inversion.
+/// Called while `current_timestamp` (order class 1) is held. Reads the committed
+/// head and (for a lease branch) the entity's committed properties from current
+/// storage (a leaf) — the same leaf the #3416 pre-WAL checks read — never
+/// acquiring an earlier primitive while holding a later one, adding no new lock
+/// site, and introducing no lock-order inversion.
 pub(crate) fn detect_cas_precondition_violations(
     tx: &WriteTransaction,
     commit_timestamp: Timestamp,
