@@ -6,8 +6,29 @@
 
 use std::time::Duration;
 
+use aletheiadb::config::WalConfigBuilder;
 use aletheiadb::query::limits::EngineQueryLimitsConfig;
 use aletheiadb::{AletheiaDB, AletheiaDBConfig, Error, NodeId, PropertyMapBuilder, QueryError};
+
+/// Build a DB with the given engine query-limits on an **isolated per-test WAL
+/// directory**. The default unified-config `wal_dir` is the CWD-relative
+/// `aletheiadb/wal`, which every `with_unified_config` test in a binary would
+/// share — colliding (WAL corruption: "Unknown WAL operation type") under a
+/// parallel test runner such as the coverage job. Each test therefore gets its
+/// own tempdir. The returned `TempDir` must be kept alive for the DB's lifetime.
+fn db_with_query_limits(limits: EngineQueryLimitsConfig) -> (AletheiaDB, tempfile::TempDir) {
+    let wal_home = tempfile::tempdir().expect("create tempdir");
+    let config = AletheiaDBConfig::builder()
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(wal_home.path().join("wal"))
+                .build(),
+        )
+        .query_limits(limits)
+        .build();
+    let db = AletheiaDB::with_unified_config(config).expect("create db from unified config");
+    (db, wal_home)
+}
 
 /// Build a small star graph: one hub node with `n` outgoing `KNOWS` edges to
 /// freshly created leaf nodes. Returns the hub id.
@@ -88,10 +109,7 @@ fn with_timeout_zero_is_unlimited_when_no_ceiling_is_configured() {
     // Disabled engine limits => every dimension unlimited, overrides ignored,
     // so a zero-timeout override cannot be rejected as "requested unlimited
     // under a finite ceiling".
-    let config = AletheiaDBConfig::builder()
-        .query_limits(EngineQueryLimitsConfig::disabled())
-        .build();
-    let db = AletheiaDB::with_unified_config(config).expect("db");
+    let (db, _wal) = db_with_query_limits(EngineQueryLimitsConfig::disabled());
     let hub = seed_star(&db, 3);
 
     let rows: Vec<_> = db
@@ -129,13 +147,10 @@ fn with_timeout_small_but_sufficient_succeeds_and_returns_rows() {
 
 #[test]
 fn override_above_operator_ceiling_is_rejected_and_counted() {
-    let config = AletheiaDBConfig::builder()
-        .query_limits(EngineQueryLimitsConfig {
-            max_result_rows: 10,
-            ..EngineQueryLimitsConfig::default()
-        })
-        .build();
-    let db = AletheiaDB::with_unified_config(config).expect("db");
+    let (db, _wal) = db_with_query_limits(EngineQueryLimitsConfig {
+        max_result_rows: 10,
+        ..EngineQueryLimitsConfig::default()
+    });
     let hub = seed_star(&db, 3);
 
     let before = db.query_limit_counters().override_rejected;
