@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use crate::core::error::Result;
 use crate::core::namespace::{NamespaceScope, ResolvedScope};
+use crate::query::limits::{LimitCounters, QueryResourceLimits};
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 
@@ -21,6 +22,7 @@ use super::planner::physical::{PhysicalOp, PhysicalPlan};
 pub use iterators::EdgeScanIterator;
 #[doc(hidden)]
 pub use iterators::NodeScanIterator;
+pub use iterators::ResourceGuardIterator;
 pub use iterators::ResultIterator;
 #[doc(hidden)]
 pub use iterators::ScanStrategy;
@@ -44,6 +46,7 @@ pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 ///     max_buffer_size: 5000,
 ///     parallel: true,
 ///     timeout_ms: 1000,
+///     ..ExecutionConfig::default()
 /// };
 /// assert_eq!(config.max_buffer_size, 5000);
 /// ```
@@ -57,7 +60,22 @@ pub struct ExecutionConfig {
     pub parallel: bool,
     /// Execution timeout in milliseconds.
     /// 0 means no timeout. Default is 0.
+    ///
+    /// This is a *legacy*, unenforced field kept for backward compatibility;
+    /// it is not read by [`QueryExecutor::execute`]. The enforced per-query
+    /// wall-clock budget lives on [`limits`](Self::limits) (Issue #3368
+    /// engine lane).
     pub timeout_ms: u64,
+    /// Resolved per-query resource limits enforced by a
+    /// [`ResourceGuardIterator`](super::executor::ResourceGuardIterator)
+    /// wrapped around the result stream (Issue #3368 engine lane). Defaults
+    /// to [`QueryResourceLimits::unlimited`], in which case `execute` skips
+    /// installing the guard entirely (zero-cost fast path).
+    pub limits: QueryResourceLimits,
+    /// Optional shared counters incremented when [`limits`](Self::limits)
+    /// terminates a query (Issue #3368 engine lane observability). `None`
+    /// disables recording.
+    pub counters: Option<Arc<LimitCounters>>,
 }
 
 impl Default for ExecutionConfig {
@@ -66,6 +84,8 @@ impl Default for ExecutionConfig {
             max_buffer_size: 10_000,
             parallel: false,
             timeout_ms: 0,
+            limits: QueryResourceLimits::unlimited(),
+            counters: None,
         }
     }
 }
@@ -122,8 +142,11 @@ pub struct QueryExecutor {
     current: Arc<CurrentStorage>,
     /// Reference to historical storage
     historical: Arc<RwLock<HistoricalStorage>>,
-    /// Execution configuration (used for timeout/parallelism in future)
-    _config: ExecutionConfig,
+    /// Execution configuration, including the resolved per-query resource
+    /// limits (Issue #3368 engine lane) consulted by [`Self::execute`] /
+    /// [`Self::execute_profiled`] to decide whether to install a
+    /// [`ResourceGuardIterator`](iterators::ResourceGuardIterator).
+    config: ExecutionConfig,
     /// Optional namespace scope (Issue #3349, PR2). When set, the executor
     /// filters produced entities to those whose namespace ∈ scope and threads
     /// the boundary into graph traversal. `Arc` so it can be cheaply shared into
@@ -143,7 +166,7 @@ impl QueryExecutor {
         QueryExecutor {
             current,
             historical,
-            _config: ExecutionConfig::default(),
+            config: ExecutionConfig::default(),
             scope: None,
             resolved_scope: ResolvedScope::All,
         }
@@ -158,7 +181,7 @@ impl QueryExecutor {
         QueryExecutor {
             current,
             historical,
-            _config: config,
+            config,
             scope: None,
             resolved_scope: ResolvedScope::All,
         }
@@ -240,11 +263,23 @@ impl QueryExecutor {
         // LIMIT/SKIP, ORDER BY, aggregation, COUNT -- already sees only in-scope
         // rows. No outermost post-filter is applied here.
         // Wrap with provenance filter to conditionally strip metadata
-        let filtered = Box::new(iterators::ProvenanceFilterIterator::new(
+        let filtered: Box<dyn ResultIterator> = Box::new(iterators::ProvenanceFilterIterator::new(
             iterator,
             plan.include_provenance,
         ));
-        Ok(QueryResults::new(filtered))
+        // Per-query resource limits (Issue #3368 engine lane). The unlimited
+        // case (the default, and the overwhelming common case) is a pure
+        // pass-through: no guard is allocated and no per-row check is paid.
+        if self.config.limits.is_unlimited() {
+            Ok(QueryResults::new(filtered))
+        } else {
+            let guarded = Box::new(iterators::ResourceGuardIterator::new(
+                filtered,
+                self.config.limits.clone(),
+                self.config.counters.clone(),
+            ));
+            Ok(QueryResults::new(guarded))
+        }
     }
 
     /// Execute a physical plan with per-operator profiling instrumentation
@@ -268,14 +303,24 @@ impl QueryExecutor {
             self.build_op(&plan.root, &mut registry, 0, bind_edge)?
         };
         // Scope is applied at the source operators (see `maybe_scope_source`).
-        let filtered = Box::new(iterators::ProvenanceFilterIterator::new(
+        let filtered: Box<dyn ResultIterator> = Box::new(iterators::ProvenanceFilterIterator::new(
             iterator,
             plan.include_provenance,
         ));
         // `registry` was seeded `Some` above and is never taken, so the unwrap
         // is infallible.
         let registry = registry.unwrap_or_default();
-        Ok((QueryResults::new(filtered), registry))
+        // Per-query resource limits (Issue #3368 engine lane); see `execute`.
+        if self.config.limits.is_unlimited() {
+            Ok((QueryResults::new(filtered), registry))
+        } else {
+            let guarded = Box::new(iterators::ResourceGuardIterator::new(
+                filtered,
+                self.config.limits.clone(),
+                self.config.counters.clone(),
+            ));
+            Ok((QueryResults::new(guarded), registry))
+        }
     }
 
     /// Candidate node ids for a temporal label scan (`AS OF` / `BETWEEN`).
@@ -1082,6 +1127,7 @@ mod tests {
             max_buffer_size: 1000,
             parallel: true,
             timeout_ms: 5000,
+            ..ExecutionConfig::default()
         };
 
         assert_eq!(config.max_buffer_size, 1000);
@@ -1095,7 +1141,7 @@ mod tests {
         let executor = QueryExecutor::new(current, historical);
 
         // Just verify it was created
-        assert_eq!(executor._config.max_buffer_size, 10_000);
+        assert_eq!(executor.config.max_buffer_size, 10_000);
     }
 
     #[test]
@@ -1105,11 +1151,12 @@ mod tests {
             max_buffer_size: 500,
             parallel: true,
             timeout_ms: 1000,
+            ..ExecutionConfig::default()
         };
         let executor = QueryExecutor::with_config(current, historical, config);
 
-        assert_eq!(executor._config.max_buffer_size, 500);
-        assert!(executor._config.parallel);
+        assert_eq!(executor.config.max_buffer_size, 500);
+        assert!(executor.config.parallel);
     }
 
     #[test]
@@ -1154,6 +1201,129 @@ mod tests {
         let rows: Vec<_> = results.collect_all().expect("Collection failed");
 
         assert_eq!(rows.len(), 2); // Alice and Bob
+    }
+
+    // ==================== Per-query resource limits (Issue #3368 engine
+    // lane) wiring: ExecutionConfig.limits -> QueryExecutor::execute ====
+
+    fn scan_person_plan() -> PhysicalPlan {
+        PhysicalPlan {
+            root: PhysicalOp::NodeScan {
+                label: Some("Person".to_string()),
+                estimated_rows: 100,
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        }
+    }
+
+    #[test]
+    fn execute_with_unlimited_config_is_unaffected() {
+        let (current, historical, _alice, _bob) = create_test_storage_with_data();
+        let executor = QueryExecutor::new(current, historical);
+
+        let results = executor
+            .execute(scan_person_plan())
+            .expect("execution failed");
+        let rows = results.collect_all().expect("collection failed");
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn execute_installs_row_guard_when_limits_configured() {
+        let (current, historical, _alice, _bob) = create_test_storage_with_data();
+        let limits = crate::query::limits::QueryResourceLimits {
+            max_rows: Some(1),
+            ..crate::query::limits::QueryResourceLimits::unlimited()
+        };
+        let config = ExecutionConfig {
+            limits,
+            ..ExecutionConfig::default()
+        };
+        let executor = QueryExecutor::with_config(current, historical, config);
+
+        let results = executor
+            .execute(scan_person_plan())
+            .expect("execution failed");
+        let err = results
+            .collect_all()
+            .expect_err("row cap of 1 over 2 matching nodes must fail");
+        match err {
+            crate::core::error::Error::Query(
+                crate::core::error::QueryError::ResourceExhausted {
+                    dimension,
+                    retriable,
+                    ..
+                },
+            ) => {
+                assert_eq!(dimension, "result_rows");
+                assert!(!retriable);
+            }
+            other => panic!("expected ResourceExhausted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_installs_timeout_guard_when_deadline_already_passed() {
+        let (current, historical, _alice, _bob) = create_test_storage_with_data();
+        let limits = crate::query::limits::QueryResourceLimits {
+            deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+            ..crate::query::limits::QueryResourceLimits::unlimited()
+        };
+        let config = ExecutionConfig {
+            limits,
+            ..ExecutionConfig::default()
+        };
+        let executor = QueryExecutor::with_config(current, historical, config);
+
+        let results = executor
+            .execute(scan_person_plan())
+            .expect("execution failed");
+        let err = results
+            .collect_all()
+            .expect_err("a deadline already in the past must fail immediately");
+        match err {
+            crate::core::error::Error::Query(
+                crate::core::error::QueryError::ResourceExhausted {
+                    dimension,
+                    retriable,
+                    ..
+                },
+            ) => {
+                assert_eq!(dimension, "wall_clock_timeout");
+                assert!(retriable);
+            }
+            other => panic!("expected ResourceExhausted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_profiled_also_honors_limits() {
+        let (current, historical, _alice, _bob) = create_test_storage_with_data();
+        let limits = crate::query::limits::QueryResourceLimits {
+            max_rows: Some(1),
+            ..crate::query::limits::QueryResourceLimits::unlimited()
+        };
+        let config = ExecutionConfig {
+            limits,
+            ..ExecutionConfig::default()
+        };
+        let executor = QueryExecutor::with_config(current, historical, config);
+
+        let (results, _registry) = executor
+            .execute_profiled(&scan_person_plan())
+            .expect("execution failed");
+        let err = results
+            .collect_all()
+            .expect_err("row cap of 1 over 2 matching nodes must fail");
+        assert!(matches!(
+            err,
+            crate::core::error::Error::Query(
+                crate::core::error::QueryError::ResourceExhausted { .. }
+            )
+        ));
     }
 
     #[test]

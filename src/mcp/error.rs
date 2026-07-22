@@ -521,6 +521,13 @@ fn classify_query_error(e: &QueryError) -> (McpErrorCode, bool) {
         QueryError::Timeout { .. } => (McpErrorCode::Unavailable, true),
         QueryError::IndexNotFound { .. } => (McpErrorCode::FailedPrecondition, false),
         QueryError::ExecutionError { .. } => (McpErrorCode::Internal, false),
+        // Engine-lane per-query resource limit (Issue #3368 engine lane,
+        // src/query/limits.rs). `retriable` is already dimension-correct
+        // (true only for the wall-clock timeout) so it is threaded straight
+        // through rather than re-derived.
+        QueryError::ResourceExhausted { retriable, .. } => {
+            (McpErrorCode::ResourceExhausted, *retriable)
+        }
     }
 }
 

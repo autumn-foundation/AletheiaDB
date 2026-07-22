@@ -93,6 +93,8 @@ pub mod executor;
 pub mod hybrid;
 pub mod ir;
 pub mod lexer;
+/// Engine-lane per-query resource limits (Issue #3368 engine lane).
+pub mod limits;
 pub mod parser;
 pub mod plan;
 pub mod planner;
@@ -112,6 +114,10 @@ pub use executor::{QueryExecutor, QueryResults, QueryRow};
 pub use hybrid::traverse_and_rank;
 pub use ir::{Direction, Predicate, QueryOp, SortKey, TraversalDepth};
 pub use lexer::{Lexer, LexerError, Token};
+pub use limits::{
+    EngineQueryLimitsConfig, LimitCounters, LimitCountersSnapshot, LimitDimension,
+    LimitOverrideError, QueryLimitsOverride, QueryResourceLimits, estimate_row_bytes,
+};
 pub use parser::{ParseError, Parser};
 pub use plan::{LogicalOp, LogicalPlan};
 pub use planner::{PhysicalPlan, QueryPlanner};
