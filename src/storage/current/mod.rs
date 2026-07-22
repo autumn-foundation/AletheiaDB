@@ -2446,6 +2446,18 @@ impl CurrentStorage {
             Some(id) => id,
             None => return Vec::new(),
         };
+        // Fast path: an equality index covering this (label, property) with an
+        // indexable value type (String/Int/Bool) — an O(matches) probe instead
+        // of the O(nodes-per-label) scan. Non-indexable value types (notably
+        // Float) and uncovered pairs fall through to the scan, returning
+        // byte-identical results. See `crate::index::property_index`.
+        let covered_value = crate::index::property_index::value_key(property_value)
+            .filter(|_| self.indexes.has_property_index(label_id, key_id));
+        if let Some(vk) = covered_value {
+            return self
+                .indexes
+                .find_nodes_by_property_indexed(label_id, key_id, &vk);
+        }
         self.indexes
             .iter_nodes()
             .filter(|n| n.label == label_id)
@@ -2456,6 +2468,89 @@ impl CurrentStorage {
             })
             .map(|n| n.id)
             .collect()
+    }
+
+    // ========================================================================
+    // Secondary property (equality) index — opt-in, node-only, current-state.
+    // See `crate::index::property_index` for the design and scope boundaries.
+    // ========================================================================
+
+    /// Enable a current-state equality index on `(label, property)` and backfill
+    /// it from current nodes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FailedPrecondition`](crate::core::error::Error::FailedPrecondition)
+    /// if an index is already enabled for this `(label, property)` pair.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn enable_property_index(&self, label: &str, property: &str) -> Result<()> {
+        let label_id = GLOBAL_INTERNER.intern(label)?;
+        let key_id = GLOBAL_INTERNER.intern(property)?;
+        // Exclude ALL concurrent writers (each holds `snapshot_lock.read()`) for
+        // the whole set-flag + backfill, so no create/update/delete can
+        // interleave and leave a node in the wrong bucket or no bucket. See
+        // `CurrentIndexes::enable_property_index` for the two racy interleavings
+        // this closes.
+        let _lock = self.snapshot_lock.write();
+        if !self.indexes.enable_property_index(label_id, key_id) {
+            return Err(crate::core::error::Error::FailedPrecondition(format!(
+                "property index already enabled for ({label}, {property})"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether an equality index is enabled for `(label, property)`.
+    pub fn has_property_index(&self, label: &str, property: &str) -> bool {
+        let (Some(label_id), Some(key_id)) = (
+            GLOBAL_INTERNER.get_id(label),
+            GLOBAL_INTERNER.get_id(property),
+        ) else {
+            return false;
+        };
+        self.indexes.has_property_index(label_id, key_id)
+    }
+
+    /// List all enabled property indexes.
+    pub fn list_property_indexes(&self) -> Vec<crate::index::property_index::PropertyIndexInfo> {
+        self.indexes
+            .property_index_pairs()
+            .into_iter()
+            .filter_map(|(label_id, key_id)| {
+                let label = GLOBAL_INTERNER.resolve_with(label_id, |s| s.to_string())?;
+                let property = GLOBAL_INTERNER.resolve_with(key_id, |s| s.to_string())?;
+                Some(crate::index::property_index::PropertyIndexInfo { label, property })
+            })
+            .collect()
+    }
+
+    /// Drop the equality index on `(label, property)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FailedPrecondition`](crate::core::error::Error::FailedPrecondition)
+    /// if no index is enabled for this `(label, property)` pair.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn drop_property_index(&self, label: &str, property: &str) -> Result<()> {
+        let not_enabled = || {
+            crate::core::error::Error::FailedPrecondition(format!(
+                "no property index enabled for ({label}, {property})"
+            ))
+        };
+        let (Some(label_id), Some(key_id)) = (
+            GLOBAL_INTERNER.get_id(label),
+            GLOBAL_INTERNER.get_id(property),
+        ) else {
+            return Err(not_enabled());
+        };
+        // Same exclusion as enable: hold the write lock so no concurrent writer's
+        // reindex can add a bucket after the purge (which a later re-enable would
+        // otherwise merge into fresh results — the #S3 race).
+        let _lock = self.snapshot_lock.write();
+        if !self.indexes.disable_property_index(label_id, key_id) {
+            return Err(not_enabled());
+        }
+        Ok(())
     }
 
     /// Get the name of the property used for vector indexing.

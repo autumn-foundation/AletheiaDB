@@ -80,6 +80,8 @@ pub mod ops;
 /// ephemeral profile.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pitr;
+/// Secondary property (equality) index: opt-in, node-only, current-state.
+pub mod property_index;
 /// Query builder and executor hooks.
 pub mod query;
 /// Index-layer key rotation orchestration (Issue #488).
@@ -138,6 +140,7 @@ pub use namespace_query::NamespaceCount;
 pub use ops::NodesAtTime;
 #[cfg(not(target_arch = "wasm32"))]
 pub use pitr::{PitrCoord, PitrPlan, PitrTarget};
+pub use property_index::PropertyIndexBuilder;
 pub use schema::{EdgeTypeSchema, GraphSchema, LabelSchema, SchemaInstant};
 pub use similarity_query::{SimilarityQuery, SimilaritySource};
 pub use snapshot::{NamedSnapshot, Snapshot};

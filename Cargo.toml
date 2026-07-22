@@ -912,3 +912,11 @@ required-features = ["parquet"]
 name = "node_scan"
 harness = false
 path = "benches/node_scan.rs"
+
+# Secondary property (equality) index: scan vs indexed selective lookup over a
+# 100K-node store. Demonstrates the O(N) -> O(matches) speedup.
+[[bench]]
+name = "property_index"
+harness = false
+path = "benches/property_index.rs"
+required-features = []

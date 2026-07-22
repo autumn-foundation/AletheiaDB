@@ -9,8 +9,10 @@ use crate::core::hasher::IdentityHasher;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
 use crate::core::namespace::{Namespace, NamespaceId, intern_namespace, resolve_namespace_id};
+use crate::core::property::PropertyMap;
 use crate::index::adjacency::AdjacencyEntry;
 use crate::index::incremental_adjacency::{CompactionScheduler, IncrementalAdjacencyIndex};
+use crate::index::property_index::{ValueKey, value_key};
 use dashmap::{DashMap, DashSet};
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
@@ -107,6 +109,30 @@ pub struct CurrentIndexes {
     /// Secondary namespace → member-edge membership index (Issue #3349, PR2).
     /// The edge counterpart of [`ns_nodes`](Self::ns_nodes); see its docs.
     ns_edges: DashMap<NamespaceId, DashSet<EdgeId, NsHasher>, NsHasher>,
+    /// Opt-in registry of `(label_id, prop_key_id)` pairs that have a secondary
+    /// equality index enabled. Empty by default — the property-index maintenance
+    /// hooks in `insert_node` / `remove_node` short-circuit on `is_empty()`, so a
+    /// database with no property index pays only that check on the write path.
+    prop_index_enabled: DashMap<(InternedString, InternedString), ()>,
+    /// Secondary equality index: `(label_id, prop_key_id, ValueKey)` → the set of
+    /// node ids currently holding that value.
+    ///
+    /// A **derived, non-persisted** acceleration structure — the durable ground
+    /// truth is each node's `PropertyMap`. Rebuilt for free at load / WAL-replay
+    /// because every node insertion funnels through
+    /// [`insert_node`](Self::insert_node) (the opt-in *decision* is in-memory
+    /// only; re-enable after restart to backfill). See
+    /// [`crate::index::property_index`] for the full design, the `Float`
+    /// exclusion rationale, and the namespace fail-closed contract.
+    ///
+    /// # Lock discipline
+    ///
+    /// A **leaf** in the lock-acquisition order (like `ns_nodes`): lock-free
+    /// `DashMap` of lock-free `DashSet`s, mutated only inside
+    /// `insert_node`/`remove_node`, never calling back into `historical`, `wal`,
+    /// or `current_timestamp`. The inner set is `NodeId`-keyed so it is
+    /// identity-hashed, not SipHashed.
+    prop_index: DashMap<(InternedString, InternedString, ValueKey), DashSet<NodeId, NsHasher>>,
 }
 
 impl CurrentIndexes {
@@ -126,6 +152,8 @@ impl CurrentIndexes {
             max_node_id: AtomicU64::new(0),
             ns_nodes: DashMap::with_hasher(BuildHasherDefault::default()),
             ns_edges: DashMap::with_hasher(BuildHasherDefault::default()),
+            prop_index_enabled: DashMap::new(),
+            prop_index: DashMap::new(),
         }
     }
 
@@ -156,6 +184,8 @@ impl CurrentIndexes {
             max_node_id: AtomicU64::new(0),
             ns_nodes: DashMap::with_hasher(BuildHasherDefault::default()),
             ns_edges: DashMap::with_hasher(BuildHasherDefault::default()),
+            prop_index_enabled: DashMap::new(),
+            prop_index: DashMap::new(),
         }
     }
 
@@ -222,9 +252,116 @@ impl CurrentIndexes {
         // index-persistence load, cold rehydration) that funnels through
         // `insert_node` produces the identical id for the same namespace.
         let ns_id = intern_namespace(&node.namespace());
+        // Maintain the secondary property (equality) index. Only pay the cost
+        // when at least one (label, property) is enabled; otherwise this is a
+        // single `is_empty` check on the create/update hot path. On an in-place
+        // update the prior node is still present in `self.nodes`, so we capture
+        // its LABEL and properties before overwriting: a create sees no prior
+        // node (pure add), a same-label update diffs old vs new to de-index the
+        // stale value, and a LABEL-CHANGING replace (`replace_node`, Issue
+        // #3549 — full overwrite reaches `insert_node` with a new label)
+        // de-indexes under the old label and re-indexes under the new one. This
+        // is the single choke point every hydration path funnels through
+        // (create, update, replace, WAL replay, index-persistence load), so the
+        // index rebuilds for free at load.
+        if !self.prop_index_enabled.is_empty() {
+            let old = self.nodes.get(&node_id).map(|e| {
+                let prior = e.value();
+                (prior.label, prior.properties.clone())
+            });
+            let (old_label, old_props) = match &old {
+                Some((label, props)) => (Some(*label), Some(props)),
+                None => (None, None),
+            };
+            self.reindex_node_property(node_id, old_label, old_props, node.label, &node.properties);
+        }
         self.nodes.insert(node.id, node);
         self.node_headers.insert(header.id, header);
         self.ns_nodes.entry(ns_id).or_default().insert(node_id);
+    }
+
+    /// Reconcile a node's property-index membership across a create, update, or
+    /// label-changing replace. Called from [`insert_node`](Self::insert_node); a
+    /// pure create passes `old_label = None` / `old_props = None`.
+    ///
+    /// Old and new labels are handled **independently** so a label change
+    /// (`old_label != new_label`, e.g. `replace_node`) both de-indexes the
+    /// node's old value under the *old* label and indexes its new value under
+    /// the *new* label — otherwise a lone new-label filter would leave a stale
+    /// entry under the old label (false positive) and, because the old and new
+    /// values compare equal, skip adding under the new label (false negative).
+    /// The `old_vk == new_vk` no-op fast path applies only to a same-label
+    /// update, where a bucket move is genuinely unnecessary.
+    fn reindex_node_property(
+        &self,
+        id: NodeId,
+        old_label: Option<InternedString>,
+        old_props: Option<&PropertyMap>,
+        new_label: InternedString,
+        new_props: &PropertyMap,
+    ) {
+        for entry in self.prop_index_enabled.iter() {
+            let (lbl, key) = *entry.key();
+            let is_old = Some(lbl) == old_label;
+            let is_new = lbl == new_label;
+            if !is_old && !is_new {
+                continue;
+            }
+            if is_old && is_new {
+                // Same-label create/update: move the value bucket only if it
+                // actually changed.
+                let old_vk = old_props
+                    .and_then(|p| p.get_by_interned_key(&key))
+                    .and_then(value_key);
+                let new_vk = new_props.get_by_interned_key(&key).and_then(value_key);
+                if old_vk == new_vk {
+                    continue;
+                }
+                if let Some(ov) = old_vk {
+                    self.prop_index_remove((lbl, key, ov), id);
+                }
+                if let Some(nv) = new_vk {
+                    self.prop_index
+                        .entry((lbl, key, nv))
+                        .or_default()
+                        .insert(id);
+                }
+            } else if is_old {
+                // Label changed away from `lbl`: drop the node's old value.
+                if let Some(ov) = old_props
+                    .and_then(|p| p.get_by_interned_key(&key))
+                    .and_then(value_key)
+                {
+                    self.prop_index_remove((lbl, key, ov), id);
+                }
+            } else {
+                // Label changed to `lbl` (or a fresh create under `lbl`): add the
+                // node's new value.
+                if let Some(nv) = new_props.get_by_interned_key(&key).and_then(value_key) {
+                    self.prop_index
+                        .entry((lbl, key, nv))
+                        .or_default()
+                        .insert(id);
+                }
+            }
+        }
+    }
+
+    /// Remove `id` from a property-index value bucket, reclaiming the bucket if
+    /// it drains empty. Mirrors the `ns_nodes` reclaim: the read guard is dropped
+    /// before `remove_if`, which re-checks emptiness under the shard write lock,
+    /// so a concurrent insert racing the reclaim never loses its set.
+    fn prop_index_remove(&self, key: (InternedString, InternedString, ValueKey), id: NodeId) {
+        let now_empty = match self.prop_index.get(&key) {
+            Some(set) => {
+                set.remove(&id);
+                set.is_empty()
+            }
+            None => false,
+        };
+        if now_empty {
+            self.prop_index.remove_if(&key, |_, set| set.is_empty());
+        }
     }
 
     /// Exclusive upper bound on the node id space: `max(id ever inserted) + 1`.
@@ -655,6 +792,24 @@ impl CurrentIndexes {
             if now_empty {
                 self.ns_nodes.remove_if(&ns_id, |_, set| set.is_empty());
             }
+            // Drop the node from every enabled property-index value bucket. This
+            // single choke point covers plain delete, cascade delete, and
+            // retraction (they all land on `remove_node`).
+            if !self.prop_index_enabled.is_empty() {
+                for entry in self.prop_index_enabled.iter() {
+                    let (lbl, key) = *entry.key();
+                    if lbl != node.label {
+                        continue;
+                    }
+                    if let Some(vk) = node
+                        .properties
+                        .get_by_interned_key(&key)
+                        .and_then(value_key)
+                    {
+                        self.prop_index_remove((lbl, key, vk), id);
+                    }
+                }
+            }
             node
         })
     }
@@ -728,6 +883,106 @@ impl CurrentIndexes {
     #[inline]
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    // ========================================================================
+    // Secondary property (equality) index
+    // See `crate::index::property_index` for the design and scope boundaries.
+    // ========================================================================
+
+    /// Enable the equality index for `(label, prop_key)` and backfill it from
+    /// current state. Returns `false` if it was already enabled (no-op).
+    ///
+    /// # Serialization requirement
+    ///
+    /// The caller **must** hold the storage `snapshot_lock.write()` for the
+    /// duration of this call (see
+    /// [`CurrentStorage::enable_property_index`](crate::storage::current::CurrentStorage::enable_property_index)).
+    /// Every write path (`create_node`, `insert_node_direct`,
+    /// `update_node_direct`, `delete_node_direct`) holds `snapshot_lock.read()`,
+    /// so the write lock makes enable **mutually exclusive** with all concurrent
+    /// mutators. Without it, two interleavings corrupt the index: (a) a create
+    /// whose `insert_node` observed `prop_index_enabled` still empty (so it
+    /// skipped maintenance) but installs its node *after* the backfill scan
+    /// passed it — leaving the node in no bucket; and (b) a mid-update node read
+    /// by the backfill under its old value while the update installs the new
+    /// value — leaving it in two buckets.
+    ///
+    /// The enabled flag is published **last** (after the backfill completes), so
+    /// a lock-free reader — which takes no lock — never observes the index as
+    /// "enabled" while it is only half-populated: it keeps scanning until the
+    /// flag flips, and the flag's release on the `prop_index_enabled` shard
+    /// happens-after all bucket writes.
+    pub fn enable_property_index(&self, label: InternedString, prop_key: InternedString) -> bool {
+        if self.prop_index_enabled.contains_key(&(label, prop_key)) {
+            return false;
+        }
+        // Defensively clear any stale buckets a prior disable may have left for
+        // this pair if it raced a concurrent writer (belt-and-suspenders for the
+        // #S3 race; the caller's snapshot_lock.write() already excludes writers).
+        self.prop_index
+            .retain(|k, _| !(k.0 == label && k.1 == prop_key));
+        // Backfill BEFORE publishing the flag: index every current node of this
+        // label whose property value is indexable.
+        for entry in self.nodes.iter() {
+            let node = entry.value();
+            if node.label != label {
+                continue;
+            }
+            if let Some(vk) = node
+                .properties
+                .get_by_interned_key(&prop_key)
+                .and_then(value_key)
+            {
+                self.prop_index
+                    .entry((label, prop_key, vk))
+                    .or_default()
+                    .insert(node.id);
+            }
+        }
+        // Publish the flag last (see the release-ordering note above). Enable
+        // calls are serialized by the caller's write lock, so the
+        // check-then-insert cannot race another enable.
+        self.prop_index_enabled.insert((label, prop_key), ());
+        true
+    }
+
+    /// Disable the equality index for `(label, prop_key)` and purge its buckets.
+    /// Returns `false` if no index was enabled for the pair.
+    pub fn disable_property_index(&self, label: InternedString, prop_key: InternedString) -> bool {
+        if self.prop_index_enabled.remove(&(label, prop_key)).is_none() {
+            return false;
+        }
+        self.prop_index
+            .retain(|k, _| !(k.0 == label && k.1 == prop_key));
+        true
+    }
+
+    /// Whether an equality index is enabled for `(label, prop_key)`.
+    #[inline]
+    pub fn has_property_index(&self, label: InternedString, prop_key: InternedString) -> bool {
+        self.prop_index_enabled.contains_key(&(label, prop_key))
+    }
+
+    /// The `(label_id, prop_key_id)` pairs with an enabled equality index.
+    pub fn property_index_pairs(&self) -> Vec<(InternedString, InternedString)> {
+        self.prop_index_enabled.iter().map(|e| *e.key()).collect()
+    }
+
+    /// Probe the equality index for the node ids currently holding `value` under
+    /// `(label, prop_key)`. Order is unspecified (`DashSet` iteration); callers
+    /// that need determinism sort. Caller must have checked
+    /// [`has_property_index`](Self::has_property_index).
+    pub fn find_nodes_by_property_indexed(
+        &self,
+        label: InternedString,
+        prop_key: InternedString,
+        value: &ValueKey,
+    ) -> Vec<NodeId> {
+        self.prop_index
+            .get(&(label, prop_key, value.clone()))
+            .map(|set| set.iter().map(|e| *e.key()).collect())
+            .unwrap_or_default()
     }
 
     // ========================================================================
