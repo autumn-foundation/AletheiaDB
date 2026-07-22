@@ -1122,6 +1122,11 @@ impl AletheiaDB {
                     )?,
                 ),
                 chain: None,
+                // Engine-lane per-query resource limits (Issue #3368): sourced
+                // from the unified config so operators can tune the default
+                // timeout/row/memory ceilings for a durable deployment.
+                query_limits: config.query_limits.clone(),
+                limit_counters: Arc::new(crate::query::limits::LimitCounters::default()),
                 _tempdir: None,
             };
 
@@ -1784,6 +1789,13 @@ impl AletheiaDB {
                     crate::experimental::temporal::drift_alarm::DriftMonitorRegistry::in_memory(),
                 ),
                 chain: None,
+                // Engine-lane per-query resource limits (Issue #3368): no
+                // unified config in scope on this legacy construction path
+                // (used by the ephemeral `AletheiaDB::new()`), so use the
+                // engine default (enabled, generous ceilings — a no-op for
+                // any query small enough to appear in a test suite).
+                query_limits: crate::query::limits::EngineQueryLimitsConfig::default(),
+                limit_counters: Arc::new(crate::query::limits::LimitCounters::default()),
                 _tempdir: None,
             };
             seed_startup_current_timestamp(&db)?;

@@ -86,6 +86,30 @@ pub struct DatabaseStats {
     /// per-principal detail deliberately kept OFF the bounded `/metrics`
     /// exposition (which stays bounded-label-only).
     pub changefeed: ChangefeedStats,
+    /// Engine-lane per-query resource-limit termination/rejection counters
+    /// (Issue #3368 observability). Process-lifetime atomic counters; all
+    /// zero on a database that never breaches a configured limit.
+    pub resource_limits: ResourceLimitStats,
+}
+
+/// Engine-lane per-query resource-limit counters (Issue #3368 observability).
+///
+/// Mirrors [`crate::query::limits::LimitCountersSnapshot`] under stats-surface
+/// naming; `override_rejections` additionally counts per-call overrides
+/// (`QueryBuilder::with_timeout`/`with_max_rows`/`with_memory_budget`)
+/// rejected for exceeding the configured operator ceiling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct ResourceLimitStats {
+    /// Queries terminated by the wall-clock timeout.
+    pub timeout_terminations: u64,
+    /// Queries terminated by the estimated-memory budget.
+    pub memory_terminations: u64,
+    /// Queries terminated by the result-row cap.
+    pub row_cap_terminations: u64,
+    /// Per-call limit overrides rejected for exceeding the operator ceiling.
+    pub override_rejections: u64,
 }
 
 /// Push-changefeed subscription state for the `database_stats` snapshot
@@ -455,6 +479,16 @@ impl AletheiaDB {
                 .collect(),
         };
 
+        // Engine-lane resource-limit counters (Issue #3368 observability):
+        // relaxed atomic snapshot reads, no locks.
+        let limit_counters = self.limit_counters.snapshot();
+        let resource_limits = ResourceLimitStats {
+            timeout_terminations: limit_counters.wall_clock_timeout,
+            memory_terminations: limit_counters.memory_bytes,
+            row_cap_terminations: limit_counters.result_rows,
+            override_rejections: limit_counters.override_rejected,
+        };
+
         DatabaseStats {
             current: CurrentStateStats {
                 node_count: current_stats.node_count,
@@ -466,7 +500,17 @@ impl AletheiaDB {
             chain,
             namespaces,
             changefeed,
+            resource_limits,
         }
+    }
+
+    /// Snapshot of engine-lane per-query resource-limit termination/rejection
+    /// counters (Issue #3368 observability). Equivalent to
+    /// `self.stats().resource_limits`, without materializing the full
+    /// [`DatabaseStats`] snapshot.
+    #[must_use]
+    pub fn query_limit_counters(&self) -> crate::query::limits::LimitCountersSnapshot {
+        self.limit_counters.snapshot()
     }
 }
 

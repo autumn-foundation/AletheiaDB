@@ -114,7 +114,9 @@ impl QueryResourceLimits {
 /// supplied) and a **ceiling** (the largest value an override may request;
 /// `0` = no ceiling). A value of `0` on a default/override means "unlimited".
 /// The master [`enabled`](Self::enabled) switch turns all enforcement off.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct EngineQueryLimitsConfig {
     /// Master switch. When `false`, [`effective`](Self::effective) always
     /// returns [`QueryResourceLimits::unlimited`] and ignores overrides.

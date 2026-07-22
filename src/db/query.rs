@@ -1,11 +1,12 @@
 //! Query builder and execution entry points.
 //!
 //! Provides access to the query planner, AQL execution, and hybrid search methods.
-use crate::core::error::{Result, ResultExt};
+use crate::core::error::{QueryError, Result, ResultExt};
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::query::builder::state::Initial;
+use crate::query::executor::ExecutionConfig;
 use crate::query::{Query, QueryBuilder, QueryExecutor, QueryPlanner, QueryResults};
 use std::sync::Arc;
 
@@ -200,14 +201,43 @@ impl AletheiaDB {
                 self.validate_scope(scope)?;
             }
 
+            // Resolve the per-query engine-lane resource limits (Issue #3368
+            // public API) from the database's configured
+            // `EngineQueryLimitsConfig` and the query's own per-call override
+            // (if any), BEFORE planning: an over-ceiling override must never
+            // do any work, not even planning.
+            let resolved_limits = match self.query_limits.effective(query.limits.as_ref()) {
+                Ok(limits) => limits,
+                Err(e) => {
+                    self.limit_counters.record_override_rejected();
+                    return Err(QueryError::InvalidParameter {
+                        parameter: "limits".into(),
+                        reason: format!(
+                            "limit override for '{}' ({}) exceeds the maximum allowed ({})",
+                            e.dimension.as_str(),
+                            e.requested,
+                            e.ceiling
+                        ),
+                    }
+                    .into());
+                }
+            };
+
             // Use cached statistics for cost-based optimization
             // Statistics are shared across all queries for this database instance
             let planner = QueryPlanner::new(Arc::clone(&self.stats), Arc::clone(&self.current));
             let physical_plan = planner.plan(query)?;
 
             // Execute the plan
-            let mut executor =
-                QueryExecutor::new(Arc::clone(&self.current), Arc::clone(&self.historical));
+            let mut executor = QueryExecutor::with_config(
+                Arc::clone(&self.current),
+                Arc::clone(&self.historical),
+                ExecutionConfig {
+                    limits: resolved_limits,
+                    counters: Some(Arc::clone(&self.limit_counters)),
+                    ..ExecutionConfig::default()
+                },
+            );
             if let Some(scope) = scope {
                 executor = executor.with_namespace_scope(scope);
             }

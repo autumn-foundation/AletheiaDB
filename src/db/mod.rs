@@ -401,6 +401,18 @@ pub struct AletheiaDB {
     /// history. Declared before `_tempdir` so it is dropped (flushing the
     /// sealer) before the tempdir is removed.
     pub(crate) chain: Option<Arc<crate::provenance_chain::ProvenanceChain>>,
+    /// Engine-lane per-query resource-limits configuration (Issue #3368
+    /// public API): server default + operator ceiling per dimension, consulted
+    /// by [`execute_query`](crate::db::AletheiaDB::execute_query) to resolve
+    /// each query's effective [`QueryResourceLimits`](crate::query::limits::QueryResourceLimits)
+    /// from the query's own [`QueryLimitsOverride`](crate::query::limits::QueryLimitsOverride)
+    /// (if any). Entirely off the write path (read-only, consulted per query).
+    pub(crate) query_limits: crate::query::limits::EngineQueryLimitsConfig,
+    /// Shared per-dimension counters of engine-lane resource-limit terminations
+    /// and rejected overrides (Issue #3368 observability), surfaced via
+    /// [`AletheiaDB::query_limit_counters`] and folded into
+    /// [`stats`](crate::db::AletheiaDB::stats)'s `resource_limits` block.
+    pub(crate) limit_counters: Arc<crate::query::limits::LimitCounters>,
     /// Backing tempdir for ephemeral databases created via [`AletheiaDB::new`].
     /// Declared last so it is dropped last (Rust drops struct fields in
     /// declaration order); this guarantees the WAL/persistence file handles
