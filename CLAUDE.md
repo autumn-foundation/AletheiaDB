@@ -453,11 +453,29 @@ follow-up. `database_stats` additively surfaces a
 `DatabaseStats` struct/storage layer are untouched; row-cap breaches are **not**
 counted — they self-disclose via `truncated`/`has_more`). **v1 scope for these
 read tools:** server defaults only (no per-call `limits` override), **post-hoc**
-byte cap (the response is fully serialized then rejected if over cap). **Deferred
-to Lane-2:** memory-budget dimension, true engine-level cancellation, Rust
-builder API, benchmark-gated fast-path proof, concurrency soak, HTTP in-flight
-parity, incremental byte-cap for these tools. See
+byte cap (the response is fully serialized then rejected if over cap). See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#extended-to-the-read-tools-issue-3368-residue).
+**Engine lane (landed):** the executor now enforces limits *cooperatively*
+inside its pull-based iterator pipeline via a `ResourceGuardIterator` — a
+row-granular guard checked before each `next()` that aborts the scan (no
+orphaned background thread), closing most of the deferred "Lane-2" work: a
+public **Rust builder API** (`QueryBuilder::with_timeout`/`with_max_rows`/
+`with_memory_budget`) + `AletheiaDBConfig::query_limits`
+(`EngineQueryLimitsConfig`, default/override/ceiling mirroring the MCP+HTTP
+merge), a **memory-budget** dimension (an `estimate_row_bytes` working-memory
+proxy, default-off; also wired into the MCP `query` tool so its detached
+timeout-race worker self-cancels near its deadline), structured
+`QueryError::ResourceExhausted { dimension, limit, consumed, retriable }` →
+`RESOURCE_EXHAUSTED`, per-dimension counters via
+`AletheiaDB::query_limit_counters()` (deliberately **not** on `DatabaseStats`),
+a **benchmark** (`benches/query_resource_limits.rs`, guard-on vs -off — the
+guard is off the direct current-state/temporal hot paths the standard suite and
+the <1µs single-hop target measure, so 0% there), a **concurrency soak**
+(`tests/query_resource_limits_soak.rs`), and an LLM **self-correction** test.
+The guard is skipped entirely under a fully-unlimited (`disabled()`) config
+(zero-alloc fast path). Still deferred: true per-allocation memory accounting +
+spill, HTTP-surface memory dimension, per-call overrides on the MCP read tools.
+See [docs/guides/query-resource-limits.md](docs/guides/query-resource-limits.md).
 
 **Valid-time writes (Issue #3221)**: `create_node`, `create_edge`,
 `update_node`, `update_edge`, `delete_node`, and `delete_edge` accept an
