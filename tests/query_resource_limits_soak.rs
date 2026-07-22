@@ -9,32 +9,37 @@
 //! cores, noisy neighbors, thermal throttling). A test that asserts "the
 //! well-behaved read completes in under N milliseconds" or "the pathological
 //! query is cut off within X% of its deadline" is inherently flaky under that
-//! variance — it encodes a timing expectation the test author cannot control.
-//! Instead this test asserts the *shape* of the outcome, which holds regardless
-//! of how fast or slow the hardware is on a given run:
+//! variance. Instead this test asserts the *shape* of the outcome, which holds
+//! regardless of hardware speed:
 //!
 //! - well-behaved reads ALL succeed and return the expected data (never
 //!   starved, blocked, or corrupted by the concurrent pathological load) — the
 //!   actual neighbor-protection property under test;
-//! - the pathological stream produces a `ResourceExhausted` termination on
-//!   every iteration, on each dimension it targets;
-//! - the whole test finishes inside a generous wall-clock bound, so a
-//!   regression that lets a pathological query run unbounded (the guard
-//!   silently stops enforcing) fails by blowing the bound rather than hanging
-//!   CI forever.
+//! - **every** pathological iteration terminates with `ResourceExhausted` on the
+//!   dimension it targets. This is the primary, fully deterministic
+//!   guard-works signal: a broken guard would let the query drain to completion,
+//!   flipping this assertion — regardless of graph size or timing.
+//!
+//! # The wall-clock bound covers only the concurrent worker phase, never seeding
+//!
+//! The bound in assertion (c) times **only** the concurrent worker phase, with
+//! the (single-threaded, WAL-durable) seed excluded — an earlier version timed
+//! the whole test and flaked on a slow CI runner where seeding several thousand
+//! GroupCommit writes alone dominated the budget. The worker-phase bound is a
+//! generous anti-hang net (a truly stuck guard blows it), not a latency
+//! assertion; correctness is carried by assertion (b), which is deterministic.
 //!
 //! # Why a high-fanout single hop, not a deep traversal
 //!
 //! The reliable, hardware-independent way to make a query "pathological" is to
-//! make it *emit many rows*: a single hop out of a mega-hub node with several
-//! thousand out-edges deterministically yields several thousand rows. The
-//! result-row and memory dimensions then fire deterministically (they are
-//! count/size based, not timing based), and the wall-clock dimension fires
-//! reliably too — materializing thousands of rows in an unoptimized `cargo
-//! test` debug build comfortably exceeds a 1 ms budget. (A deep
-//! `Exact(depth)` traversal, by contrast, is *shortest-path node-distinct*, so
-//! in a dense small-diameter graph almost no node has a shortest distance equal
-//! to a large depth — it would yield ~0 rows and trip nothing.)
+//! make it *emit many rows*: a single hop out of a hub node with many out-edges
+//! deterministically yields many rows, so the result-row and memory dimensions
+//! (count/size based, not timing based) fire deterministically. The wall-clock
+//! dimension is made deterministic a different way — see the timeout worker.
+//! (A deep `Exact(depth)` traversal, by contrast, is shortest-path
+//! node-distinct, so in a dense small-diameter graph almost no node has a
+//! shortest distance equal to a large depth — it would yield ~0 rows and trip
+//! nothing.)
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -43,13 +48,15 @@ use std::time::{Duration, Instant};
 use aletheiadb::core::error::{Error, QueryError};
 use aletheiadb::{AletheiaDB, NodeId, PropertyMapBuilder};
 
-/// Out-edges on the mega-hub node the pathological workers hammer. A single hop
-/// yields this many rows — large enough that draining them in a debug build
-/// exceeds the 1 ms wall-clock budget, and far above the 5-row cap.
-const MEGA_FAN_OUT: usize = 2500;
+/// Out-edges on the hub node the pathological workers hammer. A single hop
+/// yields this many rows — far above the 5-row cap and the tiny memory budget,
+/// so those two dimensions fire deterministically. Kept modest so seeding stays
+/// fast on a contended CI runner (seeding, not the guarded queries, dominates
+/// this test's wall-clock cost).
+const HUB_FAN_OUT: usize = 200;
 /// Out-edges on the small hub the well-behaved workers read. Cheap and
-/// unrelated to the mega hub, so its cost never depends on the pathological
-/// load.
+/// unrelated to the pathological hub, so its cost never depends on the
+/// pathological load.
 const CHEAP_FAN_OUT: usize = 5;
 
 const PATHOLOGICAL_WORKERS: usize = 4;
@@ -57,18 +64,20 @@ const PATHOLOGICAL_ITERS_PER_WORKER: usize = 3;
 const WELL_BEHAVED_WORKERS: usize = 4;
 const WELL_BEHAVED_ITERS_PER_WORKER: usize = 50;
 
-/// A tight per-call wall-clock budget. Draining `MEGA_FAN_OUT` rows in a debug
-/// build reliably exceeds this, and the guard polls the deadline on every row
-/// for the first several thousand rows, so the timeout fires promptly.
+/// A tight per-call wall-clock budget for the timeout worker.
 const TIGHT_TIMEOUT: Duration = Duration::from_millis(1);
-/// A tiny per-call row cap; the mega hop emits far more.
+/// A tiny per-call row cap; the hub hop emits far more.
 const TIGHT_ROW_CAP: usize = 5;
-/// A tiny per-call memory budget (bytes); the mega hop's rows exceed it almost
+/// A tiny per-call memory budget (bytes); the hub hop's rows exceed it almost
 /// immediately.
 const TIGHT_MEMORY_BUDGET: usize = 256;
+/// Generous anti-hang bound on the concurrent worker phase (seeding excluded).
+/// With a working guard the phase completes in well under a second; this only
+/// fails if a query hangs unbounded.
+const WORKER_PHASE_BOUND: Duration = Duration::from_secs(60);
 
-/// The dimension each pathological worker targets, chosen by worker index so
-/// all three enforced dimensions are exercised concurrently.
+/// The dimension each pathological worker targets, chosen by worker index so all
+/// three enforced dimensions are exercised concurrently.
 #[derive(Clone, Copy)]
 enum Dimension {
     Timeout,
@@ -94,26 +103,25 @@ fn resource_exhausted_dimension(err: &Error) -> Option<&'static str> {
     }
 }
 
-/// Build the shared database: a mega-hub `Person` node with `MEGA_FAN_OUT`
-/// `KNOWS` out-edges for the pathological workers, plus a small hub with
-/// `CHEAP_FAN_OUT` out-edges for the well-behaved workers. Returns
-/// `(mega_hub, cheap_hub)`.
+/// Build the shared database: a hub `Person` node with `HUB_FAN_OUT` `KNOWS`
+/// out-edges for the pathological workers, plus a small hub with `CHEAP_FAN_OUT`
+/// out-edges for the well-behaved workers. Returns `(hub, cheap_hub)`.
 fn seed(db: &AletheiaDB) -> (NodeId, NodeId) {
-    let mega_hub = db
+    let hub = db
         .create_node(
             "Person",
-            PropertyMapBuilder::new().insert("name", "MegaHub").build(),
+            PropertyMapBuilder::new().insert("name", "Hub").build(),
         )
-        .expect("create mega hub");
-    for i in 0..MEGA_FAN_OUT {
+        .expect("create hub");
+    for i in 0..HUB_FAN_OUT {
         let leaf = db
             .create_node(
                 "Person",
                 PropertyMapBuilder::new().insert("idx", i as i64).build(),
             )
-            .expect("create mega leaf");
-        db.create_edge(mega_hub, leaf, "KNOWS", PropertyMapBuilder::new().build())
-            .expect("create mega edge");
+            .expect("create hub leaf");
+        db.create_edge(hub, leaf, "KNOWS", PropertyMapBuilder::new().build())
+            .expect("create hub edge");
     }
 
     let cheap_hub = db
@@ -135,25 +143,28 @@ fn seed(db: &AletheiaDB) -> (NodeId, NodeId) {
             .expect("create cheap edge");
     }
 
-    (mega_hub, cheap_hub)
+    (hub, cheap_hub)
 }
 
 #[test]
 fn pathological_queries_are_bounded_while_well_behaved_reads_keep_succeeding() {
-    let overall_start = Instant::now();
-
     let db = Arc::new(AletheiaDB::new().expect("create db"));
-    let (mega_hub, cheap_hub) = seed(&db);
+    let (hub, cheap_hub) = seed(&db);
 
     let exhausted_terminations = Arc::new(AtomicUsize::new(0));
     let well_behaved_failures = Arc::new(AtomicUsize::new(0));
+
+    // Time only the concurrent worker phase — seeding above is single-threaded,
+    // WAL-durable, and environment-dominated, so it must not count against the
+    // guard's regression bound.
+    let worker_phase_start = Instant::now();
 
     let mut handles = Vec::new();
 
     // ---- Pathological workers ----
     //
-    // Each hammers the mega hub with a single hop that would emit MEGA_FAN_OUT
-    // rows, under a tight per-call limit on one of the three dimensions. Every
+    // Each hammers the hub with a single hop that would emit HUB_FAN_OUT rows,
+    // under a tight per-call limit on one of the three dimensions. Every
     // iteration is expected to terminate with `ResourceExhausted` on that
     // dimension — never succeed, never hang.
     for worker_idx in 0..PATHOLOGICAL_WORKERS {
@@ -166,29 +177,9 @@ fn pathological_queries_are_bounded_while_well_behaved_reads_keep_succeeding() {
         };
         handles.push(std::thread::spawn(move || {
             for _ in 0..PATHOLOGICAL_ITERS_PER_WORKER {
-                let builder = db.query().start(mega_hub).traverse("KNOWS");
-                let builder = match dimension {
-                    Dimension::Timeout => builder.with_timeout(TIGHT_TIMEOUT),
-                    Dimension::Rows => builder.with_max_rows(TIGHT_ROW_CAP),
-                    Dimension::Memory => builder.with_memory_budget(TIGHT_MEMORY_BUDGET),
-                };
-
-                let results = builder
-                    .execute(&db)
-                    .expect("execute() must succeed lazily — the guard only fires on drain");
-
-                let mut saw_exhausted = false;
-                for row in results {
-                    if let Err(e) = row {
-                        assert_eq!(
-                            resource_exhausted_dimension(&e),
-                            Some(dimension.token()),
-                            "pathological worker {worker_idx} got an unexpected error: {e:?}"
-                        );
-                        saw_exhausted = true;
-                        exhausted_terminations.fetch_add(1, Ordering::Relaxed);
-                        break;
-                    }
+                let saw_exhausted = run_pathological_once(&db, hub, dimension, worker_idx);
+                if saw_exhausted {
+                    exhausted_terminations.fetch_add(1, Ordering::Relaxed);
                 }
                 assert!(
                     saw_exhausted,
@@ -205,7 +196,7 @@ fn pathological_queries_are_bounded_while_well_behaved_reads_keep_succeeding() {
     // Cheap single-hop reads on an isolated hub, unaffected by any limit
     // (defaults are generous). Every one must succeed with the correct result
     // set — the actual neighbor-protection signal: a broken guard (poisoned
-    // shared lock, starved executor) would show up here as failures or wrong
+    // shared lock, starved executor) would surface here as failures or wrong
     // data, not merely slowness.
     for worker_idx in 0..WELL_BEHAVED_WORKERS {
         let db = Arc::clone(&db);
@@ -240,6 +231,7 @@ fn pathological_queries_are_bounded_while_well_behaved_reads_keep_succeeding() {
     for handle in handles {
         handle.join().expect("worker thread panicked");
     }
+    let worker_phase = worker_phase_start.elapsed();
 
     // (a) every well-behaved read succeeded with the correct result.
     assert_eq!(
@@ -249,9 +241,8 @@ fn pathological_queries_are_bounded_while_well_behaved_reads_keep_succeeding() {
          stream runs concurrently"
     );
 
-    // (b) every pathological iteration terminated via ResourceExhausted, and
-    // the shared engine-lane counters observed the terminations across all
-    // three dimensions.
+    // (b) every pathological iteration terminated via ResourceExhausted, and the
+    // shared engine-lane counters observed terminations on all three dimensions.
     assert_eq!(
         exhausted_terminations.load(Ordering::Relaxed),
         PATHOLOGICAL_WORKERS * PATHOLOGICAL_ITERS_PER_WORKER,
@@ -271,13 +262,53 @@ fn pathological_queries_are_bounded_while_well_behaved_reads_keep_succeeding() {
         "the memory-bytes dimension must have fired: {counters:?}"
     );
 
-    // (c) the whole test completes well inside a generous bound. Not a latency
-    // assertion — a guard regression that lets the pathological hop run
-    // unbounded would blow this bound and fail the test (rather than hang CI).
-    let elapsed = overall_start.elapsed();
+    // (c) the concurrent worker phase (seeding excluded) completes well inside a
+    // generous anti-hang bound. A guard regression that let the pathological hop
+    // run unbounded would blow this instead of hanging CI.
     assert!(
-        elapsed < Duration::from_secs(30),
-        "soak test took {elapsed:?}, exceeding the 30s regression bound — a pathological \
-         query may be running unbounded instead of being cut off by its limit"
+        worker_phase < WORKER_PHASE_BOUND,
+        "worker phase took {worker_phase:?}, exceeding the {WORKER_PHASE_BOUND:?} anti-hang \
+         bound — a pathological query may be running unbounded instead of being cut off"
     );
+}
+
+/// Run one pathological query and report whether it terminated with the
+/// expected `ResourceExhausted` dimension.
+///
+/// Row and memory caps fire deterministically from the hub's fan-out. The
+/// wall-clock case is made deterministic without depending on machine speed:
+/// `with_timeout` fixes the deadline at `execute()` time and the stream is lazy,
+/// so sleeping past the (1 ms) deadline before draining makes the guard's
+/// pre-pull check at row 0 fire on any hardware.
+fn run_pathological_once(
+    db: &AletheiaDB,
+    hub: NodeId,
+    dimension: Dimension,
+    worker_idx: usize,
+) -> bool {
+    let builder = db.query().start(hub).traverse("KNOWS");
+    let results = match dimension {
+        Dimension::Timeout => builder.with_timeout(TIGHT_TIMEOUT),
+        Dimension::Rows => builder.with_max_rows(TIGHT_ROW_CAP),
+        Dimension::Memory => builder.with_memory_budget(TIGHT_MEMORY_BUDGET),
+    }
+    .execute(db)
+    .expect("execute() must succeed lazily — the guard only fires on drain");
+
+    if matches!(dimension, Dimension::Timeout) {
+        // Elapse the lazily-fixed deadline before draining a single row.
+        std::thread::sleep(Duration::from_millis(15));
+    }
+
+    for row in results {
+        if let Err(e) = row {
+            assert_eq!(
+                resource_exhausted_dimension(&e),
+                Some(dimension.token()),
+                "pathological worker {worker_idx} got an unexpected error: {e:?}"
+            );
+            return true;
+        }
+    }
+    false
 }
