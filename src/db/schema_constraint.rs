@@ -137,6 +137,7 @@ fn write_sidecar_descriptors(
 /// descriptor set (used by the `.albk` restore path so the reopened database
 /// loads the restored constraints through the normal startup sidecar-load).
 /// A no-op for an empty descriptor set.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn persist_descriptors_to_dir(
     data_dir: &Path,
     descriptors: &[SchemaConstraintDescriptor],

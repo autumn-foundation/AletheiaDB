@@ -96,6 +96,7 @@ impl CurrentStorage {
     /// # Arguments
     ///
     /// * `start` - The next ID to generate (typically max_id + 1)
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn init_node_id_generator(&self, start: u64) {
         self.node_id_gen.reset_to(start);
     }
@@ -108,6 +109,7 @@ impl CurrentStorage {
     /// # Arguments
     ///
     /// * `start` - The next ID to generate (typically max_id + 1)
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn init_edge_id_generator(&self, start: u64) {
         self.edge_id_gen.reset_to(start);
     }
@@ -121,6 +123,7 @@ impl CurrentStorage {
     ///
     /// * `start` - The next ID to generate (typically max_id + 1)
     #[inline]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn init_version_id_generator(&self, start: u64) {
         self.version_id_gen.reset_to(start);
     }
@@ -135,6 +138,7 @@ impl CurrentStorage {
     ///
     /// * `min_value` - The minimum next version ID to generate
     #[inline]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn ensure_version_id_generator_at_least(&self, min_value: u64) {
         self.version_id_gen.ensure_at_least(min_value);
     }
@@ -144,6 +148,7 @@ impl CurrentStorage {
     /// This is used during recovery to determine the starting version ID for
     /// WAL replay.
     #[inline]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn get_version_id_generator_current(&self) -> u64 {
         self.version_id_gen.current()
     }
@@ -292,6 +297,7 @@ impl CurrentStorage {
     /// Register a vector index (used during index loading from disk).
     ///
     /// This directly inserts the index without any initialization logic.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn register_vector_index(
         &self,
         property_name: &str,
@@ -382,6 +388,7 @@ impl CurrentStorage {
     ///
     /// Used for persistence operations. Returns (index, config, vector_count, mappings).
     #[allow(clippy::type_complexity)]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn get_vector_index_for_persistence(
         &self,
         property_name: &str,
@@ -2580,6 +2587,7 @@ impl CurrentStorage {
     ///
     /// Returns an iterator to avoid allocating a Vec for large graphs,
     /// improving memory efficiency during persistence operations.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn all_edges(&self) -> impl Iterator<Item = Edge> + '_ {
         self.indexes.iter_edges().map(|e| e.clone())
     }

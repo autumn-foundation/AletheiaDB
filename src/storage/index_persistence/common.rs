@@ -127,6 +127,7 @@ impl IndexKeyring {
     }
 
     /// The version freshly written files are stamped with.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn current_version(&self) -> u32 {
         self.inner
             .read()
@@ -149,12 +150,14 @@ impl IndexKeyring {
 
     /// The current (write) cipher, if any (for callers that only need the
     /// cipher, e.g. checkpoint's single-generation writes).
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn current_cipher(&self) -> Option<Arc<dyn Cipher>> {
         self.current().map(|(c, _)| c)
     }
 
     /// Add a new generation, making it current. Switches the keyring to strict
     /// per-version dispatch. Used by the rotation engine at `begin`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn add_generation(&self, key_version: u32, cipher: Arc<dyn Cipher>) {
         let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         inner.match_any = false;
@@ -168,6 +171,7 @@ impl IndexKeyring {
 
     /// Retire every generation except `key_version`, which becomes the sole,
     /// current generation. Used by the rotation engine at `complete`/`cancel`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn retain_only(&self, key_version: u32) {
         let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         inner.generations.retain(|g| g.key_version == key_version);
@@ -178,6 +182,7 @@ impl IndexKeyring {
 
 /// Read the header `key_version` of an encrypted index buffer without
 /// decrypting. Returns `None` if `bytes` is not an encrypted index file.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn index_file_key_version(bytes: &[u8]) -> Option<u32> {
     if !is_encrypted_index(bytes) {
         return None;

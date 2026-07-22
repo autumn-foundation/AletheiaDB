@@ -349,10 +349,14 @@ impl AletheiaDB {
         // Historical (lock order #3): take the read guard only long enough
         // to snapshot the cached counters and clone the tiered-storage
         // handle; tiered/cold counters are read after the guard is dropped.
+        #[cfg(not(target_arch = "wasm32"))]
         let (hist, tiered) = {
             let historical = self.historical.read();
             (historical.stats(), historical.tiered_storage_arc())
         };
+        // Ephemeral wasm profile is hot-only: no tiered/cold tier.
+        #[cfg(target_arch = "wasm32")]
+        let hist = self.historical.read().stats();
 
         let historical = HistoricalDepthStats {
             total_node_versions: hist.total_node_versions,
@@ -368,6 +372,7 @@ impl AletheiaDB {
             compression_ratio: hist.compression_ratio(),
         };
 
+        #[cfg(not(target_arch = "wasm32"))]
         let cold_storage = match tiered {
             Some(tiered) => {
                 let metrics = tiered.metrics();
@@ -391,6 +396,12 @@ impl AletheiaDB {
                 enabled: false,
                 details: None,
             },
+        };
+        // Ephemeral wasm profile is hot-only: the cold tier is never configured.
+        #[cfg(target_arch = "wasm32")]
+        let cold_storage = ColdStorageTierStats {
+            enabled: false,
+            details: None,
         };
 
         // Provenance hash chain (Issue #3351): O(1) reads of the in-memory head.

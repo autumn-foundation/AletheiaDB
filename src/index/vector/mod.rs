@@ -738,9 +738,13 @@ pub use sparse::{
 };
 
 // Sharded vector index (VS-103)
+// Uses rayon (OS threads) and the usearch-backed HnswIndex; not part of the
+// Phase 1 wasm profile (vector search is OFF). Gated out on wasm.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod sharded;
 
 // Re-export sharded types for convenience
+#[cfg(not(target_arch = "wasm32"))]
 pub use sharded::{
     RebalanceConfig as ShardedRebalanceConfig, ShardStats, ShardedVectorConfig, ShardedVectorIndex,
     ShardingStrategy,
@@ -754,16 +758,20 @@ pub use sharded::{
 ///
 /// NaN values are treated as less than all other values for consistent ordering.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct OrderedFloat(pub f32);
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Eq for OrderedFloat {}
 
+#[cfg(not(target_arch = "wasm32"))]
 impl PartialOrd for OrderedFloat {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Ord for OrderedFloat {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.0
@@ -780,6 +788,7 @@ impl Ord for OrderedFloat {
 /// Merge search results from multiple sources using a min-heap for top-k efficiency.
 ///
 /// O(n log k) where n is total results and k is the desired count.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn merge_top_k_results(
     all_results: Vec<Vec<(crate::core::id::NodeId, f32)>>,
     k: usize,
@@ -820,9 +829,13 @@ pub(crate) fn merge_top_k_results(
 }
 
 // Distributed vector index (VS-107)
+// Uses rayon (OS threads) and the usearch-backed HnswIndex; not part of the
+// Phase 1 wasm profile (vector search is OFF). Gated out on wasm.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod distributed;
 
 // Re-export distributed types for convenience
+#[cfg(not(target_arch = "wasm32"))]
 pub use distributed::{
     CircuitBreakerConfig as DistributedCircuitBreakerConfig, CircuitState, DistributedError,
     DistributedIndexStats, DistributedVectorConfig, DistributedVectorIndex, MockVectorNodeClient,

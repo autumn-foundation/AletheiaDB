@@ -2,7 +2,9 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex;
 
 use arc_swap::ArcSwapOption;
 
@@ -48,6 +50,7 @@ pub struct IndexPersistenceManager {
     /// LEAF taken only at the top of install; the hot persist/load paths never
     /// touch it, and the install body acquires no other AletheiaDB primitive
     /// while holding it (CLAUDE.md lock order).
+    #[cfg(not(target_arch = "wasm32"))]
     install_lock: Mutex<()>,
 }
 
@@ -57,6 +60,7 @@ impl IndexPersistenceManager {
         Self {
             base_path: base_path.into(),
             keyring: ArcSwapOption::empty(),
+            #[cfg(not(target_arch = "wasm32"))]
             install_lock: Mutex::new(()),
         }
     }
@@ -73,6 +77,7 @@ impl IndexPersistenceManager {
         Self {
             base_path: base_path.into(),
             keyring: ArcSwapOption::new(index_cipher.map(|c| Arc::new(IndexKeyring::single(c)))),
+            #[cfg(not(target_arch = "wasm32"))]
             install_lock: Mutex::new(()),
         }
     }
@@ -98,6 +103,7 @@ impl IndexPersistenceManager {
             keyring: ArcSwapOption::new(
                 index_cipher.map(|c| Arc::new(IndexKeyring::single_versioned(c, key_version))),
             ),
+            #[cfg(not(target_arch = "wasm32"))]
             install_lock: Mutex::new(()),
         }
     }
@@ -114,6 +120,7 @@ impl IndexPersistenceManager {
         Self {
             base_path: base_path.into(),
             keyring: ArcSwapOption::new(keyring.map(Arc::new)),
+            #[cfg(not(target_arch = "wasm32"))]
             install_lock: Mutex::new(()),
         }
     }
@@ -160,6 +167,7 @@ impl IndexPersistenceManager {
     // engine (Issue #3708), which drives this from `enable_encryption` after the
     // WAL's `install_wal_keyring` and the index plaintext -> `AEIX` wrap pass,
     // mirroring the WAL/cold seams.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn install_index_keyring(
         &self,
         keyring: IndexKeyring,

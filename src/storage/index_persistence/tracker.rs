@@ -41,12 +41,16 @@ pub(crate) struct PersistenceTracker {
     /// String interner mutation counter (new strings)
     string_mutations: AtomicU64,
     /// Last persist timestamp for vector indexes (unix timestamp)
+    #[cfg(not(target_arch = "wasm32"))]
     last_vector_persist: AtomicU64,
     /// Last persist timestamp for graph index
+    #[cfg(not(target_arch = "wasm32"))]
     last_graph_persist: AtomicU64,
     /// Last persist timestamp for temporal index
+    #[cfg(not(target_arch = "wasm32"))]
     last_temporal_persist: AtomicU64,
     /// Last persist timestamp for string interner
+    #[cfg(not(target_arch = "wasm32"))]
     last_string_persist: AtomicU64,
 
     /// Last persisted LSN for vector indexes
@@ -72,6 +76,8 @@ pub(crate) struct PersistenceTracker {
 impl PersistenceTracker {
     /// Create a new persistence tracker with all counters at zero.
     pub fn new() -> Self {
+        // Only the (native-only) `last_*_persist` timestamps below consume this.
+        #[cfg(not(target_arch = "wasm32"))]
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or(std::time::Duration::from_secs(0))
@@ -82,9 +88,13 @@ impl PersistenceTracker {
             graph_mutations: AtomicU64::new(0),
             temporal_mutations: AtomicU64::new(0),
             string_mutations: AtomicU64::new(0),
+            #[cfg(not(target_arch = "wasm32"))]
             last_vector_persist: AtomicU64::new(now),
+            #[cfg(not(target_arch = "wasm32"))]
             last_graph_persist: AtomicU64::new(now),
+            #[cfg(not(target_arch = "wasm32"))]
             last_temporal_persist: AtomicU64::new(now),
+            #[cfg(not(target_arch = "wasm32"))]
             last_string_persist: AtomicU64::new(now),
             last_vector_lsn: AtomicU64::new(0),
             last_graph_lsn: AtomicU64::new(0),
@@ -106,21 +116,25 @@ impl PersistenceTracker {
     }
 
     /// Update the last persisted LSN for vector indexes.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn update_vector_lsn(&self, lsn: u64) {
         self.last_vector_lsn.fetch_max(lsn, Ordering::Release);
     }
 
     /// Update the last persisted LSN for graph index.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn update_graph_lsn(&self, lsn: u64) {
         self.last_graph_lsn.fetch_max(lsn, Ordering::Release);
     }
 
     /// Update the last persisted LSN for temporal index.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn update_temporal_lsn(&self, lsn: u64) {
         self.last_temporal_lsn.fetch_max(lsn, Ordering::Release);
     }
 
     /// Update the last persisted LSN for string interner.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn update_string_lsn(&self, lsn: u64) {
         self.last_string_lsn.fetch_max(lsn, Ordering::Release);
     }
@@ -134,11 +148,13 @@ impl PersistenceTracker {
     }
 
     /// Get the last persisted node count.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn get_last_persisted_node_count(&self) -> u64 {
         self.last_persisted_node_count.load(Ordering::Acquire)
     }
 
     /// Get the last persisted edge count.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn get_last_persisted_edge_count(&self) -> u64 {
         self.last_persisted_edge_count.load(Ordering::Acquire)
     }
@@ -150,6 +166,7 @@ impl PersistenceTracker {
     }
 
     /// Get the last persisted string count.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn get_last_persisted_string_count(&self) -> u64 {
         self.last_persisted_string_count.load(Ordering::Acquire)
     }
@@ -159,6 +176,7 @@ impl PersistenceTracker {
     /// This LSN represents the point in time up to which ALL persisted components are consistent.
     /// WAL replay should start from this LSN to ensure no operations are missed for components
     /// that might be lagging behind.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn get_safe_manifest_lsn(&self) -> u64 {
         let vector = self.last_vector_lsn.load(Ordering::Acquire);
         let graph = self.last_graph_lsn.load(Ordering::Acquire);
@@ -190,6 +208,7 @@ impl PersistenceTracker {
     }
 
     /// Get and reset vector mutation counter, updating last persist time.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn reset_vector_mutations(&self) -> u64 {
         let count = self.vector_mutations.swap(0, Ordering::Relaxed);
         self.last_vector_persist.store(
@@ -203,6 +222,7 @@ impl PersistenceTracker {
     }
 
     /// Get and reset graph mutation counter, updating last persist time.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn reset_graph_mutations(&self) -> u64 {
         let count = self.graph_mutations.swap(0, Ordering::Relaxed);
         self.last_graph_persist.store(
@@ -216,6 +236,7 @@ impl PersistenceTracker {
     }
 
     /// Get and reset temporal mutation counter, updating last persist time.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn reset_temporal_mutations(&self) -> u64 {
         let count = self.temporal_mutations.swap(0, Ordering::Relaxed);
         self.last_temporal_persist.store(
@@ -229,6 +250,7 @@ impl PersistenceTracker {
     }
 
     /// Get and reset string mutation counter, updating last persist time.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn reset_string_mutations(&self) -> u64 {
         let count = self.string_mutations.swap(0, Ordering::Relaxed);
         self.last_string_persist.store(
@@ -242,26 +264,31 @@ impl PersistenceTracker {
     }
 
     /// Get current vector mutation count without resetting.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn get_vector_mutations(&self) -> u64 {
         self.vector_mutations.load(Ordering::Relaxed)
     }
 
     /// Get current graph mutation count without resetting.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn get_graph_mutations(&self) -> u64 {
         self.graph_mutations.load(Ordering::Relaxed)
     }
 
     /// Get current temporal mutation count without resetting.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn get_temporal_mutations(&self) -> u64 {
         self.temporal_mutations.load(Ordering::Relaxed)
     }
 
     /// Get current string mutation count without resetting.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn get_string_mutations(&self) -> u64 {
         self.string_mutations.load(Ordering::Relaxed)
     }
 
     /// Get seconds since last vector persist.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn seconds_since_vector_persist(&self) -> u64 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -272,6 +299,7 @@ impl PersistenceTracker {
     }
 
     /// Get seconds since last graph persist.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn seconds_since_graph_persist(&self) -> u64 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -282,6 +310,7 @@ impl PersistenceTracker {
     }
 
     /// Get seconds since last temporal persist.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn seconds_since_temporal_persist(&self) -> u64 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -292,6 +321,7 @@ impl PersistenceTracker {
     }
 
     /// Get seconds since last string persist.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn seconds_since_string_persist(&self) -> u64 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -313,11 +343,13 @@ impl PersistenceTracker {
     /// tracker (so the write path's mutation counters and persisted-LSN watermarks
     /// carry over). Clears only the in-memory shutdown flag; counters/timestamps
     /// are untouched.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn clear_shutdown(&self) {
         self.shutdown.store(false, Ordering::Release);
     }
 
     /// Check if shutdown has been signaled.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
     }

@@ -1,7 +1,9 @@
 //! Administrative and test-only helper methods.
 //!
 //! Provides internal statistics, test visibility, and database maintenance operations.
-use crate::core::error::{PersistenceErrorKind, Result, ResultExt, StorageError};
+use crate::core::error::Result;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::core::error::{PersistenceErrorKind, ResultExt, StorageError};
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::index::temporal::TemporalIndexes;
@@ -9,6 +11,7 @@ use crate::query::planner::Statistics;
 #[cfg(test)]
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::{HistoricalStats, HistoricalStorage};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::storage::index_persistence::operations::{
     persist_graph_index_from_snapshot, persist_temporal_adjacency_index,
     persist_temporal_index_from_snapshot, persist_vector_indexes,
@@ -46,6 +49,20 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// On the wasm32 ephemeral profile there is no disk index-persistence tier,
+    /// so this is an inert no-op that reports success.
+    #[cfg(target_arch = "wasm32")]
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn persist_indexes(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Persist all indexes (graph, temporal, vector, strings) to disk in the
+    /// configured persistence directory. See the type-level documentation on the
+    /// wasm32 variant of this method for the full contract; this is the native
+    /// implementation that performs the actual disk I/O.
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn persist_indexes(&self) -> Result<()> {
         let result = (|| {

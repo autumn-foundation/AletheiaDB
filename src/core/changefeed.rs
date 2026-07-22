@@ -195,6 +195,7 @@ impl ChangeCursor {
     /// transaction-time window: `min_at(start)` (inclusive) and `min_at(end)` (exclusive) exactly
     /// select the versions whose commit timestamp lies in the half-open window, mirroring
     /// [`TimeRange::contains`](crate::core::temporal::TimeRange::contains).
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn min_at(tx: Timestamp) -> Self {
         ChangeCursor {
             tx_wallclock: tx.wallclock(),
@@ -210,6 +211,7 @@ impl ChangeCursor {
     /// Mirrors the cursor [`build_raw_change`] computes for the same version, so a directory entry
     /// built from a migrated version is byte-identical to what the changefeed scan would produce.
     /// `tx_start` is the version's transaction-time interval start.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn for_version(
         tx_start: Timestamp,
         kind: EntityKind,
@@ -486,6 +488,7 @@ impl BoundedChanges {
     /// Used by the cold-tier directory pushdown (Issue #3677) to early-stop a bounded,
     /// ascending-cursor point-read walk: once `len() >= bound` no later (larger-cursor) candidate
     /// can displace a retained survivor, so the walk may stop.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn len(&self) -> usize {
         match &self.inner {
             BoundedInner::Unbounded(v) => v.len(),

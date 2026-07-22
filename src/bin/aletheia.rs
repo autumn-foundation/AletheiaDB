@@ -4,107 +4,123 @@
 //! - Direct local graph operations (inspired by MCP tool semantics)
 //! - Daemon management for the HTTP server process
 
-use std::env;
-use std::fs;
-use std::io::{self, ErrorKind, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+// The AletheiaDB CLI targets a real OS (filesystem, subprocess/daemon
+// management, durable backup/restore/rotation) and is not built for the
+// wasm32 ephemeral profile. On wasm the whole implementation is compiled out
+// behind `mod native_cli`, leaving only an inert entry point so the bin target
+// still type-checks.
+#[cfg(target_arch = "wasm32")]
+fn main() {}
 
-#[cfg(feature = "serde")]
-use aletheiadb::provenance_chain::ChainHead;
-use aletheiadb::provenance_chain::{ChainVerification, EntityKind};
-use aletheiadb::{
-    AletheiaDB, Edge, EdgeId, GLOBAL_INTERNER, Node, NodeId, PitrTarget, PropertyMap,
-    PropertyMapBuilder, PropertyValue, Timestamp,
-};
-
-const DEFAULT_PID_FILE: &str = ".aletheia/daemon.pid";
-const DEFAULT_LOG_FILE: &str = ".aletheia/daemon.log";
-const DEFAULT_HOST: &str = "127.0.0.1";
-const DEFAULT_PORT: u16 = 1963;
-const SERVER_BIN_NAME: &str = "aletheia-server";
-
-#[derive(Debug, Clone)]
-struct DaemonMetadata {
-    pid: u32,
-    server_exe: PathBuf,
-}
-
-/// The main entry point for the AletheiaDB CLI.
-///
-/// This simply wraps `run()` and handles exiting with the correct status code
-/// if an error occurs.
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("error: {err}");
-        std::process::exit(1);
-    }
+    native_cli::main();
 }
 
-/// Parses CLI arguments and routes to the appropriate subcommand handler.
-///
-/// # Returns
-/// - `Ok(())` if the command succeeded.
-/// - `Err(String)` with an error message if something failed or syntax was wrong.
-fn run() -> Result<(), String> {
-    let mut args = env::args().skip(1);
-    match args.next().as_deref() {
-        Some("demo") => handle_demo(args.collect()),
-        Some("node") => handle_node(args.collect()),
-        Some("edge") => handle_edge(args.collect()),
-        Some("traverse") => handle_traverse(args.collect()),
-        Some("daemon") => handle_daemon(args.collect()),
-        Some("backup") => handle_backup(args.collect()),
-        Some("restore") => handle_restore(args.collect()),
-        Some("verify") => handle_verify(args.collect()),
-        // Encryption key operator commands (Issue #490): `keys generate`,
-        // `keys status`/`info`, `keys verify`, and `keys rotate` (wired to the
-        // shipped rotation engine, Issue #488).
-        Some("keys") => handle_keys(args.collect()),
-        // Encryption-at-rest operator commands (Issue #490): per-layer status,
-        // decryptability verification, and (honestly-unimplemented) in-place
-        // enable/disable migration.
-        Some("encryption") => handle_encryption(args.collect()),
-        // A single `import` verb serves both formats; `handle_import` reads `--format`
-        // and dispatches to the neo4j-csv (Issue #3356) or parquet (Issue #3364) path.
-        // `handle_import` is always defined (a stub when the `import` feature is off).
-        Some("import") => handle_import(args.collect()),
-        // Shell completions (Issue #3619): generate a bash/zsh/fish/powershell/
-        // elvish completion script from the standalone clap mirror in
-        // `build_cli()`. Pure output generation — never opens the database.
-        Some("completions") => handle_completions(args.collect()),
-        #[cfg(feature = "parquet")]
-        Some("export") => parquet_io::handle_export(args.collect()),
-        #[cfg(feature = "audit-export")]
-        Some("audit-keygen") => audit::handle_keygen(args.collect()),
-        #[cfg(feature = "audit-export")]
-        Some("audit-export") => audit::handle_export(args.collect()),
-        #[cfg(feature = "audit-export")]
-        Some("audit-verify") => audit::handle_verify(args.collect()),
-        #[cfg(feature = "audit-export")]
-        Some("audit-render") => audit::handle_render(args.collect()),
-        // GDPR crypto-shred operator commands (Issue #3359): designate an
-        // erasure subject over one or more targets, then irreversibly erase it,
-        // returning a signed attestation. Local-admin context (no RBAC); the
-        // real precondition is that encryption is configured (via
-        // ALETHEIADB_CONFIG). Gated exactly like the `audit-*` verbs so
-        // `--no-default-features` builds stay clean.
-        #[cfg(feature = "audit-export")]
-        Some("designate-subject") => crypto_shred_cli::handle_designate_subject(args.collect()),
-        #[cfg(feature = "audit-export")]
-        Some("erase-subject") => crypto_shred_cli::handle_erase_subject(args.collect()),
-        Some("help") | Some("--help") | Some("-h") | None => {
-            print_usage();
-            Ok(())
+#[cfg(not(target_arch = "wasm32"))]
+mod native_cli {
+
+    use std::env;
+    use std::fs;
+    use std::io::{self, ErrorKind, Write};
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+
+    #[cfg(feature = "serde")]
+    use aletheiadb::provenance_chain::ChainHead;
+    use aletheiadb::provenance_chain::{ChainVerification, EntityKind};
+    use aletheiadb::{
+        AletheiaDB, Edge, EdgeId, GLOBAL_INTERNER, Node, NodeId, PitrTarget, PropertyMap,
+        PropertyMapBuilder, PropertyValue, Timestamp,
+    };
+
+    const DEFAULT_PID_FILE: &str = ".aletheia/daemon.pid";
+    const DEFAULT_LOG_FILE: &str = ".aletheia/daemon.log";
+    const DEFAULT_HOST: &str = "127.0.0.1";
+    const DEFAULT_PORT: u16 = 1963;
+    const SERVER_BIN_NAME: &str = "aletheia-server";
+
+    #[derive(Debug, Clone)]
+    struct DaemonMetadata {
+        pid: u32,
+        server_exe: PathBuf,
+    }
+
+    /// The main entry point for the AletheiaDB CLI.
+    ///
+    /// This simply wraps `run()` and handles exiting with the correct status code
+    /// if an error occurs.
+    pub(crate) fn main() {
+        if let Err(err) = run() {
+            eprintln!("error: {err}");
+            std::process::exit(1);
         }
-        Some(cmd) => Err(format!("unknown command '{cmd}'")),
     }
-}
 
-/// Prints the CLI usage instructions to standard output.
-fn print_usage() {
-    println!(
-        "AletheiaDB CLI\n\n\
+    /// Parses CLI arguments and routes to the appropriate subcommand handler.
+    ///
+    /// # Returns
+    /// - `Ok(())` if the command succeeded.
+    /// - `Err(String)` with an error message if something failed or syntax was wrong.
+    fn run() -> Result<(), String> {
+        let mut args = env::args().skip(1);
+        match args.next().as_deref() {
+            Some("demo") => handle_demo(args.collect()),
+            Some("node") => handle_node(args.collect()),
+            Some("edge") => handle_edge(args.collect()),
+            Some("traverse") => handle_traverse(args.collect()),
+            Some("daemon") => handle_daemon(args.collect()),
+            Some("backup") => handle_backup(args.collect()),
+            Some("restore") => handle_restore(args.collect()),
+            Some("verify") => handle_verify(args.collect()),
+            // Encryption key operator commands (Issue #490): `keys generate`,
+            // `keys status`/`info`, `keys verify`, and `keys rotate` (wired to the
+            // shipped rotation engine, Issue #488).
+            Some("keys") => handle_keys(args.collect()),
+            // Encryption-at-rest operator commands (Issue #490): per-layer status,
+            // decryptability verification, and (honestly-unimplemented) in-place
+            // enable/disable migration.
+            Some("encryption") => handle_encryption(args.collect()),
+            // A single `import` verb serves both formats; `handle_import` reads `--format`
+            // and dispatches to the neo4j-csv (Issue #3356) or parquet (Issue #3364) path.
+            // `handle_import` is always defined (a stub when the `import` feature is off).
+            Some("import") => handle_import(args.collect()),
+            // Shell completions (Issue #3619): generate a bash/zsh/fish/powershell/
+            // elvish completion script from the standalone clap mirror in
+            // `build_cli()`. Pure output generation — never opens the database.
+            Some("completions") => handle_completions(args.collect()),
+            #[cfg(feature = "parquet")]
+            Some("export") => parquet_io::handle_export(args.collect()),
+            #[cfg(feature = "audit-export")]
+            Some("audit-keygen") => audit::handle_keygen(args.collect()),
+            #[cfg(feature = "audit-export")]
+            Some("audit-export") => audit::handle_export(args.collect()),
+            #[cfg(feature = "audit-export")]
+            Some("audit-verify") => audit::handle_verify(args.collect()),
+            #[cfg(feature = "audit-export")]
+            Some("audit-render") => audit::handle_render(args.collect()),
+            // GDPR crypto-shred operator commands (Issue #3359): designate an
+            // erasure subject over one or more targets, then irreversibly erase it,
+            // returning a signed attestation. Local-admin context (no RBAC); the
+            // real precondition is that encryption is configured (via
+            // ALETHEIADB_CONFIG). Gated exactly like the `audit-*` verbs so
+            // `--no-default-features` builds stay clean.
+            #[cfg(feature = "audit-export")]
+            Some("designate-subject") => crypto_shred_cli::handle_designate_subject(args.collect()),
+            #[cfg(feature = "audit-export")]
+            Some("erase-subject") => crypto_shred_cli::handle_erase_subject(args.collect()),
+            Some("help") | Some("--help") | Some("-h") | None => {
+                print_usage();
+                Ok(())
+            }
+            Some(cmd) => Err(format!("unknown command '{cmd}'")),
+        }
+    }
+
+    /// Prints the CLI usage instructions to standard output.
+    fn print_usage() {
+        println!(
+            "AletheiaDB CLI\n\n\
 Usage:\n\
   aletheia demo\n\
   aletheia node create <label> [--properties '{{\"k\":\"v\"}}']\n\
@@ -127,32 +143,32 @@ Usage:\n\
   aletheia encryption verify [--key-file PATH | --env-var NAME]\n\
   aletheia encryption enable (--key-file PATH | --env-var NAME) | disable\n\
   aletheia completions <bash|zsh|fish|powershell|elvish>"
-    );
-    // The neo4j-csv import verb is gated behind the `import` feature; only advertise it
-    // when it is compiled in.
-    #[cfg(feature = "import")]
-    println!(
-        "  aletheia import --format neo4j-csv --nodes <f>... --relationships <f>... [options]"
-    );
-    #[cfg(feature = "import")]
-    println!("  aletheia import --format xtdb --history <history.edn> [options]");
-    #[cfg(feature = "import")]
-    println!(
-        "  aletheia import --format datomic --datoms <log.edn> --schema <schema.edn> [options]"
-    );
-    // The parquet import/export verbs are gated behind the `parquet` feature; only
-    // advertise them when they are actually compiled in (a default build returns
-    // "unknown command" for them otherwise).
-    #[cfg(feature = "parquet")]
-    println!(
-        "  aletheia import <nodes_file> --format parquet --label L --key COL [--property name:type ...]\n\
+        );
+        // The neo4j-csv import verb is gated behind the `import` feature; only advertise it
+        // when it is compiled in.
+        #[cfg(feature = "import")]
+        println!(
+            "  aletheia import --format neo4j-csv --nodes <f>... --relationships <f>... [options]"
+        );
+        #[cfg(feature = "import")]
+        println!("  aletheia import --format xtdb --history <history.edn> [options]");
+        #[cfg(feature = "import")]
+        println!(
+            "  aletheia import --format datomic --datoms <log.edn> --schema <schema.edn> [options]"
+        );
+        // The parquet import/export verbs are gated behind the `parquet` feature; only
+        // advertise them when they are actually compiled in (a default build returns
+        // "unknown command" for them otherwise).
+        #[cfg(feature = "parquet")]
+        println!(
+            "  aletheia import <nodes_file> --format parquet --label L --key COL [--property name:type ...]\n\
                   [--label-column COL] [--valid-time-column COL]\n\
                   [--edges FILE --edge-label L --source-key COL --target-key COL\n\
                    [--edge-property name:type ...] [--edge-valid-time-column COL]]\n\
   aletheia export <out_prefix> --format parquet [--mode current|history]"
-    );
-    println!(
-        "  aletheia audit-keygen <key_file>\n\
+        );
+        println!(
+            "  aletheia audit-keygen <key_file>\n\
   aletheia audit-export <node|edge> <id> --key <key_file> --out <path> [--db-id ID] [--redact k1,k2]\n\
   aletheia audit-verify <artifact_path> [--public-key HEX]\n\
   aletheia audit-render <artifact_path>\n\
@@ -246,2967 +262,1749 @@ Usage:\n\
                 reflects the subcommands compiled into this binary. See the\n\
                 \"Shell completions\" section of the README for install snippets,\n\
                 e.g. `aletheia completions bash > /etc/bash_completion.d/aletheia`.\n"
-    );
-}
-
-/// Builds a standalone clap `Command` that MIRRORS the CLI's hand-rolled command
-/// surface (Issue #3619).
-///
-/// This is deliberately built with the clap **builder** API (not the derive
-/// macro) and is used for exactly one purpose today: driving
-/// `clap_complete::generate` so `aletheia completions <shell>` can emit real
-/// bash/zsh/fish/powershell/elvish completion scripts that reflect the current
-/// subcommand surface. The actual argument dispatch in [`run`] remains the
-/// hand-rolled parser and is left 100% untouched.
-///
-/// This clap `Command` is a **hand-maintained MIRROR** of the hand-rolled
-/// dispatch in [`run`], existing solely to drive `clap_complete`. The
-/// feature-gated subcommands are wrapped in the SAME `cfg` as their dispatch
-/// arms, so a completion script always matches the features the binary was
-/// actually compiled with. Subcommand presence and feature-gate parity with
-/// the dispatch are asserted by tests (see `completions_tests`); per-command
-/// FLAG coverage, however, is illustrative / best-effort and NOT exhaustive —
-/// individual `--flag` args here are a convenience for completion, not a
-/// verified 1:1 reflection of every flag `run` accepts.
-///
-/// NOTE (future work): this `Command` is intended to be the seed a future full
-/// clap migration — the real blocker behind #3619 — can adopt as its parser,
-/// replacing the hand-rolled `match` in [`run`] and [`print_usage`].
-fn build_cli() -> clap::Command {
-    use clap::{Arg, Command, value_parser};
-
-    // `cli` is reassigned only inside the `parquet` / `audit-export` cfg blocks
-    // below; when neither feature is compiled in it is never mutated, so scope
-    // the `unused_mut` suppression to exactly that configuration.
-    #[cfg_attr(
-        not(any(feature = "parquet", feature = "audit-export")),
-        allow(unused_mut)
-    )]
-    let mut cli = Command::new("aletheia")
-        .about("AletheiaDB CLI — local bi-temporal graph operations and daemon management")
-        .subcommand_required(false)
-        .arg_required_else_help(false)
-        .subcommand(
-            Command::new("demo").about("Boot a seeded ephemeral graph and run a guided tour"),
-        )
-        .subcommand(
-            Command::new("node")
-                .about("Node operations")
-                .subcommand(
-                    Command::new("create")
-                        .about("Create a node")
-                        .arg(Arg::new("label").required(true))
-                        .arg(Arg::new("properties").long("properties")),
-                )
-                .subcommand(
-                    Command::new("get")
-                        .about("Get a node by id")
-                        .arg(Arg::new("node_id").required(true)),
-                ),
-        )
-        .subcommand(
-            Command::new("edge")
-                .about("Edge operations")
-                .subcommand(
-                    Command::new("create")
-                        .about("Create an edge")
-                        .arg(Arg::new("source_id").required(true))
-                        .arg(Arg::new("target_id").required(true))
-                        .arg(Arg::new("label").required(true))
-                        .arg(Arg::new("properties").long("properties")),
-                )
-                .subcommand(
-                    Command::new("get")
-                        .about("Get an edge by id")
-                        .arg(Arg::new("edge_id").required(true)),
-                ),
-        )
-        .subcommand(
-            Command::new("traverse")
-                .about("Single-hop graph traversal from a start node")
-                .arg(Arg::new("start_node_id").required(true))
-                .arg(Arg::new("edge_label").required(true))
-                .arg(Arg::new("direction").long("direction")),
-        )
-        .subcommand(
-            Command::new("daemon")
-                .about("Manage the background HTTP server process")
-                .subcommand(
-                    Command::new("start")
-                        .about("Start the daemon")
-                        .arg(Arg::new("pid-file").long("pid-file"))
-                        .arg(Arg::new("log-file").long("log-file"))
-                        .arg(Arg::new("host").long("host"))
-                        .arg(Arg::new("port").long("port")),
-                )
-                .subcommand(
-                    Command::new("stop")
-                        .about("Stop the daemon")
-                        .arg(Arg::new("pid-file").long("pid-file")),
-                )
-                .subcommand(
-                    Command::new("status")
-                        .about("Report daemon status")
-                        .arg(Arg::new("pid-file").long("pid-file")),
-                ),
-        )
-        .subcommand(
-            Command::new("backup")
-                .about("Write a portable .albk backup artifact")
-                .arg(Arg::new("path").required(true)),
-        )
-        .subcommand(
-            Command::new("restore")
-                .about("Restore a .albk artifact (optionally point-in-time)")
-                .arg(Arg::new("path").required(true))
-                .arg(Arg::new("wal-archive").long("wal-archive"))
-                .arg(Arg::new("as-of").long("as-of"))
-                .arg(Arg::new("lsn").long("lsn"))
-                .arg(Arg::new("latest").long("latest").num_args(0))
-                .arg(Arg::new("dry-run").long("dry-run").num_args(0)),
-        )
-        .subcommand({
-            // `--entity`/`--json` are always accepted by `handle_verify`; the
-            // `--export-head`/`--against` chain-head anchor flags are only
-            // wired up under `#[cfg(feature = "serde")]` there, so gate them
-            // identically here to keep completions honest under
-            // `--no-default-features`.
-            #[cfg_attr(not(feature = "serde"), allow(unused_mut))]
-            let mut verify = Command::new("verify")
-                .about("Verify the tamper-evident provenance hash chain")
-                .arg(Arg::new("entity").long("entity"))
-                .arg(Arg::new("json").long("json").num_args(0));
-            #[cfg(feature = "serde")]
-            {
-                verify = verify
-                    .arg(Arg::new("export-head").long("export-head"))
-                    .arg(Arg::new("against").long("against"));
-            }
-            verify
-        })
-        .subcommand(
-            Command::new("keys")
-                .about("Encryption key operator commands")
-                .subcommand(
-                    Command::new("generate")
-                        .about("Provision a new master key file")
-                        .arg(Arg::new("output").long("output"))
-                        .arg(Arg::new("force").long("force").num_args(0))
-                        .arg(Arg::new("passphrase").long("passphrase").num_args(0)),
-                )
-                .subcommand(
-                    Command::new("status")
-                        .visible_alias("info")
-                        .about("Show key configuration (no key material)")
-                        .arg(Arg::new("key-file").long("key-file"))
-                        .arg(Arg::new("env-var").long("env-var")),
-                )
-                .subcommand(
-                    Command::new("verify")
-                        .about("Verify a key file loads and is valid")
-                        .arg(Arg::new("key-file").long("key-file")),
-                )
-                .subcommand(
-                    Command::new("rotate")
-                        .about("Rotate the master encryption key")
-                        .arg(Arg::new("new-key").long("new-key"))
-                        .arg(Arg::new("new-env-var").long("new-env-var"))
-                        .arg(Arg::new("status").long("status").num_args(0))
-                        .arg(Arg::new("resume").long("resume").num_args(0))
-                        .arg(Arg::new("cancel").long("cancel").num_args(0)),
-                ),
-        )
-        .subcommand(
-            Command::new("encryption")
-                .about("Encryption-at-rest operator commands")
-                .subcommand(
-                    Command::new("status")
-                        .about("Per-layer encryption status")
-                        .arg(Arg::new("key-file").long("key-file"))
-                        .arg(Arg::new("env-var").long("env-var")),
-                )
-                .subcommand(
-                    Command::new("verify")
-                        .about("Verify the configured DB's encrypted data decrypts")
-                        .arg(Arg::new("key-file").long("key-file"))
-                        .arg(Arg::new("env-var").long("env-var")),
-                )
-                .subcommand(
-                    Command::new("enable")
-                        .about("Migrate a plaintext DB to encrypted-at-rest")
-                        .arg(Arg::new("key-file").long("key-file"))
-                        .arg(Arg::new("env-var").long("env-var")),
-                )
-                .subcommand(
-                    Command::new("disable")
-                        .about("Migrate an encrypted DB back to plaintext-at-rest"),
-                ),
-        )
-        .subcommand(
-            Command::new("import")
-                .about("Import data into the database")
-                .arg(Arg::new("format").long("format"))
-                .arg(Arg::new("nodes").long("nodes"))
-                .arg(Arg::new("relationships").long("relationships"))
-                .arg(Arg::new("report").long("report")),
-        );
-
-    // Feature-gated verbs — mirror the dispatcher's `cfg` exactly so a completion
-    // script never advertises a command the compiled binary does not have.
-    #[cfg(feature = "parquet")]
-    {
-        cli = cli.subcommand(
-            Command::new("export")
-                .about("Export the database to Parquet")
-                .arg(Arg::new("out_prefix").required(true))
-                .arg(Arg::new("format").long("format"))
-                .arg(Arg::new("mode").long("mode")),
         );
     }
-    #[cfg(feature = "audit-export")]
-    {
-        cli = cli
+
+    /// Builds a standalone clap `Command` that MIRRORS the CLI's hand-rolled command
+    /// surface (Issue #3619).
+    ///
+    /// This is deliberately built with the clap **builder** API (not the derive
+    /// macro) and is used for exactly one purpose today: driving
+    /// `clap_complete::generate` so `aletheia completions <shell>` can emit real
+    /// bash/zsh/fish/powershell/elvish completion scripts that reflect the current
+    /// subcommand surface. The actual argument dispatch in [`run`] remains the
+    /// hand-rolled parser and is left 100% untouched.
+    ///
+    /// This clap `Command` is a **hand-maintained MIRROR** of the hand-rolled
+    /// dispatch in [`run`], existing solely to drive `clap_complete`. The
+    /// feature-gated subcommands are wrapped in the SAME `cfg` as their dispatch
+    /// arms, so a completion script always matches the features the binary was
+    /// actually compiled with. Subcommand presence and feature-gate parity with
+    /// the dispatch are asserted by tests (see `completions_tests`); per-command
+    /// FLAG coverage, however, is illustrative / best-effort and NOT exhaustive —
+    /// individual `--flag` args here are a convenience for completion, not a
+    /// verified 1:1 reflection of every flag `run` accepts.
+    ///
+    /// NOTE (future work): this `Command` is intended to be the seed a future full
+    /// clap migration — the real blocker behind #3619 — can adopt as its parser,
+    /// replacing the hand-rolled `match` in [`run`] and [`print_usage`].
+    fn build_cli() -> clap::Command {
+        use clap::{Arg, Command, value_parser};
+
+        // `cli` is reassigned only inside the `parquet` / `audit-export` cfg blocks
+        // below; when neither feature is compiled in it is never mutated, so scope
+        // the `unused_mut` suppression to exactly that configuration.
+        #[cfg_attr(
+            not(any(feature = "parquet", feature = "audit-export")),
+            allow(unused_mut)
+        )]
+        let mut cli = Command::new("aletheia")
+            .about("AletheiaDB CLI — local bi-temporal graph operations and daemon management")
+            .subcommand_required(false)
+            .arg_required_else_help(false)
             .subcommand(
-                Command::new("audit-keygen")
-                    .about("Generate an Ed25519 audit signing key")
-                    .arg(Arg::new("key_file").required(true)),
+                Command::new("demo").about("Boot a seeded ephemeral graph and run a guided tour"),
             )
             .subcommand(
-                Command::new("audit-export")
-                    .about("Sign an entity's full bi-temporal history")
-                    .arg(Arg::new("kind").required(true))
-                    .arg(Arg::new("id").required(true))
-                    .arg(Arg::new("key").long("key"))
-                    .arg(Arg::new("out").long("out"))
-                    .arg(Arg::new("db-id").long("db-id"))
-                    .arg(Arg::new("redact").long("redact")),
+                Command::new("node")
+                    .about("Node operations")
+                    .subcommand(
+                        Command::new("create")
+                            .about("Create a node")
+                            .arg(Arg::new("label").required(true))
+                            .arg(Arg::new("properties").long("properties")),
+                    )
+                    .subcommand(
+                        Command::new("get")
+                            .about("Get a node by id")
+                            .arg(Arg::new("node_id").required(true)),
+                    ),
             )
             .subcommand(
-                Command::new("audit-verify")
-                    .about("Verify an audit artifact offline")
-                    .arg(Arg::new("artifact_path").required(true))
-                    .arg(Arg::new("public-key").long("public-key")),
+                Command::new("edge")
+                    .about("Edge operations")
+                    .subcommand(
+                        Command::new("create")
+                            .about("Create an edge")
+                            .arg(Arg::new("source_id").required(true))
+                            .arg(Arg::new("target_id").required(true))
+                            .arg(Arg::new("label").required(true))
+                            .arg(Arg::new("properties").long("properties")),
+                    )
+                    .subcommand(
+                        Command::new("get")
+                            .about("Get an edge by id")
+                            .arg(Arg::new("edge_id").required(true)),
+                    ),
             )
             .subcommand(
-                Command::new("audit-render")
-                    .about("Render an audit artifact as a chronology")
-                    .arg(Arg::new("artifact_path").required(true)),
+                Command::new("traverse")
+                    .about("Single-hop graph traversal from a start node")
+                    .arg(Arg::new("start_node_id").required(true))
+                    .arg(Arg::new("edge_label").required(true))
+                    .arg(Arg::new("direction").long("direction")),
             )
             .subcommand(
-                Command::new("designate-subject")
-                    .about("Group entities under a GDPR erasure subject")
-                    .arg(Arg::new("subject_id").required(true))
-                    .arg(Arg::new("target").long("target")),
+                Command::new("daemon")
+                    .about("Manage the background HTTP server process")
+                    .subcommand(
+                        Command::new("start")
+                            .about("Start the daemon")
+                            .arg(Arg::new("pid-file").long("pid-file"))
+                            .arg(Arg::new("log-file").long("log-file"))
+                            .arg(Arg::new("host").long("host"))
+                            .arg(Arg::new("port").long("port")),
+                    )
+                    .subcommand(
+                        Command::new("stop")
+                            .about("Stop the daemon")
+                            .arg(Arg::new("pid-file").long("pid-file")),
+                    )
+                    .subcommand(
+                        Command::new("status")
+                            .about("Report daemon status")
+                            .arg(Arg::new("pid-file").long("pid-file")),
+                    ),
             )
             .subcommand(
-                Command::new("erase-subject")
-                    .about("Irreversibly erase a designated subject")
-                    .arg(Arg::new("subject_id").required(true)),
+                Command::new("backup")
+                    .about("Write a portable .albk backup artifact")
+                    .arg(Arg::new("path").required(true)),
+            )
+            .subcommand(
+                Command::new("restore")
+                    .about("Restore a .albk artifact (optionally point-in-time)")
+                    .arg(Arg::new("path").required(true))
+                    .arg(Arg::new("wal-archive").long("wal-archive"))
+                    .arg(Arg::new("as-of").long("as-of"))
+                    .arg(Arg::new("lsn").long("lsn"))
+                    .arg(Arg::new("latest").long("latest").num_args(0))
+                    .arg(Arg::new("dry-run").long("dry-run").num_args(0)),
+            )
+            .subcommand({
+                // `--entity`/`--json` are always accepted by `handle_verify`; the
+                // `--export-head`/`--against` chain-head anchor flags are only
+                // wired up under `#[cfg(feature = "serde")]` there, so gate them
+                // identically here to keep completions honest under
+                // `--no-default-features`.
+                #[cfg_attr(not(feature = "serde"), allow(unused_mut))]
+                let mut verify = Command::new("verify")
+                    .about("Verify the tamper-evident provenance hash chain")
+                    .arg(Arg::new("entity").long("entity"))
+                    .arg(Arg::new("json").long("json").num_args(0));
+                #[cfg(feature = "serde")]
+                {
+                    verify = verify
+                        .arg(Arg::new("export-head").long("export-head"))
+                        .arg(Arg::new("against").long("against"));
+                }
+                verify
+            })
+            .subcommand(
+                Command::new("keys")
+                    .about("Encryption key operator commands")
+                    .subcommand(
+                        Command::new("generate")
+                            .about("Provision a new master key file")
+                            .arg(Arg::new("output").long("output"))
+                            .arg(Arg::new("force").long("force").num_args(0))
+                            .arg(Arg::new("passphrase").long("passphrase").num_args(0)),
+                    )
+                    .subcommand(
+                        Command::new("status")
+                            .visible_alias("info")
+                            .about("Show key configuration (no key material)")
+                            .arg(Arg::new("key-file").long("key-file"))
+                            .arg(Arg::new("env-var").long("env-var")),
+                    )
+                    .subcommand(
+                        Command::new("verify")
+                            .about("Verify a key file loads and is valid")
+                            .arg(Arg::new("key-file").long("key-file")),
+                    )
+                    .subcommand(
+                        Command::new("rotate")
+                            .about("Rotate the master encryption key")
+                            .arg(Arg::new("new-key").long("new-key"))
+                            .arg(Arg::new("new-env-var").long("new-env-var"))
+                            .arg(Arg::new("status").long("status").num_args(0))
+                            .arg(Arg::new("resume").long("resume").num_args(0))
+                            .arg(Arg::new("cancel").long("cancel").num_args(0)),
+                    ),
+            )
+            .subcommand(
+                Command::new("encryption")
+                    .about("Encryption-at-rest operator commands")
+                    .subcommand(
+                        Command::new("status")
+                            .about("Per-layer encryption status")
+                            .arg(Arg::new("key-file").long("key-file"))
+                            .arg(Arg::new("env-var").long("env-var")),
+                    )
+                    .subcommand(
+                        Command::new("verify")
+                            .about("Verify the configured DB's encrypted data decrypts")
+                            .arg(Arg::new("key-file").long("key-file"))
+                            .arg(Arg::new("env-var").long("env-var")),
+                    )
+                    .subcommand(
+                        Command::new("enable")
+                            .about("Migrate a plaintext DB to encrypted-at-rest")
+                            .arg(Arg::new("key-file").long("key-file"))
+                            .arg(Arg::new("env-var").long("env-var")),
+                    )
+                    .subcommand(
+                        Command::new("disable")
+                            .about("Migrate an encrypted DB back to plaintext-at-rest"),
+                    ),
+            )
+            .subcommand(
+                Command::new("import")
+                    .about("Import data into the database")
+                    .arg(Arg::new("format").long("format"))
+                    .arg(Arg::new("nodes").long("nodes"))
+                    .arg(Arg::new("relationships").long("relationships"))
+                    .arg(Arg::new("report").long("report")),
             );
+
+        // Feature-gated verbs — mirror the dispatcher's `cfg` exactly so a completion
+        // script never advertises a command the compiled binary does not have.
+        #[cfg(feature = "parquet")]
+        {
+            cli = cli.subcommand(
+                Command::new("export")
+                    .about("Export the database to Parquet")
+                    .arg(Arg::new("out_prefix").required(true))
+                    .arg(Arg::new("format").long("format"))
+                    .arg(Arg::new("mode").long("mode")),
+            );
+        }
+        #[cfg(feature = "audit-export")]
+        {
+            cli = cli
+                .subcommand(
+                    Command::new("audit-keygen")
+                        .about("Generate an Ed25519 audit signing key")
+                        .arg(Arg::new("key_file").required(true)),
+                )
+                .subcommand(
+                    Command::new("audit-export")
+                        .about("Sign an entity's full bi-temporal history")
+                        .arg(Arg::new("kind").required(true))
+                        .arg(Arg::new("id").required(true))
+                        .arg(Arg::new("key").long("key"))
+                        .arg(Arg::new("out").long("out"))
+                        .arg(Arg::new("db-id").long("db-id"))
+                        .arg(Arg::new("redact").long("redact")),
+                )
+                .subcommand(
+                    Command::new("audit-verify")
+                        .about("Verify an audit artifact offline")
+                        .arg(Arg::new("artifact_path").required(true))
+                        .arg(Arg::new("public-key").long("public-key")),
+                )
+                .subcommand(
+                    Command::new("audit-render")
+                        .about("Render an audit artifact as a chronology")
+                        .arg(Arg::new("artifact_path").required(true)),
+                )
+                .subcommand(
+                    Command::new("designate-subject")
+                        .about("Group entities under a GDPR erasure subject")
+                        .arg(Arg::new("subject_id").required(true))
+                        .arg(Arg::new("target").long("target")),
+                )
+                .subcommand(
+                    Command::new("erase-subject")
+                        .about("Irreversibly erase a designated subject")
+                        .arg(Arg::new("subject_id").required(true)),
+                );
+        }
+
+        // The completions verb itself, so `aletheia completions <TAB>` completes the
+        // shell name too.
+        cli.subcommand(
+            Command::new("completions")
+                .about("Generate a shell completion script (bash, zsh, fish, powershell, elvish)")
+                .arg(
+                    Arg::new("shell")
+                        .required(true)
+                        .value_parser(value_parser!(clap_complete::Shell)),
+                ),
+        )
     }
 
-    // The completions verb itself, so `aletheia completions <TAB>` completes the
-    // shell name too.
-    cli.subcommand(
-        Command::new("completions")
-            .about("Generate a shell completion script (bash, zsh, fish, powershell, elvish)")
-            .arg(
-                Arg::new("shell")
-                    .required(true)
-                    .value_parser(value_parser!(clap_complete::Shell)),
-            ),
-    )
-}
+    /// `aletheia completions <shell>` — print a shell completion script (Issue #3619).
+    ///
+    /// Parses the first argument as a [`clap_complete::Shell`] (bash, zsh, fish,
+    /// powershell, elvish) and writes the generated completion script for the
+    /// [`build_cli`] mirror to stdout. A missing or unrecognized shell returns an
+    /// error naming the supported shells. This never opens the database or touches
+    /// the data directory.
+    fn handle_completions(args: Vec<String>) -> Result<(), String> {
+        const SUPPORTED: &str = "supported shells: bash, zsh, fish, powershell, elvish";
+        let shell_arg = args
+            .first()
+            .ok_or_else(|| format!("usage: aletheia completions <shell>\n{SUPPORTED}"))?;
+        let shell: clap_complete::Shell = shell_arg
+            .parse()
+            .map_err(|_| format!("unknown shell '{shell_arg}'; {SUPPORTED}"))?;
+        let mut out = io::stdout().lock();
+        clap_complete::generate(shell, &mut build_cli(), "aletheia", &mut out);
+        Ok(())
+    }
 
-/// `aletheia completions <shell>` — print a shell completion script (Issue #3619).
-///
-/// Parses the first argument as a [`clap_complete::Shell`] (bash, zsh, fish,
-/// powershell, elvish) and writes the generated completion script for the
-/// [`build_cli`] mirror to stdout. A missing or unrecognized shell returns an
-/// error naming the supported shells. This never opens the database or touches
-/// the data directory.
-fn handle_completions(args: Vec<String>) -> Result<(), String> {
-    const SUPPORTED: &str = "supported shells: bash, zsh, fish, powershell, elvish";
-    let shell_arg = args
-        .first()
-        .ok_or_else(|| format!("usage: aletheia completions <shell>\n{SUPPORTED}"))?;
-    let shell: clap_complete::Shell = shell_arg
-        .parse()
-        .map_err(|_| format!("unknown shell '{shell_arg}'; {SUPPORTED}"))?;
-    let mut out = io::stdout().lock();
-    clap_complete::generate(shell, &mut build_cli(), "aletheia", &mut out);
-    Ok(())
-}
+    /// `aletheia backup <output_path>` — create a portable backup artifact.
+    fn handle_backup(args: Vec<String>) -> Result<(), String> {
+        let path = args
+            .first()
+            .ok_or_else(|| "usage: aletheia backup <output_path>".to_string())?;
+        let db = open_db()?;
+        let summary = db
+            .backup(std::path::Path::new(path))
+            .map_err(|e| format!("backup failed: {e}"))?;
+        let value = serde_json::json!({
+            "ok": true,
+            "bytes_written": summary.bytes_written,
+            "node_versions": summary.node_versions,
+            "edge_versions": summary.edge_versions,
+            "current_node_count": summary.current_node_count,
+            "current_edge_count": summary.current_edge_count,
+            "source_lsn": summary.source_lsn,
+        });
+        let rendered = serde_json::to_string(&value)
+            .map_err(|e| format!("failed to render JSON output: {e}"))?;
+        println!("{rendered}");
+        Ok(())
+    }
 
-/// `aletheia backup <output_path>` — create a portable backup artifact.
-fn handle_backup(args: Vec<String>) -> Result<(), String> {
-    let path = args
-        .first()
-        .ok_or_else(|| "usage: aletheia backup <output_path>".to_string())?;
-    let db = open_db()?;
-    let summary = db
-        .backup(std::path::Path::new(path))
-        .map_err(|e| format!("backup failed: {e}"))?;
-    let value = serde_json::json!({
-        "ok": true,
-        "bytes_written": summary.bytes_written,
-        "node_versions": summary.node_versions,
-        "edge_versions": summary.edge_versions,
-        "current_node_count": summary.current_node_count,
-        "current_edge_count": summary.current_edge_count,
-        "source_lsn": summary.source_lsn,
-    });
-    let rendered =
-        serde_json::to_string(&value).map_err(|e| format!("failed to render JSON output: {e}"))?;
-    println!("{rendered}");
-    Ok(())
-}
-
-/// `aletheia restore <input_path>` — restore a backup artifact.
-///
-/// Two modes:
-/// * **Plain restore** (no `--wal-archive`): materialize the base `.albk` into
-///   `ALETHEIADB_DATA_DIR` (unchanged #3217 behavior).
-/// * **Point-in-time restore** (`--wal-archive <dir>`, Issue #3374): replay the
-///   archived WAL chain over the base to a target transaction-time coordinate
-///   (`--as-of <iso8601|micros>` XOR `--lsn <n>`). An in-window target does a
-///   partial restore; no target (or `--latest`) replays the whole archive to
-///   its tail; an explicit target above the tail is rejected (F2). `--dry-run`
-///   prints the achievable window + blast radius as JSON without side effects.
-fn handle_restore(args: Vec<String>) -> Result<(), String> {
-    let path = args
+    /// `aletheia restore <input_path>` — restore a backup artifact.
+    ///
+    /// Two modes:
+    /// * **Plain restore** (no `--wal-archive`): materialize the base `.albk` into
+    ///   `ALETHEIADB_DATA_DIR` (unchanged #3217 behavior).
+    /// * **Point-in-time restore** (`--wal-archive <dir>`, Issue #3374): replay the
+    ///   archived WAL chain over the base to a target transaction-time coordinate
+    ///   (`--as-of <iso8601|micros>` XOR `--lsn <n>`). An in-window target does a
+    ///   partial restore; no target (or `--latest`) replays the whole archive to
+    ///   its tail; an explicit target above the tail is rejected (F2). `--dry-run`
+    ///   prints the achievable window + blast radius as JSON without side effects.
+    fn handle_restore(args: Vec<String>) -> Result<(), String> {
+        let path = args
         .first()
         .filter(|a| !a.starts_with("--"))
         .ok_or_else(|| "usage: aletheia restore <input_path> [--wal-archive DIR [--as-of TS | --lsn N] [--dry-run]]".to_string())?;
-    let albk = std::path::Path::new(path);
+        let albk = std::path::Path::new(path);
 
-    let wal_archive = arg_value(&args, "--wal-archive");
-    let as_of = arg_value(&args, "--as-of");
-    let lsn = arg_value(&args, "--lsn");
-    let latest = args.iter().any(|a| a == "--latest");
-    let dry_run = args.iter().any(|a| a == "--dry-run");
+        let wal_archive = arg_value(&args, "--wal-archive");
+        let as_of = arg_value(&args, "--as-of");
+        let lsn = arg_value(&args, "--lsn");
+        let latest = args.iter().any(|a| a == "--latest");
+        let dry_run = args.iter().any(|a| a == "--dry-run");
 
-    // Plain (#3217) restore: no PITR flags at all.
-    if wal_archive.is_none() && as_of.is_none() && lsn.is_none() && !latest && !dry_run {
-        let data_dir = required_data_dir()?;
-        AletheiaDB::restore_to_data_dir(albk, &data_dir)
-            .map_err(|e| format!("restore failed: {e}"))?;
-        println!("{}", restore_success_json(&data_dir)?);
-        return Ok(());
-    }
-
-    // Point-in-time restore requires the WAL archive.
-    let wal_archive = wal_archive.ok_or_else(|| {
-        "point-in-time restore requires --wal-archive <dir> (the archived WAL chain)".to_string()
-    })?;
-    let wal_archive = PathBuf::from(wal_archive);
-
-    // Resolve the explicit target: --as-of XOR --lsn (both optional).
-    let target = parse_pitr_target(&as_of, &lsn)?;
-
-    // `--latest` is an explicit "restore to the archived tail" alias; a bare
-    // `--wal-archive` with no target means the same thing. Both are mutually
-    // exclusive with an explicit `--as-of`/`--lsn` target.
-    if latest && target.is_some() {
-        return Err(
-            "--latest is mutually exclusive with --as-of/--lsn (it targets the archived tail)"
-                .to_string(),
-        );
-    }
-
-    if dry_run {
-        #[cfg(feature = "serde")]
-        {
-            let plan = AletheiaDB::inspect_pitr(albk, &wal_archive, target)
-                .map_err(|e| format!("dry-run failed: {e}"))?;
-            let rendered = serde_json::to_string(&plan)
-                .map_err(|e| format!("failed to render JSON output: {e}"))?;
-            println!("{rendered}");
+        // Plain (#3217) restore: no PITR flags at all.
+        if wal_archive.is_none() && as_of.is_none() && lsn.is_none() && !latest && !dry_run {
+            let data_dir = required_data_dir()?;
+            AletheiaDB::restore_to_data_dir(albk, &data_dir)
+                .map_err(|e| format!("restore failed: {e}"))?;
+            println!("{}", restore_success_json(&data_dir)?);
             return Ok(());
         }
-        #[cfg(not(feature = "serde"))]
-        {
-            let _ = (albk, &wal_archive, target);
+
+        // Point-in-time restore requires the WAL archive.
+        let wal_archive = wal_archive.ok_or_else(|| {
+            "point-in-time restore requires --wal-archive <dir> (the archived WAL chain)"
+                .to_string()
+        })?;
+        let wal_archive = PathBuf::from(wal_archive);
+
+        // Resolve the explicit target: --as-of XOR --lsn (both optional).
+        let target = parse_pitr_target(&as_of, &lsn)?;
+
+        // `--latest` is an explicit "restore to the archived tail" alias; a bare
+        // `--wal-archive` with no target means the same thing. Both are mutually
+        // exclusive with an explicit `--as-of`/`--lsn` target.
+        if latest && target.is_some() {
             return Err(
-                "`--dry-run` JSON output requires the `serde` feature (rebuild with --features serde)"
+                "--latest is mutually exclusive with --as-of/--lsn (it targets the archived tail)"
                     .to_string(),
             );
         }
-    }
 
-    let data_dir = required_data_dir()?;
+        if dry_run {
+            #[cfg(feature = "serde")]
+            {
+                let plan = AletheiaDB::inspect_pitr(albk, &wal_archive, target)
+                    .map_err(|e| format!("dry-run failed: {e}"))?;
+                let rendered = serde_json::to_string(&plan)
+                    .map_err(|e| format!("failed to render JSON output: {e}"))?;
+                println!("{rendered}");
+                return Ok(());
+            }
+            #[cfg(not(feature = "serde"))]
+            {
+                let _ = (albk, &wal_archive, target);
+                return Err(
+                "`--dry-run` JSON output requires the `serde` feature (rebuild with --features serde)"
+                    .to_string(),
+            );
+            }
+        }
 
-    match target {
-        // In-window target: partial restore, stopping at-or-before the target.
-        Some(t) => {
-            AletheiaDB::restore_to_data_dir_at(albk, &wal_archive, t, &data_dir)
+        let data_dir = required_data_dir()?;
+
+        match target {
+            // In-window target: partial restore, stopping at-or-before the target.
+            Some(t) => {
+                AletheiaDB::restore_to_data_dir_at(albk, &wal_archive, t, &data_dir)
+                    .map_err(|e| format!("point-in-time restore failed: {e}"))?;
+            }
+            // No explicit target (or `--latest`): full replay to the archived tail.
+            // Resolve the tail coordinate from the window and restore to it — the
+            // latest coordinate is in-window (an above-tail explicit target would be
+            // rejected, Issue #3374 F2).
+            None => {
+                let plan = AletheiaDB::inspect_pitr(albk, &wal_archive, None)
+                    .map_err(|e| format!("failed to resolve archive tail: {e}"))?;
+                AletheiaDB::restore_to_data_dir_at(
+                    albk,
+                    &wal_archive,
+                    PitrTarget::Lsn(plan.latest.lsn),
+                    &data_dir,
+                )
                 .map_err(|e| format!("point-in-time restore failed: {e}"))?;
+            }
         }
-        // No explicit target (or `--latest`): full replay to the archived tail.
-        // Resolve the tail coordinate from the window and restore to it — the
-        // latest coordinate is in-window (an above-tail explicit target would be
-        // rejected, Issue #3374 F2).
-        None => {
-            let plan = AletheiaDB::inspect_pitr(albk, &wal_archive, None)
-                .map_err(|e| format!("failed to resolve archive tail: {e}"))?;
-            AletheiaDB::restore_to_data_dir_at(
-                albk,
-                &wal_archive,
-                PitrTarget::Lsn(plan.latest.lsn),
-                &data_dir,
-            )
-            .map_err(|e| format!("point-in-time restore failed: {e}"))?;
+        println!("{}", restore_success_json(&data_dir)?);
+        Ok(())
+    }
+
+    /// Resolve the mutually-exclusive `--as-of` / `--lsn` PITR target flags.
+    ///
+    /// Returns `None` when neither is set (a valid state only for `--dry-run`,
+    /// which then reports the whole window). Errors if both are set.
+    fn parse_pitr_target(
+        as_of: &Option<String>,
+        lsn: &Option<String>,
+    ) -> Result<Option<PitrTarget>, String> {
+        match (as_of, lsn) {
+            (Some(_), Some(_)) => {
+                Err("--as-of and --lsn are mutually exclusive; pass exactly one".to_string())
+            }
+            (Some(ts), None) => Ok(Some(PitrTarget::AsOf(parse_cli_timestamp(ts)?))),
+            (None, Some(n)) => {
+                let n = n
+                    .parse::<u64>()
+                    .map_err(|e| format!("invalid --lsn value '{n}': {e}"))?;
+                Ok(Some(PitrTarget::Lsn(n)))
+            }
+            (None, None) => Ok(None),
         }
     }
-    println!("{}", restore_success_json(&data_dir)?);
-    Ok(())
-}
 
-/// Resolve the mutually-exclusive `--as-of` / `--lsn` PITR target flags.
-///
-/// Returns `None` when neither is set (a valid state only for `--dry-run`,
-/// which then reports the whole window). Errors if both are set.
-fn parse_pitr_target(
-    as_of: &Option<String>,
-    lsn: &Option<String>,
-) -> Result<Option<PitrTarget>, String> {
-    match (as_of, lsn) {
-        (Some(_), Some(_)) => {
-            Err("--as-of and --lsn are mutually exclusive; pass exactly one".to_string())
+    /// Resolve the mandatory `ALETHEIADB_DATA_DIR` target directory for a restore.
+    fn required_data_dir() -> Result<PathBuf, String> {
+        env::var("ALETHEIADB_DATA_DIR")
+            .map(PathBuf::from)
+            .map_err(|_| {
+                "ALETHEIADB_DATA_DIR must be set to restore into a durable directory".to_string()
+            })
+    }
+
+    /// Parse a CLI timestamp: RFC 3339 / ISO 8601, or microseconds since the epoch.
+    fn parse_cli_timestamp(s: &str) -> Result<Timestamp, String> {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+            return Ok(Timestamp::from(dt.timestamp_micros()));
         }
-        (Some(ts), None) => Ok(Some(PitrTarget::AsOf(parse_cli_timestamp(ts)?))),
-        (None, Some(n)) => {
-            let n = n
-                .parse::<u64>()
-                .map_err(|e| format!("invalid --lsn value '{n}': {e}"))?;
-            Ok(Some(PitrTarget::Lsn(n)))
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+            return Ok(Timestamp::from(dt.and_utc().timestamp_micros()));
         }
-        (None, None) => Ok(None),
-    }
-}
-
-/// Resolve the mandatory `ALETHEIADB_DATA_DIR` target directory for a restore.
-fn required_data_dir() -> Result<PathBuf, String> {
-    env::var("ALETHEIADB_DATA_DIR")
-        .map(PathBuf::from)
-        .map_err(|_| {
-            "ALETHEIADB_DATA_DIR must be set to restore into a durable directory".to_string()
-        })
-}
-
-/// Parse a CLI timestamp: RFC 3339 / ISO 8601, or microseconds since the epoch.
-fn parse_cli_timestamp(s: &str) -> Result<Timestamp, String> {
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-        return Ok(Timestamp::from(dt.timestamp_micros()));
-    }
-    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-        return Ok(Timestamp::from(dt.and_utc().timestamp_micros()));
-    }
-    if let Ok(micros) = s.parse::<i64>() {
-        return Ok(Timestamp::from(micros));
-    }
-    Err(format!(
-        "invalid timestamp '{s}': expected ISO 8601 (e.g. 2024-01-15T10:00:00Z) or microseconds since epoch"
-    ))
-}
-
-/// `aletheia verify` — verify the tamper-evident provenance hash chain
-/// (Issue #3351).
-///
-/// Modes, resolved in precedence order:
-/// - `--export-head PATH`: export the current chain head anchor as JSON to
-///   `PATH` (for offsite storage; feed it back later via `--against`).
-/// - `--against PATH`: load a previously exported head and prove the current
-///   chain append-only-extends it (rollback/fork detection).
-/// - `--entity <node|edge>:<id>`: verify only one entity's contribution.
-/// - (default): full-chain verify from genesis.
-///
-/// `--json` emits machine-readable output. Verification failure (or a
-/// disabled chain) exits non-zero.
-///
-/// The database is opened via [`open_db`], which honours `ALETHEIADB_CONFIG`
-/// (a TOML file that can enable the chain with `[chain] enabled = true`) or
-/// `ALETHEIADB_DATA_DIR`. Note that opening by data dir alone does NOT enable
-/// the chain — a chain-enabled TOML config is required for `verify` to have a
-/// chain to check.
-fn handle_verify(args: Vec<String>) -> Result<(), String> {
-    let json = args.iter().any(|a| a == "--json");
-    let db = open_db()?;
-
-    // Export-head mode takes precedence: it is an explicit export action.
-    // Exporting/importing a chain head anchor serializes `ChainHead` via
-    // `serde_json`, so it is only available when the `serde` feature is
-    // compiled in.
-    #[cfg(feature = "serde")]
-    if let Some(path) = arg_value(&args, "--export-head") {
-        let head = db.export_chain_head().map_err(chain_error_hint)?;
-        write_chain_head(&head, &path)?;
-        println!("{}", render_head_export(&head, &path, json)?);
-        return Ok(());
+        if let Ok(micros) = s.parse::<i64>() {
+            return Ok(Timestamp::from(micros));
+        }
+        Err(format!(
+            "invalid timestamp '{s}': expected ISO 8601 (e.g. 2024-01-15T10:00:00Z) or microseconds since epoch"
+        ))
     }
 
-    // Against-anchor mode: prove append-only extension of a stored head.
-    #[cfg(feature = "serde")]
-    if let Some(path) = arg_value(&args, "--against") {
-        let anchor = read_chain_head(&path)?;
-        let result = db.verify_chain_against(&anchor).map_err(chain_error_hint)?;
-        return finish_verification(&result, "anchor", json);
-    }
+    /// `aletheia verify` — verify the tamper-evident provenance hash chain
+    /// (Issue #3351).
+    ///
+    /// Modes, resolved in precedence order:
+    /// - `--export-head PATH`: export the current chain head anchor as JSON to
+    ///   `PATH` (for offsite storage; feed it back later via `--against`).
+    /// - `--against PATH`: load a previously exported head and prove the current
+    ///   chain append-only-extends it (rollback/fork detection).
+    /// - `--entity <node|edge>:<id>`: verify only one entity's contribution.
+    /// - (default): full-chain verify from genesis.
+    ///
+    /// `--json` emits machine-readable output. Verification failure (or a
+    /// disabled chain) exits non-zero.
+    ///
+    /// The database is opened via [`open_db`], which honours `ALETHEIADB_CONFIG`
+    /// (a TOML file that can enable the chain with `[chain] enabled = true`) or
+    /// `ALETHEIADB_DATA_DIR`. Note that opening by data dir alone does NOT enable
+    /// the chain — a chain-enabled TOML config is required for `verify` to have a
+    /// chain to check.
+    fn handle_verify(args: Vec<String>) -> Result<(), String> {
+        let json = args.iter().any(|a| a == "--json");
+        let db = open_db()?;
 
-    // Without `serde`, the chain-head export/compare CLI is unavailable. Report
-    // a clean error (non-zero exit via `Err`) instead of silently ignoring the
-    // flags or leaving a compile error, mirroring how other feature-gated CLI
-    // paths surface unavailability. The plain `verify` path below still works.
-    #[cfg(not(feature = "serde"))]
-    if arg_value(&args, "--export-head").is_some() || arg_value(&args, "--against").is_some() {
-        return Err(
-            "chain head export/compare requires the `serde` feature (rebuild with \
+        // Export-head mode takes precedence: it is an explicit export action.
+        // Exporting/importing a chain head anchor serializes `ChainHead` via
+        // `serde_json`, so it is only available when the `serde` feature is
+        // compiled in.
+        #[cfg(feature = "serde")]
+        if let Some(path) = arg_value(&args, "--export-head") {
+            let head = db.export_chain_head().map_err(chain_error_hint)?;
+            write_chain_head(&head, &path)?;
+            println!("{}", render_head_export(&head, &path, json)?);
+            return Ok(());
+        }
+
+        // Against-anchor mode: prove append-only extension of a stored head.
+        #[cfg(feature = "serde")]
+        if let Some(path) = arg_value(&args, "--against") {
+            let anchor = read_chain_head(&path)?;
+            let result = db.verify_chain_against(&anchor).map_err(chain_error_hint)?;
+            return finish_verification(&result, "anchor", json);
+        }
+
+        // Without `serde`, the chain-head export/compare CLI is unavailable. Report
+        // a clean error (non-zero exit via `Err`) instead of silently ignoring the
+        // flags or leaving a compile error, mirroring how other feature-gated CLI
+        // paths surface unavailability. The plain `verify` path below still works.
+        #[cfg(not(feature = "serde"))]
+        if arg_value(&args, "--export-head").is_some() || arg_value(&args, "--against").is_some() {
+            return Err(
+                "chain head export/compare requires the `serde` feature (rebuild with \
              --features serde)"
-                .to_string(),
-        );
+                    .to_string(),
+            );
+        }
+
+        // Entity-scoped mode.
+        if let Some(spec) = arg_value(&args, "--entity") {
+            let (kind, id) = parse_entity_arg(&spec)?;
+            let result = db.verify_entity_chain(kind, id).map_err(chain_error_hint)?;
+            return finish_verification(&result, "entity", json);
+        }
+
+        // Default: full-chain verify.
+        let result = db.verify_chain().map_err(chain_error_hint)?;
+        finish_verification(&result, "full", json)
     }
 
-    // Entity-scoped mode.
-    if let Some(spec) = arg_value(&args, "--entity") {
-        let (kind, id) = parse_entity_arg(&spec)?;
-        let result = db.verify_entity_chain(kind, id).map_err(chain_error_hint)?;
-        return finish_verification(&result, "entity", json);
+    /// `aletheia keys <generate|status|verify|rotate>` — encryption key operator
+    /// commands (Issue #490).
+    ///
+    /// - `generate` provisions a new 32-byte master key file.
+    /// - `status` (alias `info`) reports the key configuration without ever
+    ///   reading or printing key material.
+    /// - `verify` confirms the configured/named key loads and is valid.
+    /// - `rotate` drives the index key rotation engine (Issue #488): start a
+    ///   rotation to a new key, or `--status`/`--resume`/`--cancel` an in-flight
+    ///   one.
+    fn handle_keys(args: Vec<String>) -> Result<(), String> {
+        match args.first().map(String::as_str) {
+            Some("generate") => keys_generate(&args[1..]),
+            // `info` is accepted as an alias for `status`.
+            Some("status") | Some("info") => keys_status(&args[1..]),
+            Some("verify") => keys_verify(&args[1..]),
+            Some("rotate") => keys_rotate(&args[1..]),
+            Some(sub) => Err(format!("unknown keys subcommand '{sub}'")),
+            None => Err("usage: aletheia keys <generate|status|verify|rotate> ...".to_string()),
+        }
     }
 
-    // Default: full-chain verify.
-    let result = db.verify_chain().map_err(chain_error_hint)?;
-    finish_verification(&result, "full", json)
-}
+    /// `aletheia keys generate --output <PATH> [--force]` — generate a new 32-byte
+    /// master key file.
+    ///
+    /// Refuses to overwrite an existing file unless `--force` is passed, so a live
+    /// key is never clobbered by accident. The generated key bytes are NEVER
+    /// printed. On Unix the file is tightened to `0600` (owner read/write only).
+    fn keys_generate(args: &[String]) -> Result<(), String> {
+        let output = arg_value(args, "--output")
+            .ok_or_else(|| "usage: aletheia keys generate --output <PATH> [--force]".to_string())?;
+        let force = args.iter().any(|a| a == "--force");
+        let path = Path::new(&output);
 
-/// `aletheia keys <generate|status|verify|rotate>` — encryption key operator
-/// commands (Issue #490).
-///
-/// - `generate` provisions a new 32-byte master key file.
-/// - `status` (alias `info`) reports the key configuration without ever
-///   reading or printing key material.
-/// - `verify` confirms the configured/named key loads and is valid.
-/// - `rotate` drives the index key rotation engine (Issue #488): start a
-///   rotation to a new key, or `--status`/`--resume`/`--cancel` an in-flight
-///   one.
-fn handle_keys(args: Vec<String>) -> Result<(), String> {
-    match args.first().map(String::as_str) {
-        Some("generate") => keys_generate(&args[1..]),
-        // `info` is accepted as an alias for `status`.
-        Some("status") | Some("info") => keys_status(&args[1..]),
-        Some("verify") => keys_verify(&args[1..]),
-        Some("rotate") => keys_rotate(&args[1..]),
-        Some(sub) => Err(format!("unknown keys subcommand '{sub}'")),
-        None => Err("usage: aletheia keys <generate|status|verify|rotate> ...".to_string()),
-    }
-}
+        if path.exists() && !force {
+            return Err(format!(
+                "refusing to overwrite existing key file '{output}' (pass --force to replace it)"
+            ));
+        }
 
-/// `aletheia keys generate --output <PATH> [--force]` — generate a new 32-byte
-/// master key file.
-///
-/// Refuses to overwrite an existing file unless `--force` is passed, so a live
-/// key is never clobbered by accident. The generated key bytes are NEVER
-/// printed. On Unix the file is tightened to `0600` (owner read/write only).
-fn keys_generate(args: &[String]) -> Result<(), String> {
-    let output = arg_value(args, "--output")
-        .ok_or_else(|| "usage: aletheia keys generate --output <PATH> [--force]".to_string())?;
-    let force = args.iter().any(|a| a == "--force");
-    let path = Path::new(&output);
-
-    if path.exists() && !force {
-        return Err(format!(
-            "refusing to overwrite existing key file '{output}' (pass --force to replace it)"
-        ));
-    }
-
-    // Pass `force` as the overwrite flag: when `--force` is absent the file is
-    // created atomically with `O_EXCL`, so a file racing into existence between
-    // the check above and the write below fails closed rather than being
-    // silently clobbered (closes the check-then-write TOCTOU). The key file is
-    // created with mode 0600 *before* any key bytes are written on Unix, so it
-    // is never world-readable at any instant.
-    //
-    // With `--passphrase` (Issue #3587) the MEK is wrapped under a passphrase
-    // read from the ALETHEIADB_KEY_PASSPHRASE environment variable. The
-    // passphrase is NEVER taken from argv (it would leak via the process table),
-    // NEVER echoed, and NEVER printed; a missing/empty variable fails closed.
-    let result = if args.iter().any(|a| a == "--passphrase") {
-        // Land the secret in a zeroizing buffer immediately so it is wiped on
-        // drop rather than lingering in a plain `String`.
-        let passphrase = zeroize::Zeroizing::new(
+        // Pass `force` as the overwrite flag: when `--force` is absent the file is
+        // created atomically with `O_EXCL`, so a file racing into existence between
+        // the check above and the write below fails closed rather than being
+        // silently clobbered (closes the check-then-write TOCTOU). The key file is
+        // created with mode 0600 *before* any key bytes are written on Unix, so it
+        // is never world-readable at any instant.
+        //
+        // With `--passphrase` (Issue #3587) the MEK is wrapped under a passphrase
+        // read from the ALETHEIADB_KEY_PASSPHRASE environment variable. The
+        // passphrase is NEVER taken from argv (it would leak via the process table),
+        // NEVER echoed, and NEVER printed; a missing/empty variable fails closed.
+        let result = if args.iter().any(|a| a == "--passphrase") {
+            // Land the secret in a zeroizing buffer immediately so it is wiped on
+            // drop rather than lingering in a plain `String`.
+            let passphrase = zeroize::Zeroizing::new(
             std::env::var("ALETHEIADB_KEY_PASSPHRASE").map_err(|_| {
                 "the --passphrase flag requires the ALETHEIADB_KEY_PASSPHRASE environment variable to be set"
                     .to_string()
             })?,
         );
-        if passphrase.is_empty() {
-            return Err(
-                "ALETHEIADB_KEY_PASSPHRASE must not be empty when --passphrase is used".to_string(),
-            );
-        }
-        let result = aletheiadb::encryption::cli::generate_passphrase_key_with_overwrite(
-            path,
-            passphrase.as_str(),
-            force,
-        )
-        .map_err(|e| format!("failed to generate passphrase key: {e}"));
-        // Drop the passphrase from this frame promptly; it is zeroized on drop.
-        drop(passphrase);
-        result?
-    } else {
-        aletheiadb::encryption::cli::generate_key_with_overwrite(path, force)
-            .map_err(|e| format!("failed to generate key: {e}"))?
-    };
-
-    // Defense-in-depth: re-assert owner-only permissions. `generate_key_with_overwrite`
-    // already creates the file 0600 at creation time on Unix, so this is a
-    // belt-and-suspenders check that introduces no new window (it only ever
-    // tightens, never loosens, and the file is already 0600 by here).
-    restrict_key_permissions(path)?;
-
-    println!(
-        "Generated a new {}-byte master key at {}\n  algorithm: {}\n  (key bytes are not printed)",
-        result.key_length, result.path, result.algorithm
-    );
-    Ok(())
-}
-
-/// `aletheia keys status` (alias `info`) — report the encryption key
-/// configuration WITHOUT reading or printing key material.
-///
-/// Configuration is resolved from `--key-file`/`--env-var` flags, else from an
-/// `ALETHEIADB_CONFIG` TOML (when the `config-toml` feature is compiled in),
-/// else reported as not configured (exit 0, informational). Only non-secret
-/// facts are shown: provider type, provider detail (path/var name — not
-/// secret), algorithm, and the key version (always 1 until rotation lands).
-fn keys_status(args: &[String]) -> Result<(), String> {
-    let config = resolve_encryption_config(args)?;
-    let status = aletheiadb::encryption::cli::get_encryption_status(&config);
-    let mut out = aletheiadb::encryption::cli::format_encryption_status(&status);
-    if status.enabled {
-        // There is no rotation yet (Issue #488), so the key version is always
-        // 1 today. Surface it explicitly rather than implying multi-version.
-        out.push_str("Key version:    1 (rotation not yet enabled)\n");
-    }
-    print!("{out}");
-    Ok(())
-}
-
-/// `aletheia keys verify --key-file <PATH>` — verify the named key is usable.
-///
-/// Constructs the file key provider and runs its health check (which loads and
-/// parses the MEK). This is the scoped v1 of the issue's `encryption verify`:
-/// it verifies the KEY is loadable/valid, NOT that all encrypted data across
-/// all storage layers decrypts (that broader check depends on index encryption,
-/// Issue #481, which is not yet on trunk). On failure a safe error category is
-/// reported (never key bytes) and the process exits non-zero.
-fn keys_verify(args: &[String]) -> Result<(), String> {
-    let key_file = arg_value(args, "--key-file")
-        .ok_or_else(|| "usage: aletheia keys verify --key-file <PATH>".to_string())?;
-    let path = Path::new(&key_file);
-    match aletheiadb::encryption::cli::validate_key_file(path) {
-        Ok(()) => {
-            println!("Key at {key_file} loads and is valid.");
-            Ok(())
-        }
-        // `KeyProviderError`'s Display never contains key bytes (only a
-        // category and, for a length mismatch, a byte count), so it is safe to
-        // surface directly.
-        Err(e) => Err(format!("key verification failed: {e}")),
-    }
-}
-
-/// `aletheia keys rotate ...` — drive the index key rotation engine (Issue
-/// #488) from the operator CLI (Issue #490).
-///
-/// Modes (mutually exclusive):
-/// - `--new-key <PATH>` / `--new-env-var <NAME>`: START a rotation to the new
-///   key source, re-encrypting every persisted index file.
-/// - `--status`: report the on-disk key-generation classification (how far
-///   along a rotation is / whether one looks incomplete).
-/// - `--resume`: finish an interrupted rotation (idempotent).
-/// - `--cancel`: roll back an interrupted rotation to the old key.
-///
-/// All modes open the database from the ambient config (`ALETHEIADB_CONFIG` /
-/// `ALETHEIADB_DATA_DIR`); rotation requires an encrypted, index-persistent
-/// database. Key bytes are NEVER printed.
-///
-/// ## Full-MEK, all-layer rotation (Issue #3617)
-///
-/// The engine re-keys EVERY encrypted-at-rest layer under the master key —
-/// index, checkpoint, WAL, and cold storage — so a uniformly-encrypted database
-/// rotates fully and a subsequent key-provider switch is safe. A crash
-/// mid-rotation resumes automatically on the next open (each layer's pass is
-/// idempotent / cursor-resumable).
-fn keys_rotate(args: &[String]) -> Result<(), String> {
-    let status = args.iter().any(|a| a == "--status");
-    let resume = args.iter().any(|a| a == "--resume");
-    let cancel = args.iter().any(|a| a == "--cancel");
-    let new_key = arg_value(args, "--new-key");
-    let new_env_var = arg_value(args, "--new-env-var");
-
-    // Exactly one action must be selected.
-    let action_count = [
-        status,
-        resume,
-        cancel,
-        new_key.is_some(),
-        new_env_var.is_some(),
-    ]
-    .iter()
-    .filter(|b| **b)
-    .count();
-    if action_count == 0 {
-        return Err(rotate_usage());
-    }
-    if action_count > 1 {
-        // Covers every over-selection, including `--new-key` + `--new-env-var`
-        // together (both count as an action), so no separate mutual-exclusion
-        // branch is needed.
-        return Err(format!(
-            "keys rotate: choose exactly one of --new-key/--new-env-var (start), \
-             --status, --resume, or --cancel\n{}",
-            rotate_usage()
-        ));
-    }
-
-    let db = open_db().map_err(rotate_not_configured_hint)?;
-
-    if status {
-        return keys_rotate_status(&db);
-    }
-    if resume {
-        let report = db
-            .resume_pending_index_rotation()
-            .map_err(rotate_error_hint)?;
-        return match report {
-            Some(r) => {
-                print_rotation_report("Resumed index key rotation", &r);
-                Ok(())
-            }
-            None => {
-                println!("No pending index key rotation to resume.");
-                Ok(())
-            }
-        };
-    }
-    if cancel {
-        let report = db.cancel_pending_rotation().map_err(rotate_error_hint)?;
-        print_rotation_report("Cancelled index key rotation (rolled back)", &report);
-        return Ok(());
-    }
-
-    // Start a rotation.
-    let new_source = if let Some(path) = new_key {
-        aletheiadb::encryption::config::KeyProviderConfig::File { path: path.into() }
-    } else if let Some(var) = new_env_var {
-        aletheiadb::encryption::config::KeyProviderConfig::Env { variable: var }
-    } else {
-        return Err(rotate_usage());
-    };
-
-    eprintln!("Starting index key rotation (re-encrypting persisted index files)...");
-    let report = db
-        .rotate_index_keys(new_source)
-        .map_err(rotate_error_hint)?;
-    // Progress/summary to stderr so scripts can separate it from the report.
-    eprintln!(
-        "  re-encrypted {}/{} index files ({} already current) in {} ms",
-        report.files_reencrypted, report.files_total, report.files_skipped, report.duration_ms
-    );
-    print_rotation_report("Index key rotation complete", &report);
-    Ok(())
-}
-
-/// Usage string for `keys rotate`.
-fn rotate_usage() -> String {
-    "usage: aletheia keys rotate (--new-key <PATH> | --new-env-var <NAME>) | \
-     --status | --resume | --cancel\n  \
-     Requires an encrypted, index-persistent database (open via ALETHEIADB_CONFIG)."
-        .to_string()
-}
-
-/// Report the on-disk index key-generation classification.
-fn keys_rotate_status(db: &AletheiaDB) -> Result<(), String> {
-    let s = db.index_rotation_status().map_err(rotate_error_hint)?;
-    println!("Index key rotation status");
-    println!("  files at current key: {}", s.at_current);
-    println!("  files at old key:     {}", s.at_old);
-    println!("  files at unknown key: {}", s.unknown);
-    println!("  plaintext files:      {}", s.plaintext);
-    if s.is_fully_rotated() {
-        println!("  state: no rotation pending (all files at the current key version)");
-    } else {
-        println!(
-            "  state: a rotation appears incomplete — run `keys rotate --resume` to finish \
-             it, or `keys rotate --cancel` to roll it back"
-        );
-    }
-    Ok(())
-}
-
-/// Print a completed [`RotationReport`](aletheiadb::db::rotation::RotationReport)
-/// summary. Contains only version numbers and file counts — never key bytes.
-fn print_rotation_report(headline: &str, r: &aletheiadb::db::rotation::RotationReport) {
-    println!("{headline}");
-    println!("  key version:      {} -> {}", r.old_version, r.new_version);
-    println!("  files total:      {}", r.files_total);
-    println!("  files re-encrypted: {}", r.files_reencrypted);
-    println!("  files skipped:    {}", r.files_skipped);
-    println!("  duration:         {} ms", r.duration_ms);
-}
-
-/// Map a database-open failure into a rotation-specific "not configured" hint.
-fn rotate_not_configured_hint(e: String) -> String {
-    format!(
-        "{e}\n\
-         hint: `keys rotate` requires an encrypted, index-persistent database. Open one via \
-         ALETHEIADB_CONFIG pointing at a TOML config with encryption + index persistence enabled."
-    )
-}
-
-/// Map a rotation engine error into a CLI-friendly message. The engine's error
-/// Display never contains key bytes (only categories, layer names, and version
-/// numbers), so it is safe to surface directly, with a remediation hint for the
-/// common not-configured case.
-fn rotate_error_hint(e: impl std::fmt::Display) -> String {
-    let msg = e.to_string();
-    if msg.contains("not configured") || msg.contains("not enabled") || msg.contains("persistence")
-    {
-        format!(
-            "{msg}\n\
-             hint: `keys rotate` requires an encrypted, index-persistent database. Open one via \
-             ALETHEIADB_CONFIG pointing at a TOML config with encryption + index persistence \
-             enabled."
-        )
-    } else {
-        msg
-    }
-}
-
-/// `aletheia encryption <status|verify|enable|disable>` — encryption-at-rest
-/// operator commands (Issue #490).
-fn handle_encryption(args: Vec<String>) -> Result<(), String> {
-    match args.first().map(String::as_str) {
-        Some("status") => encryption_status(&args[1..]),
-        Some("verify") => encryption_verify(&args[1..]),
-        Some("enable") => encryption_enable(&args[1..]),
-        Some("disable") => encryption_disable(&args[1..]),
-        Some(sub) => Err(format!(
-            "unknown encryption subcommand '{sub}'\n{}",
-            encryption_usage()
-        )),
-        None => Err(format!(
-            "usage: aletheia encryption <status|verify|enable|disable>\n{}",
-            encryption_usage()
-        )),
-    }
-}
-
-/// Usage detail for the `encryption` subcommand group.
-fn encryption_usage() -> String {
-    "  encryption status  [--key-file PATH | --env-var NAME]   Per-layer encryption status\n\
-     \x20 encryption verify                                       Verify the configured DB's encrypted data decrypts\n\
-     \x20 encryption enable  (--key-file PATH | --env-var NAME)   Migrate a plaintext DB to encrypted-at-rest\n\
-     \x20 encryption disable                                      Migrate an encrypted DB back to plaintext-at-rest"
-        .to_string()
-}
-
-/// `encryption status` — per-layer encryption status table.
-///
-/// The overall/provider/algorithm block is derived from the resolved
-/// [`EncryptionConfig`]. Because AletheiaDB encrypts uniformly (one master key
-/// protects every at-rest layer), when encryption is enabled every layer is
-/// encrypted; the per-layer table reflects that and, when a durable database is
-/// configured, enriches the index row with live rotation status and the cold
-/// row with whether the cold tier is configured.
-fn encryption_status(args: &[String]) -> Result<(), String> {
-    let config = resolve_encryption_config(args)?;
-    let status = aletheiadb::encryption::cli::get_encryption_status(&config);
-    print!(
-        "{}",
-        aletheiadb::encryption::cli::format_encryption_status(&status)
-    );
-
-    println!("\nPer-layer (encryption at rest is uniform: one master key protects every layer)");
-    println!(
-        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}"
-    );
-
-    if !status.enabled {
-        println!("WAL:            PLAINTEXT (encryption disabled)");
-        println!("Index:          PLAINTEXT (encryption disabled)");
-        println!("Checkpoints:    PLAINTEXT (encryption disabled)");
-        println!("Cold storage:   PLAINTEXT (encryption disabled)");
-        return Ok(());
-    }
-
-    // Best-effort live enrichment: only when a durable DB is configured.
-    let live = if env::var(aletheiadb::config::DATA_DIR_ENV).is_ok() || config_env_present() {
-        open_db().ok()
-    } else {
-        None
-    };
-
-    println!("WAL:            ENCRYPTED (master-key-derived DEK)");
-    match live.as_ref().map(|db| db.index_rotation_status()) {
-        Some(Ok(s)) => {
-            let rotated = if s.is_fully_rotated() {
-                "fully rotated"
-            } else {
-                "rotation incomplete"
-            };
-            println!(
-                "Index:          ENCRYPTED ({} files at current key, {} old, {} unknown; {})",
-                s.at_current, s.at_old, s.unknown, rotated
-            );
-        }
-        _ => println!("Index:          ENCRYPTED (master-key-derived DEK)"),
-    }
-    println!("Checkpoints:    ENCRYPTED (master-key-derived DEK)");
-    match live.as_ref().map(aletheiadb::AletheiaDB::stats) {
-        Some(stats) if stats.cold_storage.enabled => {
-            println!("Cold storage:   ENCRYPTED (master-key-derived DEK)");
-        }
-        Some(_) => println!("Cold storage:   not configured"),
-        None => println!("Cold storage:   ENCRYPTED if configured (master-key-derived DEK)"),
-    }
-    Ok(())
-}
-
-/// `encryption verify` — check that the **configured** database's encrypted
-/// data at rest is readable under its key, beyond `keys verify`'s key
-/// health-check.
-///
-/// Two distinct signals, with different strengths (we are careful not to
-/// overstate either):
-///
-/// * **WAL — a genuine decrypt proof.** Opening the database replays the
-///   (encrypted) WAL through the configured cipher; a wrong or missing key
-///   fails the open with an authentication error. A successful open therefore
-///   *proves* the WAL actually AEAD-decrypts.
-/// * **Index — header classification AND a body decrypt probe.** On success we
-///   *classify* every persisted index file by reading its 10-byte `AEIX` header
-///   key-version and matching it against the live keyring (`at_current` /
-///   `at_old` / `unknown` / `plaintext`). Header classification alone can
-///   false-PASS when a wrong key shares the same key-version number, so we
-///   additionally run an *active* body decrypt probe (Issue #3618): the manifest
-///   body plus one representative encrypted file per distinct key generation are
-///   AEAD-decrypted through the keyring. A wrong key (or a corrupted body) fails
-///   the AEAD auth tag here even when the header matches, turning what was a
-///   false-PASS into a FAIL. No key bytes or file paths are ever printed.
-///
-/// Operates on the ambient configuration only (`ALETHEIADB_CONFIG` /
-/// `ALETHEIADB_DATA_DIR`); it does not accept `--key-file` / `--env-var`, which
-/// would not affect the actual open and could mislead. Clear PASS/FAIL with a
-/// matching exit code; no key bytes are ever printed.
-fn encryption_verify(_args: &[String]) -> Result<(), String> {
-    // Resolve from the ambient config only (ignore any CLI key flags): verify
-    // must reflect the database `open_db()` will actually open, not a key the
-    // real open path never consults.
-    let config = resolve_encryption_config(&[])?;
-    if !config.enabled {
-        println!("Encryption is not enabled for this configuration; nothing to verify.");
-        return Ok(());
-    }
-
-    if !(env::var(aletheiadb::config::DATA_DIR_ENV).is_ok() || config_env_present()) {
-        return Err(
-            "encryption verify requires a configured database to open and decrypt. Set \
-             ALETHEIADB_CONFIG (or ALETHEIADB_DATA_DIR) to point at the database."
-                .to_string(),
-        );
-    }
-
-    // Opening replays the WAL through the cipher (and loads index files when
-    // load_on_startup is set). A wrong/missing key fails here — the primary,
-    // genuine decryptability signal.
-    let db = open_db().map_err(|e| format!("encryption verify FAILED: {e}"))?;
-
-    if !db.is_encryption_enabled() {
-        println!(
-            "Opened database is not encrypted at rest; nothing to verify (WAL/index are plaintext)."
-        );
-        return Ok(());
-    }
-
-    // Active probe: classify every persisted index file by its AEIX header
-    // key-version against the live keyring. An `unknown`-key file is one whose
-    // header names a key the keyring does not hold — a genuine problem.
-    match db.index_rotation_status() {
-        Ok(s) => {
-            if s.unknown > 0 {
-                return Err(format!(
-                    "encryption verify FAILED: {} index file(s) carry an AEIX header \
-                     key-version not held by the configured keyring",
-                    s.unknown
-                ));
-            }
-            // Header classification alone can FALSE-PASS: a wrong key that shares
-            // the same key_version number matches the header while decrypting
-            // nothing (Issue #3618). Actively probe that index bodies AEAD-decrypt
-            // under the live keyring — a wrong key or a corrupted body fails here.
-            let probe = db
-                .verify_index_decryptable()
-                .map_err(|e| format!("encryption verify FAILED: {e}"))?;
-            if !probe.decrypt_failed.is_empty() {
-                // Report a count and a generic reason only — never a path or key
-                // material that could leak secrets.
-                return Err(format!(
-                    "encryption verify FAILED: {} index file(s) present a body that does \
-                     NOT decrypt with the configured key material (wrong key or corruption)",
-                    probe.decrypt_failed.len()
-                ));
-            }
-            let stats = db.stats();
-            println!("encryption verify: PASS");
-            println!(
-                "  WAL:   decrypted and replayed ({} nodes, {} edges recovered)",
-                stats.current.node_count, stats.current.edge_count
-            );
-            println!(
-                "  Index: {} encrypted file(s) classified at a current/old key version \
-                 by AEIX header ({} plaintext)",
-                s.at_current + s.at_old,
-                s.plaintext
-            );
-            println!(
-                "  Index: {} encrypted file(s) body-decrypted with the live keyring",
-                probe.decrypted_ok
-            );
-        }
-        Err(e) if rotation_status_not_enabled(&e) => {
-            // Index persistence (or index encryption) is not enabled: there is
-            // nothing to classify, but the successful open already proved WAL
-            // decryptability, which is a valid PASS.
-            let stats = db.stats();
-            println!("encryption verify: PASS");
-            println!(
-                "  WAL:   decrypted and replayed ({} nodes, {} edges recovered)",
-                stats.current.node_count, stats.current.edge_count
-            );
-            println!("  Index: index persistence not enabled (nothing to classify)");
-        }
-        Err(e) => {
-            // A real error scanning/reading the index files (IO error, an
-            // unreadable/short AEIX header, etc.) must FAIL, never false-PASS.
-            return Err(format!("encryption verify FAILED: {e}"));
-        }
-    }
-    Ok(())
-}
-
-/// Does this [`index_rotation_status`](aletheiadb::AletheiaDB::index_rotation_status)
-/// error mean "index persistence / index encryption is simply not enabled"
-/// (a benign, PASS-able condition for `encryption verify`) as opposed to a real
-/// IO/read failure that must FAIL? The not-enabled cases surface as
-/// [`StorageError::InconsistentState`](aletheiadb::StorageError::InconsistentState)
-/// whose reason names the missing layer; everything else (IO, corrupt/short
-/// header, foreign key) is a genuine failure.
-fn rotation_status_not_enabled(e: &aletheiadb::Error) -> bool {
-    matches!(
-        e,
-        aletheiadb::Error::Storage(aletheiadb::StorageError::InconsistentState { reason })
-            if reason.contains("not enabled") || reason.contains("not configured")
-    )
-}
-
-/// `encryption enable` — migrate a plaintext database to encrypted-at-rest in
-/// place (Issue #3616 PR3 / #3700), driving the shipped
-/// [`AletheiaDB::enable_encryption`](aletheiadb::AletheiaDB::enable_encryption)
-/// migration engine.
-///
-/// The database to migrate is the ambient one (`ALETHEIADB_CONFIG` /
-/// `ALETHEIADB_DATA_DIR`), exactly like `encryption verify` / `keys rotate`; the
-/// operator supplies the NEW master key source via `--key-file PATH` or
-/// `--env-var NAME` (only file/env references round-trip through the durable
-/// authority — a secret-backed source is refused by the engine). The engine
-/// migrates WAL + index + checkpoint (+ cold when a cold tier is present) and
-/// flips the durable `encryption.state` authority so the NEXT open comes up
-/// encrypted; this process must therefore NOT keep writing through the returned
-/// (quiesced) handle — it exits, and the next `aletheia` invocation reopens
-/// encrypted. Never prints key bytes.
-fn encryption_enable(args: &[String]) -> Result<(), String> {
-    require_configured_db("encryption enable")?;
-
-    // The NEW master key source. Only file/env references can be persisted into
-    // the durable authority without leaking a secret, so those are the only two
-    // the CLI accepts here.
-    let key_source = if let Some(path) = arg_value(args, "--key-file") {
-        aletheiadb::encryption::config::KeyProviderConfig::File { path: path.into() }
-    } else if let Some(var) = arg_value(args, "--env-var") {
-        aletheiadb::encryption::config::KeyProviderConfig::Env { variable: var }
-    } else {
-        return Err(
-            "encryption enable requires a key source: --key-file <PATH> or --env-var <NAME> \
-             (the master key the database is migrated TO)"
-                .to_string(),
-        );
-    };
-
-    let mut db = open_db().map_err(|e| enable_disable_not_configured_hint("enable", e))?;
-    let report = db
-        .enable_encryption(key_source)
-        .map_err(|e| format!("encryption enable FAILED: {e}"))?;
-
-    println!("encryption enable: OK");
-    println!("  encryption is now ENABLED at rest (durable authority flipped)");
-    println!("  WAL:         {}", migrated_label(report.wal_migrated));
-    println!("  Index:       {}", migrated_label(report.index_migrated));
-    println!(
-        "  Checkpoints: {}",
-        migrated_label(report.checkpoint_migrated)
-    );
-    println!(
-        "  Cold:        {}",
-        if report.cold_migrated {
-            "encrypted"
-        } else {
-            "not configured"
-        }
-    );
-    println!(
-        "  Reopen the database (next `aletheia` invocation) to resume normal \
-         operation under the cipher."
-    );
-    Ok(())
-}
-
-/// `encryption disable` — migrate an encrypted database back to plaintext-at-rest
-/// in place (Issue #3616 PR4 / #3718), driving the shipped
-/// [`AletheiaDB::disable_encryption`](aletheiadb::AletheiaDB::disable_encryption)
-/// migration engine.
-///
-/// The database to migrate is the ambient one (`ALETHEIADB_CONFIG` /
-/// `ALETHEIADB_DATA_DIR`). No key source is taken: the current key is sourced
-/// from the configured database itself. The engine strips the cipher from WAL +
-/// index + checkpoint (+ cold when present) and flips the durable
-/// `encryption.state` authority to `disabled` so the NEXT open comes up
-/// plaintext; the process exits and the next `aletheia` invocation reopens
-/// plaintext.
-fn encryption_disable(_args: &[String]) -> Result<(), String> {
-    require_configured_db("encryption disable")?;
-
-    let mut db = open_db().map_err(|e| enable_disable_not_configured_hint("disable", e))?;
-    let report = db
-        .disable_encryption()
-        .map_err(|e| format!("encryption disable FAILED: {e}"))?;
-
-    println!("encryption disable: OK");
-    println!("  encryption is now DISABLED at rest (durable authority flipped)");
-    println!("  WAL:         {}", stripped_label(report.wal_migrated));
-    println!("  Index:       {}", stripped_label(report.index_migrated));
-    println!(
-        "  Checkpoints: {}",
-        stripped_label(report.checkpoint_migrated)
-    );
-    println!(
-        "  Cold:        {}",
-        if report.cold_migrated {
-            "plaintext"
-        } else {
-            "not configured"
-        }
-    );
-    println!(
-        "  Reopen the database (next `aletheia` invocation) to resume normal \
-         plaintext operation."
-    );
-    Ok(())
-}
-
-/// Per-layer status label for a completed `encryption enable` migration.
-fn migrated_label(migrated: bool) -> &'static str {
-    if migrated { "encrypted" } else { "unchanged" }
-}
-
-/// Per-layer status label for a completed `encryption disable` migration.
-fn stripped_label(migrated: bool) -> &'static str {
-    if migrated { "plaintext" } else { "unchanged" }
-}
-
-/// Both `encryption enable` and `encryption disable` operate on a durable
-/// database supplied via the ambient config env vars (`ALETHEIADB_CONFIG` /
-/// `ALETHEIADB_DATA_DIR`); refuse up front with a clear message when neither is
-/// set rather than migrating an ephemeral tempdir the engine would reject anyway.
-fn require_configured_db(verb: &str) -> Result<(), String> {
-    if env::var(aletheiadb::config::DATA_DIR_ENV).is_ok() || config_env_present() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{verb} requires a configured durable database. Set ALETHEIADB_CONFIG (or \
-             ALETHEIADB_DATA_DIR) to point at the database to migrate."
-        ))
-    }
-}
-
-/// Map a database-open failure into an enable/disable "not configured" hint.
-fn enable_disable_not_configured_hint(verb: &str, e: String) -> String {
-    format!(
-        "{e}\n\
-         hint: `encryption {verb}` requires a durable, index-persistent database. Open one via \
-         ALETHEIADB_CONFIG pointing at a TOML config with index persistence enabled."
-    )
-}
-
-/// Whether `ALETHEIADB_CONFIG` is present in the environment (a durable DB is
-/// configured via TOML). Kept as a helper so the check reads the same across
-/// the encryption handlers regardless of the `config-toml` feature.
-fn config_env_present() -> bool {
-    env::var(aletheiadb::config::CONFIG_ENV).is_ok()
-}
-
-/// Resolve the [`EncryptionConfig`](aletheiadb::encryption::config::EncryptionConfig)
-/// for `keys status` from CLI flags or ambient config.
-///
-/// Precedence: `--key-file` > `--env-var` > `ALETHEIADB_CONFIG` (TOML, when
-/// `config-toml` is compiled in) > disabled/not-configured.
-fn resolve_encryption_config(
-    args: &[String],
-) -> Result<aletheiadb::encryption::config::EncryptionConfig, String> {
-    use aletheiadb::encryption::config::EncryptionConfig;
-
-    if let Some(path) = arg_value(args, "--key-file") {
-        return Ok(EncryptionConfig::file_based(path));
-    }
-    if let Some(var) = arg_value(args, "--env-var") {
-        return Ok(EncryptionConfig::env_based(var));
-    }
-    #[cfg(feature = "config-toml")]
-    if let Ok(cfg_path) = env::var(aletheiadb::config::CONFIG_ENV) {
-        let cfg = aletheiadb::config::AletheiaDBConfig::from_toml_file(&cfg_path)
-            .map_err(|e| format!("failed to load config '{cfg_path}': {e}"))?;
-        return Ok(cfg.encryption);
-    }
-    Ok(EncryptionConfig::disabled())
-}
-
-/// Tighten a freshly written key file to owner-only permissions (`0600`) on
-/// Unix. A no-op on non-Unix platforms (which lack POSIX mode bits).
-#[cfg(unix)]
-fn restrict_key_permissions(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
-        format!(
-            "failed to set owner-only permissions on key file '{}': {e}",
-            path.display()
-        )
-    })
-}
-
-/// Non-Unix no-op for [`restrict_key_permissions`].
-#[cfg(not(unix))]
-fn restrict_key_permissions(_path: &Path) -> Result<(), String> {
-    Ok(())
-}
-
-/// Turn a chain API error (notably "chain not enabled") into a CLI-friendly
-/// message with remediation guidance.
-fn chain_error_hint(e: impl std::fmt::Display) -> String {
-    format!(
-        "{e}\n\
-         hint: `aletheia verify` requires the provenance hash chain to be enabled for the \
-         opened database. Open it via ALETHEIADB_CONFIG pointing at a TOML config that \
-         carries a `[chain]` section with `enabled = true`."
-    )
-}
-
-/// Parse an `--entity <node|edge>:<id>` argument into its kind and id.
-fn parse_entity_arg(spec: &str) -> Result<(EntityKind, u64), String> {
-    let (kind_str, id_str) = spec.split_once(':').ok_or_else(|| {
-        format!("invalid --entity '{spec}': expected '<node|edge>:<id>' (e.g. node:42)")
-    })?;
-    let kind = match kind_str.trim().to_ascii_lowercase().as_str() {
-        "node" => EntityKind::Node,
-        "edge" => EntityKind::Edge,
-        other => {
-            return Err(format!(
-                "invalid --entity kind '{other}': expected 'node' or 'edge'"
-            ));
-        }
-    };
-    let id = id_str
-        .trim()
-        .parse::<u64>()
-        .map_err(|e| format!("invalid --entity id '{id_str}': {e}"))?;
-    Ok((kind, id))
-}
-
-/// Render a verification result and return non-zero (via `Err`) on failure.
-///
-/// The full result is printed to stdout in both success and failure cases so a
-/// caller always sees the details; on failure a terse `Err` drives the
-/// process exit code to non-zero (main prints it to stderr).
-fn finish_verification(result: &ChainVerification, scope: &str, json: bool) -> Result<(), String> {
-    println!("{}", render_verification(result, scope, json)?);
-    if result.passed {
-        Ok(())
-    } else {
-        Err(format!(
-            "provenance chain verification FAILED ({scope}){}",
-            result
-                .earliest_broken_seq
-                .map(|s| format!(" at seq {s}"))
-                .unwrap_or_default()
-        ))
-    }
-}
-
-/// Render a [`ChainVerification`] as human-readable text or JSON.
-fn render_verification(
-    result: &ChainVerification,
-    scope: &str,
-    json: bool,
-) -> Result<String, String> {
-    if json {
-        let value = serde_json::json!({
-            "scope": scope,
-            "passed": result.passed,
-            "head_seq": result.head_seq,
-            "head_digest": result.head_digest_hex,
-            "earliest_broken_seq": result.earliest_broken_seq,
-            "reason": result.reason,
-            "transactions_checked": result.transactions_checked,
-        });
-        return serde_json::to_string_pretty(&value)
-            .map_err(|e| format!("failed to render JSON output: {e}"));
-    }
-
-    let status = if result.passed { "PASS" } else { "FAIL" };
-    let mut out = String::new();
-    out.push_str(&format!(
-        "Provenance chain verification: {status} (scope: {scope})\n"
-    ));
-    out.push_str(&format!("  head seq:             {}\n", result.head_seq));
-    out.push_str(&format!(
-        "  head digest:          {}\n",
-        result.head_digest_hex
-    ));
-    out.push_str(&format!(
-        "  transactions checked: {}",
-        result.transactions_checked
-    ));
-    if !result.passed {
-        if let Some(seq) = result.earliest_broken_seq {
-            out.push_str(&format!("\n  earliest broken seq:  {seq}"));
-        }
-        if let Some(reason) = &result.reason {
-            out.push_str(&format!("\n  reason:               {reason}"));
-        }
-    }
-    Ok(out)
-}
-
-/// Render the confirmation for an `--export-head` action.
-#[cfg(feature = "serde")]
-fn render_head_export(head: &ChainHead, path: &str, json: bool) -> Result<String, String> {
-    if json {
-        let value = serde_json::json!({
-            "ok": true,
-            "path": path,
-            "seq": head.seq,
-            "digest": aletheiadb::provenance_chain::to_hex(&head.digest),
-        });
-        return serde_json::to_string(&value)
-            .map_err(|e| format!("failed to render JSON output: {e}"));
-    }
-    Ok(format!(
-        "Exported chain head anchor to {path}\n  seq:    {}\n  digest: {}",
-        head.seq,
-        aletheiadb::provenance_chain::to_hex(&head.digest)
-    ))
-}
-
-/// Serialize a [`ChainHead`] to a JSON file (pretty, digests as hex).
-#[cfg(feature = "serde")]
-fn write_chain_head(head: &ChainHead, path: &str) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(head)
-        .map_err(|e| format!("failed to serialize chain head: {e}"))?;
-    fs::write(path, bytes).map_err(|e| format!("failed to write chain head to '{path}': {e}"))
-}
-
-/// Load a [`ChainHead`] previously exported to a JSON file.
-#[cfg(feature = "serde")]
-fn read_chain_head(path: &str) -> Result<ChainHead, String> {
-    let bytes =
-        fs::read(path).map_err(|e| format!("failed to read chain head from '{path}': {e}"))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| format!("'{path}' is not a valid exported chain head: {e}"))
-}
-
-/// `aletheia import` — load an external graph export.
-///
-/// Dispatches on `--format`: `neo4j-csv` (the default) loads a Neo4j CSV export
-/// (Issue #3356); `neo4j-cypher` (or any `.cypher` input) loads an
-/// `apoc.export.cypher.all` script dump via [`handle_import_cypher`] (Issue
-/// #3356); `parquet` loads a Parquet file via the mapping contract (Issue
-/// #3364, requires `--features parquet`). A binary Neo4j `.dump` archive is
-/// unsupported and rejected with an actionable message pointing at CSV/Cypher.
-#[cfg(feature = "import")]
-fn handle_import(args: Vec<String>) -> Result<(), String> {
-    use aletheiadb::api::import::{FailureMode, LabelStrategy, Neo4jCsvOptions};
-
-    let format = arg_value(&args, "--format").unwrap_or_else(|| "neo4j-csv".to_string());
-
-    // The Parquet import path (Issue #3364) lives in its own module and reads a
-    // different flag set; dispatch to it before any neo4j-csv-specific validation so
-    // both formats share the single `import` verb.
-    #[cfg(feature = "parquet")]
-    if format == "parquet" {
-        return parquet_io::handle_import(args);
-    }
-    #[cfg(not(feature = "parquet"))]
-    if format == "parquet" {
-        return Err(
-            "the parquet import format requires building with --features parquet".to_string(),
-        );
-    }
-
-    // History-preserving EDN importers (Issue #3384) read their own flag sets
-    // (`--history` / `--datoms` + `--schema`); dispatch before any neo4j-csv or
-    // cypher handling so those paths are untouched and a plain build still falls
-    // through to the neo4j-csv fallback for every other format.
-    if format == "xtdb" {
-        return handle_import_xtdb(&args);
-    }
-    if format == "datomic" {
-        return handle_import_datomic(&args);
-    }
-
-    let nodes = arg_values(&args, "--nodes");
-    let rels = arg_values(&args, "--relationships");
-
-    // APOC Cypher-script dump import (Issue #3356): a single `.cypher` file (or
-    // `--format neo4j-cypher`) carries both nodes and relationships. Route it to
-    // the dedicated library entry point before the CSV-specific handling.
-    let cypher_selected = matches!(format.as_str(), "neo4j-cypher" | "cypher");
-    let has_cypher_file = nodes
-        .iter()
-        .chain(rels.iter())
-        .any(|p| p.to_ascii_lowercase().ends_with(".cypher"));
-    if cypher_selected || has_cypher_file {
-        return handle_import_cypher(&args, &nodes, &rels);
-    }
-
-    // Reject binary dump inputs with a clear pointer to CSV.
-    for path in nodes.iter().chain(rels.iter()) {
-        let lower = path.to_ascii_lowercase();
-        if lower.ends_with(".dump") {
-            return Err(
-                "neo4j binary dump import is not supported; export to CSV with \
-                'neo4j-admin database import' headers or apoc.export.csv"
-                    .to_string(),
-            );
-        }
-    }
-
-    match format.as_str() {
-        "neo4j-csv" | "neo4j" => {}
-        "neo4j-dump" | "dump" => {
-            return Err(
-                "neo4j binary dump import is not supported; export to CSV with \
-                'neo4j-admin database import' headers or apoc.export.csv"
-                    .to_string(),
-            );
-        }
-        other => {
-            return Err(format!(
-                "unsupported import format '{other}'; supported: neo4j-csv"
-            ));
-        }
-    }
-
-    if nodes.is_empty() && rels.is_empty() {
-        return Err(
-            "usage: aletheia import --format neo4j-csv --nodes <file>... \
-            [--relationships <file>...] [options]"
-                .to_string(),
-        );
-    }
-
-    let mut opts = Neo4jCsvOptions::new();
-    if let Some(d) = arg_value(&args, "--array-delimiter") {
-        opts.array_delimiter = single_char(&d, "--array-delimiter")?;
-    }
-    if let Some(d) = arg_value(&args, "--delimiter") {
-        opts.delimiter = single_byte(&d, "--delimiter")?;
-    }
-    if let Some(q) = arg_value(&args, "--quote") {
-        opts.quote = single_byte(&q, "--quote")?;
-    }
-    for name in arg_values(&args, "--vector-property") {
-        opts.vector_properties.insert(name);
-    }
-    if let Some(name) = arg_value(&args, "--valid-from-property") {
-        opts.valid_from_property = Some(name);
-    }
-    if let Some(strategy) = arg_value(&args, "--label-strategy") {
-        opts.label_strategy = match strategy.as_str() {
-            "first" => LabelStrategy::First,
-            "concat" => LabelStrategy::Concat,
-            "property" => LabelStrategy::Property,
-            other => {
-                return Err(format!(
-                    "invalid --label-strategy '{other}', expected first|concat|property"
-                ));
-            }
-        };
-    }
-    if args.iter().any(|a| a == "--strict-types") {
-        opts.strict_types = true;
-    }
-    let failure_mode = match arg_value(&args, "--on-error").as_deref() {
-        None | Some("abort") => FailureMode::Abort,
-        Some("skip") => FailureMode::SkipAndReport,
-        Some(other) => {
-            return Err(format!("invalid --on-error '{other}', expected abort|skip"));
-        }
-    };
-
-    let node_paths: Vec<PathBuf> = nodes.iter().map(PathBuf::from).collect();
-    let rel_paths: Vec<PathBuf> = rels.iter().map(PathBuf::from).collect();
-
-    let db = open_db()?;
-    let mut importer = db.import().failure_mode(failure_mode);
-    let report = importer
-        .neo4j_import_csv(&node_paths, &rel_paths, &opts)
-        .map_err(|e| format!("import failed: {e}"))?;
-
-    let value =
-        serde_json::to_value(&report).map_err(|e| format!("failed to render report JSON: {e}"))?;
-    if let Some(report_path) = arg_value(&args, "--report") {
-        let rendered = serde_json::to_string_pretty(&value)
-            .map_err(|e| format!("failed to render report JSON: {e}"))?;
-        fs::write(&report_path, rendered)
-            .map_err(|e| format!("failed to write report to '{report_path}': {e}"))?;
-    }
-    print_json_pretty(&value)
-}
-
-/// Import an APOC Cypher-script dump (`apoc.export.cypher.all`), Issue #3356.
-///
-/// A single `.cypher` dump file carries both nodes and relationships, so it is
-/// supplied via `--nodes <file>` (or `--relationships <file>`). Options mirror
-/// the CSV importer's `--label-strategy`, `--vector-property`,
-/// `--valid-from-property`, `--strict-types`, and `--on-error` flags.
-#[cfg(feature = "import")]
-fn handle_import_cypher(args: &[String], nodes: &[String], rels: &[String]) -> Result<(), String> {
-    use aletheiadb::api::import::{FailureMode, LabelStrategy, Neo4jCypherOptions};
-
-    let paths: Vec<String> = nodes.iter().chain(rels.iter()).cloned().collect();
-    let path = match paths.as_slice() {
-        [single] => single.clone(),
-        [] => {
-            return Err(
-                "usage: aletheia import --format neo4j-cypher --nodes <dump.cypher> [options]"
-                    .to_string(),
-            );
-        }
-        _ => {
-            return Err(
-                "the APOC Cypher-script dump import takes a single dump file (one \
-                 apoc.export.cypher.all output holds both nodes and relationships)"
-                    .to_string(),
-            );
-        }
-    };
-
-    let mut opts = Neo4jCypherOptions::new();
-    for name in arg_values(args, "--vector-property") {
-        opts.vector_properties.insert(name);
-    }
-    if let Some(name) = arg_value(args, "--valid-from-property") {
-        opts.valid_from_property = Some(name);
-    }
-    if let Some(strategy) = arg_value(args, "--label-strategy") {
-        opts.label_strategy = match strategy.as_str() {
-            "first" => LabelStrategy::First,
-            "concat" => LabelStrategy::Concat,
-            "property" => LabelStrategy::Property,
-            other => {
-                return Err(format!(
-                    "invalid --label-strategy '{other}', expected first|concat|property"
-                ));
-            }
-        };
-    }
-    if args.iter().any(|a| a == "--strict-types") {
-        opts.strict_types = true;
-    }
-    let failure_mode = match arg_value(args, "--on-error").as_deref() {
-        None | Some("abort") => FailureMode::Abort,
-        Some("skip") => FailureMode::SkipAndReport,
-        Some(other) => {
-            return Err(format!("invalid --on-error '{other}', expected abort|skip"));
-        }
-    };
-
-    let db = open_db()?;
-    let mut importer = db.import().failure_mode(failure_mode);
-    let report = importer
-        .neo4j_import_cypher(&path, &opts)
-        .map_err(|e| format!("import failed: {e}"))?;
-
-    let value =
-        serde_json::to_value(&report).map_err(|e| format!("failed to render report JSON: {e}"))?;
-    if let Some(report_path) = arg_value(args, "--report") {
-        let rendered = serde_json::to_string_pretty(&value)
-            .map_err(|e| format!("failed to render report JSON: {e}"))?;
-        fs::write(&report_path, rendered)
-            .map_err(|e| format!("failed to write report to '{report_path}': {e}"))?;
-    }
-    print_json_pretty(&value)
-}
-
-/// Import an XTDB entity-history EDN export (Issue #3384), preserving
-/// valid-time, provenance, supersession, and deletes.
-///
-/// `aletheia import --format xtdb --history <history.edn> [--label-field type]
-/// [--default-label Entity] [--ref-field field=LABEL ...] [--on-error abort|skip]
-/// [--report <out.json>]`
-#[cfg(feature = "import")]
-fn handle_import_xtdb(args: &[String]) -> Result<(), String> {
-    use aletheiadb::api::import::XtdbOptions;
-
-    let path = arg_value(args, "--history")
-        .or_else(|| arg_values(args, "--nodes").into_iter().next())
-        .ok_or_else(|| {
-            "usage: aletheia import --format xtdb --history <history.edn> [options]".to_string()
-        })?;
-
-    let mut opts = XtdbOptions::default();
-    if let Some(l) = arg_value(args, "--label-field") {
-        opts.label_field = l;
-    }
-    if let Some(l) = arg_value(args, "--default-label") {
-        opts.default_label = l;
-    }
-    for spec in arg_values(args, "--ref-field") {
-        match spec.split_once('=') {
-            Some((field, label)) => {
-                opts.ref_fields.insert(field.to_string(), label.to_string());
-            }
-            None => {
-                return Err(format!(
-                    "invalid --ref-field '{spec}', expected field=EDGE_LABEL"
-                ));
-            }
-        }
-    }
-    opts.failure_mode = parse_on_error(args)?;
-
-    let db = open_db()?;
-    let mut importer = db.import().failure_mode(opts.failure_mode);
-    let report = importer
-        .xtdb_import(&path, &opts)
-        .map_err(|e| format!("import failed: {e}"))?;
-    emit_import_report(args, &report)
-}
-
-/// Import a Datomic datom-stream EDN export + attribute schema (Issue #3384).
-///
-/// `aletheia import --format datomic --datoms <log.edn> --schema <schema.edn>
-/// [--valid-time-attr ns/attr] [--default-label Entity] [--on-error abort|skip]
-/// [--report <out.json>]`
-#[cfg(feature = "import")]
-fn handle_import_datomic(args: &[String]) -> Result<(), String> {
-    use aletheiadb::api::import::DatomicOptions;
-
-    let datoms = arg_value(args, "--datoms").ok_or_else(|| {
-        "usage: aletheia import --format datomic --datoms <log.edn> --schema <schema.edn> [options]"
-            .to_string()
-    })?;
-    let schema = arg_value(args, "--schema").ok_or_else(|| {
-        "aletheia import --format datomic requires --schema <schema.edn>".to_string()
-    })?;
-
-    let mut opts = DatomicOptions::default();
-    if let Some(a) = arg_value(args, "--valid-time-attr") {
-        opts.valid_time_attr = Some(a);
-    }
-    if let Some(l) = arg_value(args, "--default-label") {
-        opts.default_label = l;
-    }
-    if let Some(a) = arg_value(args, "--label-attr") {
-        opts.label_attr = Some(a);
-    }
-    opts.failure_mode = parse_on_error(args)?;
-
-    let db = open_db()?;
-    let mut importer = db.import().failure_mode(opts.failure_mode);
-    let report = importer
-        .datomic_import(&datoms, &schema, &opts)
-        .map_err(|e| format!("import failed: {e}"))?;
-    emit_import_report(args, &report)
-}
-
-/// Parse the `--on-error abort|skip` flag into a [`FailureMode`], shared by the
-/// XTDB / Datomic history importers (Issue #3384).
-#[cfg(feature = "import")]
-fn parse_on_error(args: &[String]) -> Result<aletheiadb::api::import::FailureMode, String> {
-    use aletheiadb::api::import::FailureMode;
-    match arg_value(args, "--on-error").as_deref() {
-        None | Some("abort") => Ok(FailureMode::Abort),
-        Some("skip") => Ok(FailureMode::SkipAndReport),
-        Some(other) => Err(format!("invalid --on-error '{other}', expected abort|skip")),
-    }
-}
-
-/// Render a serializable import report to stdout and, when `--report <path>` is
-/// given, to a JSON file (Issue #3384).
-#[cfg(feature = "import")]
-fn emit_import_report<R: serde::Serialize>(args: &[String], report: &R) -> Result<(), String> {
-    let value =
-        serde_json::to_value(report).map_err(|e| format!("failed to render report JSON: {e}"))?;
-    if let Some(report_path) = arg_value(args, "--report") {
-        let rendered = serde_json::to_string_pretty(&value)
-            .map_err(|e| format!("failed to render report JSON: {e}"))?;
-        fs::write(&report_path, rendered)
-            .map_err(|e| format!("failed to write report to '{report_path}': {e}"))?;
-    }
-    print_json_pretty(&value)
-}
-
-/// Stub `import` handler when the `import` feature is not compiled in.
-#[cfg(not(feature = "import"))]
-fn handle_import(_args: Vec<String>) -> Result<(), String> {
-    Err("the 'import' subcommand requires building with --features import".to_string())
-}
-
-/// Collect every value following each occurrence of `flag` (repeatable flags).
-#[cfg(feature = "import")]
-fn arg_values(args: &[String], flag: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut iter = args.iter();
-    while let Some(token) = iter.next() {
-        if token == flag
-            && let Some(value) = iter.next()
-        {
-            out.push(value.clone());
-        }
-    }
-    out
-}
-
-/// Parse a single-character CLI argument into a `char`.
-#[cfg(feature = "import")]
-fn single_char(value: &str, flag: &str) -> Result<char, String> {
-    let mut chars = value.chars();
-    match (chars.next(), chars.next()) {
-        (Some(c), None) => Ok(c),
-        _ => Err(format!("{flag} must be a single character, got '{value}'")),
-    }
-}
-
-/// Parse a single-ASCII-byte CLI argument (field delimiter / quote).
-#[cfg(feature = "import")]
-fn single_byte(value: &str, flag: &str) -> Result<u8, String> {
-    let bytes = value.as_bytes();
-    if bytes.len() == 1 {
-        Ok(bytes[0])
-    } else {
-        Err(format!(
-            "{flag} must be a single ASCII character, got '{value}'"
-        ))
-    }
-}
-
-/// `aletheia demo` — boot a seeded, ephemeral bi-temporal graph and print a
-/// guided tour of showcase queries (Issue #3380 AC3).
-///
-/// This mirrors the seed + guided-query flow in `examples/demo.rs` so the
-/// one-command CLI experience stays in sync with the Rust-native example and
-/// the CI behavior guard (`tests/quickstart_demo.rs`). It requires no data
-/// directory, no server, and no network: the database is ephemeral
-/// (`AletheiaDB::new()`), so nothing is written to disk.
-///
-/// Any surplus arguments are ignored; the demo is a zero-configuration,
-/// one-shot showcase.
-fn handle_demo(_args: Vec<String>) -> Result<(), String> {
-    let db = AletheiaDB::new().map_err(|e| format!("failed to initialize demo database: {e}"))?;
-    run_demo(&db)
-}
-
-/// Builds a small string-valued `PropertyMap` for the demo seed. Keeps the
-/// seeding code legible without depending on the `properties!` macro.
-fn demo_props(pairs: &[(&str, &str)]) -> PropertyMap {
-    let mut builder = PropertyMapBuilder::new();
-    for (key, value) in pairs {
-        builder = builder.insert(key, PropertyValue::string(*value));
-    }
-    builder.build()
-}
-
-/// Renders a `PropertyValue` for human-readable demo output (no Debug leakage
-/// for the common scalar cases).
-fn demo_display_value(value: &PropertyValue) -> String {
-    match value {
-        PropertyValue::String(s) => s.to_string(),
-        PropertyValue::Int(i) => i.to_string(),
-        PropertyValue::Float(f) => f.to_string(),
-        PropertyValue::Bool(b) => b.to_string(),
-        other => format!("{other:?}"),
-    }
-}
-
-/// Extracts a string-valued property from a node, or a placeholder if absent.
-fn demo_prop_str(node: &Node, key: &str) -> String {
-    node.properties
-        .get(key)
-        .map(demo_display_value)
-        .unwrap_or_else(|| "<none>".to_string())
-}
-
-/// Seeds a small story-driven bi-temporal dataset into `db` and prints a guided
-/// sequence of showcase queries: a current-state lookup, an `AS OF`
-/// point-in-time lookup, a graph traversal, and the full version history of a
-/// node. Tells the same story as `examples/demo.rs` (the query ordering and
-/// filler count differ; both flows are exercised in CI).
-///
-/// Extracted from [`handle_demo`] so the seed + query flow is unit-testable
-/// against an injected database instance.
-fn run_demo(db: &AletheiaDB) -> Result<(), String> {
-    // The `update_node` transaction method lives on the `WriteOps` trait.
-    use aletheiadb::api::WriteOps;
-
-    // A small, deterministic filler cohort so the graph is more than a toy of a
-    // few nodes, while keeping the one-shot CLI demo well under a second.
-    const FILLER_ENGINEERS: usize = 20;
-
-    println!("════════════════════════════════════════════════════════");
-    println!("  AletheiaDB — bi-temporal graph demo");
-    println!("  Ephemeral demo data (in-memory; nothing written to disk)");
-    println!("════════════════════════════════════════════════════════\n");
-
-    // ── Seed the graph ──────────────────────────────────────────────────────
-    let company = db
-        .create_node("Company", demo_props(&[("name", "Aletheia Labs")]))
-        .map_err(|e| format!("failed to seed Company: {e}"))?;
-
-    let alice = db
-        .create_node(
-            "Person",
-            demo_props(&[("name", "Alice"), ("title", "Engineer")]),
-        )
-        .map_err(|e| format!("failed to seed Alice: {e}"))?;
-    let bob = db
-        .create_node(
-            "Person",
-            demo_props(&[("name", "Bob"), ("title", "Engineer")]),
-        )
-        .map_err(|e| format!("failed to seed Bob: {e}"))?;
-    let carol = db
-        .create_node(
-            "Person",
-            demo_props(&[("name", "Carol"), ("title", "Designer")]),
-        )
-        .map_err(|e| format!("failed to seed Carol: {e}"))?;
-
-    db.create_edge(alice, company, "WORKS_AT", PropertyMap::new())
-        .map_err(|e| format!("failed to seed Alice WORKS_AT: {e}"))?;
-    db.create_edge(bob, company, "WORKS_AT", PropertyMap::new())
-        .map_err(|e| format!("failed to seed Bob WORKS_AT: {e}"))?;
-    db.create_edge(carol, company, "WORKS_AT", PropertyMap::new())
-        .map_err(|e| format!("failed to seed Carol WORKS_AT: {e}"))?;
-    db.create_edge(alice, bob, "KNOWS", PropertyMap::new())
-        .map_err(|e| format!("failed to seed Alice KNOWS Bob: {e}"))?;
-    db.create_edge(bob, carol, "KNOWS", PropertyMap::new())
-        .map_err(|e| format!("failed to seed Bob KNOWS Carol: {e}"))?;
-
-    let mut previous: Option<NodeId> = None;
-    for i in 0..FILLER_ENGINEERS {
-        let person = db
-            .create_node(
-                "Person",
-                demo_props(&[("name", &format!("Engineer {i}")), ("title", "Engineer")]),
-            )
-            .map_err(|e| format!("failed to seed filler engineer {i}: {e}"))?;
-        db.create_edge(person, company, "WORKS_AT", PropertyMap::new())
-            .map_err(|e| format!("failed to seed filler WORKS_AT: {e}"))?;
-        if let Some(prev) = previous {
-            db.create_edge(prev, person, "KNOWS", PropertyMap::new())
-                .map_err(|e| format!("failed to seed filler KNOWS: {e}"))?;
-        }
-        previous = Some(person);
-    }
-
-    // Capture the founding moment *after* the initial hire, so a query "as of
-    // founding" sees Alice as an Engineer.
-    let t_founding = aletheiadb::time::now();
-
-    // The story unfolds: Alice is promoted twice. Each update creates a new
-    // bi-temporal version; the old versions are preserved and stay queryable.
-    // A tiny sleep between writes guarantees strictly-later transaction
-    // timestamps so point-in-time reads resolve to distinct versions.
-    std::thread::sleep(std::time::Duration::from_millis(2));
-    db.write(|tx| {
-        tx.update_node(
-            alice,
-            demo_props(&[("name", "Alice"), ("title", "Staff Engineer")]),
-        )
-    })
-    .map_err(|e| format!("failed to promote Alice to Staff Engineer: {e}"))?;
-    std::thread::sleep(std::time::Duration::from_millis(2));
-    db.write(|tx| tx.update_node(alice, demo_props(&[("name", "Alice"), ("title", "CTO")])))
-        .map_err(|e| format!("failed to promote Alice to CTO: {e}"))?;
-
-    println!(
-        "Seeded {} nodes and {} edges (a Company \"Aletheia Labs\" plus its people)\n\
-         with genuine bi-temporal version history.\n",
-        db.node_count(),
-        db.edge_count()
-    );
-
-    // ── Query 1: current-state lookup ───────────────────────────────────────
-    println!("── Query 1 of 4: Current-state lookup ──");
-    println!("  db.get_node(alice_id)");
-    let alice_now = db
-        .get_node(alice)
-        .map_err(|e| format!("current-state lookup of Alice failed: {e}"))?;
-    let title_now = demo_prop_str(&alice_now, "title");
-    println!("  → Alice is currently: {title_now}");
-    println!("  what you just saw: the *latest* fact — sub-microsecond, no temporal overhead.\n");
-
-    // ── Query 2: AS OF point-in-time (the differentiator) ───────────────────
-    println!("── Query 2 of 4: Time-travel — AS OF the founding day ──");
-    println!("  db.get_node_at_time(alice_id, t_founding, t_founding)");
-    let alice_founding = db
-        .get_node_at_time(alice, t_founding, t_founding)
-        .map_err(|e| format!("AS OF point-in-time lookup of Alice failed: {e}"))?;
-    let title_founding = demo_prop_str(&alice_founding, "title");
-    println!("  → On founding day, Alice was: {title_founding}");
-    println!(
-        "  what you just saw: the SAME node, a different answer — \
-         \"{title_founding}\" then vs \"{title_now}\" now.\n"
-    );
-
-    // Guard the demo's headline invariant: the AS OF reconstruction must return
-    // the *founding-day* fact, not silently regress to current state. Uses the
-    // demo's `Result<(), String>` convention rather than a panic to match the
-    // CLI error style (cf. the `assert_ne!` guard in examples/demo.rs:140).
-    if title_founding == title_now {
-        return Err(format!(
-            "demo invariant broken: AS OF returned current state ({title_now})"
-        ));
-    }
-
-    // ── Query 3: a traversal ────────────────────────────────────────────────
-    println!("── Query 3 of 4: Traversal (who does Alice know?) ──");
-    println!("  db.get_outgoing_edges_with_label(alice_id, \"KNOWS\")");
-    for edge_id in db.get_outgoing_edges_with_label(alice, "KNOWS") {
-        let target = db
-            .get_edge_target(edge_id)
-            .map_err(|e| format!("failed to resolve KNOWS target: {e}"))?;
-        let person = db
-            .get_node(target)
-            .map_err(|e| format!("failed to load known person: {e}"))?;
-        println!(
-            "  → Alice KNOWS {} ({})",
-            demo_prop_str(&person, "name"),
-            demo_prop_str(&person, "title")
-        );
-    }
-    println!("  what you just saw: a single-hop graph traversal over the current graph.\n");
-
-    // ── Query 4: full history / provenance ──────────────────────────────────
-    println!("── Query 4 of 4: History — every version of a fact ──");
-    println!("  db.get_node_history(alice_id)");
-    let history = db
-        .get_node_history(alice)
-        .map_err(|e| format!("failed to load Alice's history: {e}"))?;
-    for version in &history.versions {
-        let title = version
-            .properties
-            .get("title")
-            .map(demo_display_value)
-            .unwrap_or_else(|| "<none>".to_string());
-        println!("  → v{}: title = {title}", version.version_number);
-    }
-    println!(
-        "  what you just saw: {} preserved versions of one node — the audit trail is free.\n",
-        history.versions.len()
-    );
-
-    println!("────────────────────────────────────────────────────────");
-    println!("Next: open a durable database with `AletheiaDB::open(\"./mydb\")`,");
-    println!("or point an MCP client at AletheiaDB — see docs/guides/quickstart.md.");
-
-    Ok(())
-}
-
-/// Builds the JSON success line emitted by `aletheia restore`.
-///
-/// The data-directory path is serialized through `serde_json` so any characters
-/// that are special in JSON strings (notably Windows path backslashes, e.g.
-/// `C:\Users\...`, which are invalid `\U`/`\R` escapes if interpolated raw) are
-/// correctly escaped and the output stays valid JSON on every platform.
-fn restore_success_json(data_dir: &Path) -> Result<String, String> {
-    let value = serde_json::json!({
-        "ok": true,
-        "data_dir": data_dir.display().to_string(),
-    });
-    serde_json::to_string(&value).map_err(|e| format!("failed to render JSON output: {e}"))
-}
-
-/// Opens the AletheiaDB database, honouring environment-driven config:
-/// `ALETHEIADB_CONFIG` (TOML path) takes precedence over `ALETHEIADB_DATA_DIR`
-/// (canonical durable layout). With neither set the database is ephemeral.
-///
-/// Converts underlying database errors into a clean string for CLI output.
-fn open_db() -> Result<AletheiaDB, String> {
-    AletheiaDB::open_from_env().map_err(|e| format!("failed to initialize database: {e}"))
-}
-
-/// Handles all subcommands under `aletheia node`.
-///
-/// Routes to either `create` or `get` based on the first argument in `args`.
-fn handle_node(args: Vec<String>) -> Result<(), String> {
-    match args.first().map(String::as_str) {
-        Some("create") => {
-            if args.len() < 2 {
-                return Err("usage: aletheia node create <label> [--properties JSON]".to_string());
-            }
-            let label = &args[1];
-            let properties = parse_optional_properties(&args[2..])?;
-            let db = open_db()?;
-            let node_id = db
-                .create_node(label, properties)
-                .map_err(|e| format!("create_node failed: {e}"))?;
-            print_json_pretty(&serde_json::json!({ "node_id": node_id.as_u64() }))
-        }
-        Some("get") => {
-            if args.len() != 2 {
-                return Err("usage: aletheia node get <node_id>".to_string());
-            }
-            let node_id = parse_node_id(&args[1])?;
-            let db = open_db()?;
-            let node = db
-                .get_node(node_id)
-                .map_err(|e| format!("get_node failed: {e}"))?;
-            print_json_pretty(&node_to_json(&node))
-        }
-        Some(sub) => Err(format!("unknown node subcommand '{sub}'")),
-        None => Err("usage: aletheia node <create|get> ...".to_string()),
-    }
-}
-
-/// Handles all subcommands under `aletheia edge`.
-///
-/// Routes to either `create` or `get` based on the first argument in `args`.
-fn handle_edge(args: Vec<String>) -> Result<(), String> {
-    match args.first().map(String::as_str) {
-        Some("create") => {
-            if args.len() < 4 {
+            if passphrase.is_empty() {
                 return Err(
-                    "usage: aletheia edge create <source_id> <target_id> <label> [--properties JSON]"
+                    "ALETHEIADB_KEY_PASSPHRASE must not be empty when --passphrase is used"
                         .to_string(),
                 );
             }
-            let source = parse_node_id(&args[1])?;
-            let target = parse_node_id(&args[2])?;
-            let label = &args[3];
-            let properties = parse_optional_properties(&args[4..])?;
-            let db = open_db()?;
-            let edge_id = db
-                .create_edge(source, target, label, properties)
-                .map_err(|e| format!("create_edge failed: {e}"))?;
-            print_json_pretty(&serde_json::json!({ "edge_id": edge_id.as_u64() }))
-        }
-        Some("get") => {
-            if args.len() != 2 {
-                return Err("usage: aletheia edge get <edge_id>".to_string());
-            }
-            let edge_id = parse_edge_id(&args[1])?;
-            let db = open_db()?;
-            let edge = db
-                .get_edge(edge_id)
-                .map_err(|e| format!("get_edge failed: {e}"))?;
-            print_json_pretty(&edge_to_json(&edge))
-        }
-        Some(sub) => Err(format!("unknown edge subcommand '{sub}'")),
-        None => Err("usage: aletheia edge <create|get> ...".to_string()),
-    }
-}
-
-/// Handles the `aletheia traverse` command.
-///
-/// Performs a single-hop graph traversal from a starting node, following edges
-/// with a specific label in the specified direction. Outputs results as JSON.
-fn handle_traverse(args: Vec<String>) -> Result<(), String> {
-    if args.len() < 2 {
-        return Err(
-            "usage: aletheia traverse <start_node_id> <edge_label> [--direction outgoing|incoming|both]"
-                .to_string(),
-        );
-    }
-
-    let start = parse_node_id(&args[0])?;
-    let label = &args[1];
-    let direction = parse_direction(&args[2..])?;
-
-    let db = open_db()?;
-    let mut reached = Vec::new();
-
-    if direction == "outgoing" || direction == "both" {
-        for edge_id in db.get_outgoing_edges_with_label(start, label) {
-            let target = db.get_edge_target(edge_id).map_err(|e| {
-                format!(
-                    "failed to resolve target for edge {}: {e}",
-                    edge_id.as_u64()
-                )
-            })?;
-            reached.push(serde_json::json!({
-                "edge_id": edge_id.as_u64(),
-                "direction": "outgoing",
-                "node_id": target.as_u64(),
-            }));
-        }
-    }
-
-    if direction == "incoming" || direction == "both" {
-        for edge_id in db.get_incoming_edges_with_label(start, label) {
-            let source = db.get_edge_source(edge_id).map_err(|e| {
-                format!(
-                    "failed to resolve source for edge {}: {e}",
-                    edge_id.as_u64()
-                )
-            })?;
-            reached.push(serde_json::json!({
-                "edge_id": edge_id.as_u64(),
-                "direction": "incoming",
-                "node_id": source.as_u64(),
-            }));
-        }
-    }
-
-    print_json_pretty(&serde_json::json!({
-        "start_node_id": start.as_u64(),
-        "edge_label": label,
-        "direction": direction,
-        "results": reached,
-    }))
-}
-
-/// Handles all subcommands under `aletheia daemon`.
-///
-/// Routes to `start`, `stop`, or `status` to manage the background server process.
-fn handle_daemon(args: Vec<String>) -> Result<(), String> {
-    match args.first().map(String::as_str) {
-        Some("start") => daemon_start(&args[1..]),
-        Some("stop") => daemon_stop(&args[1..]),
-        Some("status") => daemon_status(&args[1..]),
-        Some(sub) => Err(format!("unknown daemon subcommand '{sub}'")),
-        None => Err("usage: aletheia daemon <start|stop|status> ...".to_string()),
-    }
-}
-
-/// Starts the AletheiaDB background server daemon.
-///
-/// 1. Checks if it's already running.
-/// 2. Spawns the `aletheia-server` process in the background.
-/// 3. Writes the PID and executable path to `.aletheia/daemon.pid`.
-fn daemon_start(args: &[String]) -> Result<(), String> {
-    let pid_file = PathBuf::from(
-        arg_value(args, "--pid-file").unwrap_or_else(|| DEFAULT_PID_FILE.to_string()),
-    );
-    let log_file = PathBuf::from(
-        arg_value(args, "--log-file").unwrap_or_else(|| DEFAULT_LOG_FILE.to_string()),
-    );
-    let host = arg_value(args, "--host").unwrap_or_else(|| DEFAULT_HOST.to_string());
-    let port = arg_value(args, "--port")
-        .map(|s| {
-            s.parse::<u16>()
-                .map_err(|e| format!("invalid port '{s}': {e}"))
-        })
-        .transpose()?
-        .unwrap_or(DEFAULT_PORT);
-
-    if let Some(meta) = read_daemon_metadata(&pid_file)?
-        && is_expected_daemon_running(&meta)
-    {
-        return Err(format!(
-            "daemon already running with pid {} ({})",
-            meta.pid,
-            meta.server_exe.display()
-        ));
-    }
-
-    ensure_parent_dir(&pid_file)?;
-    ensure_parent_dir(&log_file)?;
-
-    let server_exe = resolve_server_executable()?;
-
-    let log = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_file)
-        .map_err(|e| format!("failed to open log file '{}': {e}", log_file.display()))?;
-
-    let mut cmd = Command::new(&server_exe);
-    cmd.env("ALETHEIADB_HOST", &host)
-        .env("ALETHEIADB_PORT", port.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
-        .stderr(Stdio::from(log));
-
-    let child = cmd.spawn().map_err(|e| {
-        format!(
-            "failed to launch daemon process '{}': {e}",
-            server_exe.display()
-        )
-    })?;
-
-    let metadata = DaemonMetadata {
-        pid: child.id(),
-        server_exe,
-    };
-
-    write_daemon_metadata(&pid_file, &metadata)?;
-
-    println!(
-        "daemon started (pid={}, host={}, port={}, exe={}, log={})",
-        metadata.pid,
-        host,
-        port,
-        metadata.server_exe.display(),
-        log_file.display()
-    );
-    Ok(())
-}
-
-/// Stops the running AletheiaDB background server daemon.
-///
-/// Reads the PID from the pid-file, verifies the process is still the expected
-/// server executable, and sends a kill signal. Cleans up the pid-file afterwards.
-fn daemon_stop(args: &[String]) -> Result<(), String> {
-    let pid_file = PathBuf::from(
-        arg_value(args, "--pid-file").unwrap_or_else(|| DEFAULT_PID_FILE.to_string()),
-    );
-    let meta = read_daemon_metadata(&pid_file)?.ok_or_else(|| {
-        format!(
-            "no pid file found at '{}' (daemon not running?)",
-            pid_file.display()
-        )
-    })?;
-
-    if !is_expected_daemon_running(&meta) {
-        return Err(format!(
-            "refusing to stop pid {}: process does not match expected daemon binary '{}'",
-            meta.pid,
-            meta.server_exe.display()
-        ));
-    }
-
-    let status = Command::new("kill")
-        .arg(meta.pid.to_string())
-        .status()
-        .map_err(|e| format!("failed to invoke kill: {e}"))?;
-
-    if !status.success() {
-        return Err(format!("failed to stop daemon process {}", meta.pid));
-    }
-
-    fs::remove_file(&pid_file)
-        .map_err(|e| format!("failed to remove pid file '{}': {e}", pid_file.display()))?;
-
-    println!("daemon stopped (pid={})", meta.pid);
-    Ok(())
-}
-
-/// Checks and prints the status of the background server daemon.
-///
-/// Verifies whether the process ID in the pid-file is actively running and
-/// matches the expected server executable.
-fn daemon_status(args: &[String]) -> Result<(), String> {
-    let pid_file = PathBuf::from(
-        arg_value(args, "--pid-file").unwrap_or_else(|| DEFAULT_PID_FILE.to_string()),
-    );
-    match read_daemon_metadata(&pid_file)? {
-        Some(meta) if is_expected_daemon_running(&meta) => {
-            println!(
-                "daemon is running (pid={}, exe={})",
-                meta.pid,
-                meta.server_exe.display()
-            );
-            Ok(())
-        }
-        Some(meta) => {
-            println!(
-                "daemon is not running or pid was reused (pid={}, expected_exe={})",
-                meta.pid,
-                meta.server_exe.display()
-            );
-            Ok(())
-        }
-        None => {
-            println!("daemon is not running (no pid file)");
-            Ok(())
-        }
-    }
-}
-
-/// Resolves the absolute path to the `aletheia-server` executable.
-///
-/// Assumes the server binary is located in the same directory as this CLI binary.
-fn resolve_server_executable() -> Result<PathBuf, String> {
-    let mut exe_path =
-        env::current_exe().map_err(|e| format!("failed to get current executable path: {e}"))?;
-
-    exe_path.pop();
-    let server_exe = exe_path.join(SERVER_BIN_NAME);
-
-    if server_exe.is_file() {
-        return Ok(server_exe);
-    }
-
-    #[cfg(windows)]
-    {
-        let server_exe_win = exe_path.join(format!("{}.exe", SERVER_BIN_NAME));
-        if server_exe_win.is_file() {
-            return Ok(server_exe_win);
-        }
-    }
-
-    Err(format!(
-        "could not find '{}' next to CLI binary at '{}'",
-        SERVER_BIN_NAME,
-        exe_path.display()
-    ))
-}
-
-/// Checks if the process defined in `meta` is currently running and is the correct binary.
-///
-/// Uses `/proc/<pid>` on Unix systems to verify the process executable. This prevents
-/// accidentally killing unrelated processes if a PID is reused by the OS after a crash.
-fn is_expected_daemon_running(meta: &DaemonMetadata) -> bool {
-    let proc_dir = PathBuf::from(format!("/proc/{}", meta.pid));
-    if !proc_dir.exists() {
-        return false;
-    }
-
-    let exe_path = proc_dir.join("exe");
-    if let Ok(current_exe) = fs::read_link(&exe_path) {
-        return current_exe == meta.server_exe;
-    }
-
-    let cmdline_path = proc_dir.join("cmdline");
-    let cmdline = fs::read(cmdline_path).unwrap_or_default();
-    let joined = String::from_utf8_lossy(&cmdline).replace('\0', " ");
-    joined.contains(SERVER_BIN_NAME)
-}
-
-/// Writes the daemon's PID and executable path to the specified pid-file.
-fn write_daemon_metadata(path: &Path, meta: &DaemonMetadata) -> Result<(), String> {
-    let content = format!("{}\n{}\n", meta.pid, meta.server_exe.display());
-    fs::write(path, content)
-        .map_err(|e| format!("failed to write pid file '{}': {e}", path.display()))
-}
-
-/// Reads the daemon's PID and executable path from the specified pid-file.
-fn read_daemon_metadata(path: &Path) -> Result<Option<DaemonMetadata>, String> {
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("failed reading pid file '{}': {e}", path.display()))?;
-
-    let mut lines = content.lines();
-    let pid_line = lines
-        .next()
-        .ok_or_else(|| format!("pid file '{}' missing pid line", path.display()))?;
-    let exe_line = lines
-        .next()
-        .ok_or_else(|| format!("pid file '{}' missing executable line", path.display()))?;
-
-    let pid = pid_line
-        .parse::<u32>()
-        .map_err(|e| format!("invalid pid in '{}': {e}", path.display()))?;
-
-    Ok(Some(DaemonMetadata {
-        pid,
-        server_exe: PathBuf::from(exe_line),
-    }))
-}
-
-/// Ensures the parent directory for a given file path exists, creating it if necessary.
-fn ensure_parent_dir(path: &Path) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create directory '{}': {e}", parent.display()))?;
-    }
-    Ok(())
-}
-
-/// Extracts the value of a specific command-line flag (e.g., `--port 1963`).
-fn arg_value(args: &[String], flag: &str) -> Option<String> {
-    let mut iter = args.iter();
-    while let Some(token) = iter.next() {
-        if token == flag {
-            return iter.next().cloned();
-        }
-    }
-    None
-}
-
-/// Parses the `--properties` JSON argument if present, converting it to a `PropertyMap`.
-fn parse_optional_properties(args: &[String]) -> Result<PropertyMap, String> {
-    match arg_value(args, "--properties") {
-        Some(json) => json_to_property_map(&json),
-        None => Ok(PropertyMap::new()),
-    }
-}
-
-/// Parses the `--direction` argument for traversals (defaults to "outgoing").
-fn parse_direction(args: &[String]) -> Result<String, String> {
-    let direction = arg_value(args, "--direction").unwrap_or_else(|| "outgoing".to_string());
-    if matches!(direction.as_str(), "outgoing" | "incoming" | "both") {
-        Ok(direction)
-    } else {
-        Err(format!(
-            "invalid direction '{direction}', expected outgoing|incoming|both"
-        ))
-    }
-}
-
-/// Parses a string into a `NodeId`.
-fn parse_node_id(raw: &str) -> Result<NodeId, String> {
-    let id = raw
-        .parse::<u64>()
-        .map_err(|e| format!("invalid node id '{raw}': {e}"))?;
-    NodeId::new(id).map_err(|e| format!("invalid node id: {e}"))
-}
-
-/// Parses a string into an `EdgeId`.
-fn parse_edge_id(raw: &str) -> Result<EdgeId, String> {
-    let id = raw
-        .parse::<u64>()
-        .map_err(|e| format!("invalid edge id '{raw}': {e}"))?;
-    EdgeId::new(id).map_err(|e| format!("invalid edge id: {e}"))
-}
-
-/// Converts a raw JSON string into a structured `PropertyMap`.
-fn json_to_property_map(raw: &str) -> Result<PropertyMap, String> {
-    let parsed: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| format!("invalid JSON properties payload: {e}"))?;
-
-    let object = parsed
-        .as_object()
-        .ok_or_else(|| "properties JSON must be an object".to_string())?;
-
-    let mut map = PropertyMapBuilder::new();
-    for (key, value) in object {
-        let converted = json_to_property_value(value)?;
-        map = map.insert(key, converted);
-    }
-    Ok(map.build())
-}
-
-/// Converts a single JSON value into an internal `PropertyValue`.
-fn json_to_property_value(value: &serde_json::Value) -> Result<PropertyValue, String> {
-    match value {
-        serde_json::Value::Null => Ok(PropertyValue::Null),
-        serde_json::Value::Bool(v) => Ok(PropertyValue::Bool(*v)),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(PropertyValue::Int(i))
-            } else if let Some(f) = n.as_f64() {
-                Ok(PropertyValue::Float(f))
-            } else {
-                Err("unsupported numeric value".to_string())
-            }
-        }
-        serde_json::Value::String(s) => Ok(PropertyValue::string(s)),
-        serde_json::Value::Array(arr) => {
-            let values = arr
-                .iter()
-                .map(json_to_property_value)
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(PropertyValue::array(values))
-        }
-        serde_json::Value::Object(_) => {
-            Err("nested objects are not supported in properties".to_string())
-        }
-    }
-}
-
-/// Converts an internal `Node` object into a JSON representation for CLI output.
-fn node_to_json(node: &Node) -> serde_json::Value {
-    serde_json::json!({
-        "id": node.id.as_u64(),
-        "label": resolve_label(node.label),
-        "properties": property_map_to_json(&node.properties),
-    })
-}
-
-/// Converts an internal `Edge` object into a JSON representation for CLI output.
-fn edge_to_json(edge: &Edge) -> serde_json::Value {
-    serde_json::json!({
-        "id": edge.id.as_u64(),
-        "label": resolve_label(edge.label),
-        "source": edge.source.as_u64(),
-        "target": edge.target.as_u64(),
-        "properties": property_map_to_json(&edge.properties),
-    })
-}
-
-/// Resolves an `InternedString` back into its raw string representation.
-fn resolve_label(label: aletheiadb::InternedString) -> String {
-    GLOBAL_INTERNER
-        .resolve_with(label, |s| s.to_string())
-        .unwrap_or_else(|| "<unknown-label>".to_string())
-}
-
-/// Converts an internal `PropertyMap` into a JSON Object.
-fn property_map_to_json(props: &PropertyMap) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    for (key, value) in props.iter() {
-        let key_string = GLOBAL_INTERNER
-            .resolve_with(*key, |s| s.to_string())
-            .unwrap_or_else(|| "<unknown-key>".to_string());
-        map.insert(key_string, property_value_to_json(value));
-    }
-    serde_json::Value::Object(map)
-}
-
-/// Converts an internal `PropertyValue` into a standard JSON Value.
-fn property_value_to_json(value: &PropertyValue) -> serde_json::Value {
-    match value {
-        PropertyValue::Null => serde_json::Value::Null,
-        PropertyValue::Bool(v) => serde_json::Value::Bool(*v),
-        PropertyValue::Int(v) => serde_json::json!(*v),
-        PropertyValue::Float(v) => serde_json::json!(*v),
-        PropertyValue::String(v) => serde_json::Value::String(v.to_string()),
-        PropertyValue::Bytes(v) => serde_json::json!(v.to_vec()),
-        PropertyValue::Array(values) => {
-            serde_json::Value::Array(values.iter().map(property_value_to_json).collect())
-        }
-        PropertyValue::Vector(values) => {
-            serde_json::Value::Array(values.iter().map(|f| serde_json::json!(*f)).collect())
-        }
-        PropertyValue::SparseVector(values) => serde_json::json!({
-            "indices": values.indices(),
-            "values": values.values(),
-            "dimensions": values.dimension(),
-        }),
-    }
-}
-
-/// Pretty-prints a JSON value to standard output.
-fn print_json_pretty(value: &serde_json::Value) -> Result<(), String> {
-    let rendered = serde_json::to_string_pretty(value)
-        .map_err(|e| format!("failed to render JSON output: {e}"))?;
-
-    let mut stdout = io::stdout().lock();
-    match writeln!(stdout, "{rendered}") {
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),
-        Err(e) => Err(format!("error writing JSON output: {e}")),
-    }
-}
-
-/// Parquet columnar import/export subcommands (Issue #3364).
-#[cfg(feature = "parquet")]
-mod parquet_io {
-    use super::{arg_value, arg_values, open_db};
-    use aletheiadb::api::import::{ColumnType, EdgeMapping, LabelSource, NodeMapping};
-
-    /// `aletheia import <nodes_file> --format parquet --label L --key COL ...`
-    ///
-    /// Loads nodes (and optionally edges) from Parquet using the #3211 mapping
-    /// contract. `--label`/`--label-column` choose the label source; `--key` names the
-    /// business-key column; repeated `--property name:type` add typed property columns
-    /// (`type` in string|int|float|bool|timestamp|embedding).
-    pub(super) fn handle_import(args: Vec<String>) -> Result<(), String> {
-        let nodes_file = positional(&args).ok_or_else(usage_import)?;
-        require_parquet_format(&args)?;
-
-        let node_mapping = build_node_mapping(&args)?;
-        let db = open_db()?;
-        let mut importer = db.import();
-        // Rows commit in chunks, so an error can leave earlier chunks committed. Report
-        // the count committed so far so the operator knows the database is partial.
-        let node_report = match importer.nodes_from_parquet(&nodes_file, node_mapping) {
-            Ok(report) => report,
-            Err(e) => {
-                return Err(format!(
-                    "node import failed after committing {} node(s): {e} \
-                     (import commits in chunks; the database may be partially written)",
-                    importer.imported_node_count()
-                ));
-            }
+            let result = aletheiadb::encryption::cli::generate_passphrase_key_with_overwrite(
+                path,
+                passphrase.as_str(),
+                force,
+            )
+            .map_err(|e| format!("failed to generate passphrase key: {e}"));
+            // Drop the passphrase from this frame promptly; it is zeroized on drop.
+            drop(passphrase);
+            result?
+        } else {
+            aletheiadb::encryption::cli::generate_key_with_overwrite(path, force)
+                .map_err(|e| format!("failed to generate key: {e}"))?
         };
 
-        let mut edges_imported = 0usize;
-        if let Some(edges_file) = arg_value(&args, "--edges") {
-            let edge_mapping = build_edge_mapping(&args)?;
-            match importer.edges_from_parquet(&edges_file, edge_mapping) {
-                Ok(edge_report) => edges_imported = edge_report.edges_imported,
-                Err(e) => {
-                    return Err(format!(
-                        "edge import failed: {e} ({} node(s) committed; edges commit in \
-                         chunks, so the database may be partially written)",
-                        importer.imported_node_count()
-                    ));
+        // Defense-in-depth: re-assert owner-only permissions. `generate_key_with_overwrite`
+        // already creates the file 0600 at creation time on Unix, so this is a
+        // belt-and-suspenders check that introduces no new window (it only ever
+        // tightens, never loosens, and the file is already 0600 by here).
+        restrict_key_permissions(path)?;
+
+        println!(
+            "Generated a new {}-byte master key at {}\n  algorithm: {}\n  (key bytes are not printed)",
+            result.key_length, result.path, result.algorithm
+        );
+        Ok(())
+    }
+
+    /// `aletheia keys status` (alias `info`) — report the encryption key
+    /// configuration WITHOUT reading or printing key material.
+    ///
+    /// Configuration is resolved from `--key-file`/`--env-var` flags, else from an
+    /// `ALETHEIADB_CONFIG` TOML (when the `config-toml` feature is compiled in),
+    /// else reported as not configured (exit 0, informational). Only non-secret
+    /// facts are shown: provider type, provider detail (path/var name — not
+    /// secret), algorithm, and the key version (always 1 until rotation lands).
+    fn keys_status(args: &[String]) -> Result<(), String> {
+        let config = resolve_encryption_config(args)?;
+        let status = aletheiadb::encryption::cli::get_encryption_status(&config);
+        let mut out = aletheiadb::encryption::cli::format_encryption_status(&status);
+        if status.enabled {
+            // There is no rotation yet (Issue #488), so the key version is always
+            // 1 today. Surface it explicitly rather than implying multi-version.
+            out.push_str("Key version:    1 (rotation not yet enabled)\n");
+        }
+        print!("{out}");
+        Ok(())
+    }
+
+    /// `aletheia keys verify --key-file <PATH>` — verify the named key is usable.
+    ///
+    /// Constructs the file key provider and runs its health check (which loads and
+    /// parses the MEK). This is the scoped v1 of the issue's `encryption verify`:
+    /// it verifies the KEY is loadable/valid, NOT that all encrypted data across
+    /// all storage layers decrypts (that broader check depends on index encryption,
+    /// Issue #481, which is not yet on trunk). On failure a safe error category is
+    /// reported (never key bytes) and the process exits non-zero.
+    fn keys_verify(args: &[String]) -> Result<(), String> {
+        let key_file = arg_value(args, "--key-file")
+            .ok_or_else(|| "usage: aletheia keys verify --key-file <PATH>".to_string())?;
+        let path = Path::new(&key_file);
+        match aletheiadb::encryption::cli::validate_key_file(path) {
+            Ok(()) => {
+                println!("Key at {key_file} loads and is valid.");
+                Ok(())
+            }
+            // `KeyProviderError`'s Display never contains key bytes (only a
+            // category and, for a length mismatch, a byte count), so it is safe to
+            // surface directly.
+            Err(e) => Err(format!("key verification failed: {e}")),
+        }
+    }
+
+    /// `aletheia keys rotate ...` — drive the index key rotation engine (Issue
+    /// #488) from the operator CLI (Issue #490).
+    ///
+    /// Modes (mutually exclusive):
+    /// - `--new-key <PATH>` / `--new-env-var <NAME>`: START a rotation to the new
+    ///   key source, re-encrypting every persisted index file.
+    /// - `--status`: report the on-disk key-generation classification (how far
+    ///   along a rotation is / whether one looks incomplete).
+    /// - `--resume`: finish an interrupted rotation (idempotent).
+    /// - `--cancel`: roll back an interrupted rotation to the old key.
+    ///
+    /// All modes open the database from the ambient config (`ALETHEIADB_CONFIG` /
+    /// `ALETHEIADB_DATA_DIR`); rotation requires an encrypted, index-persistent
+    /// database. Key bytes are NEVER printed.
+    ///
+    /// ## Full-MEK, all-layer rotation (Issue #3617)
+    ///
+    /// The engine re-keys EVERY encrypted-at-rest layer under the master key —
+    /// index, checkpoint, WAL, and cold storage — so a uniformly-encrypted database
+    /// rotates fully and a subsequent key-provider switch is safe. A crash
+    /// mid-rotation resumes automatically on the next open (each layer's pass is
+    /// idempotent / cursor-resumable).
+    fn keys_rotate(args: &[String]) -> Result<(), String> {
+        let status = args.iter().any(|a| a == "--status");
+        let resume = args.iter().any(|a| a == "--resume");
+        let cancel = args.iter().any(|a| a == "--cancel");
+        let new_key = arg_value(args, "--new-key");
+        let new_env_var = arg_value(args, "--new-env-var");
+
+        // Exactly one action must be selected.
+        let action_count = [
+            status,
+            resume,
+            cancel,
+            new_key.is_some(),
+            new_env_var.is_some(),
+        ]
+        .iter()
+        .filter(|b| **b)
+        .count();
+        if action_count == 0 {
+            return Err(rotate_usage());
+        }
+        if action_count > 1 {
+            // Covers every over-selection, including `--new-key` + `--new-env-var`
+            // together (both count as an action), so no separate mutual-exclusion
+            // branch is needed.
+            return Err(format!(
+                "keys rotate: choose exactly one of --new-key/--new-env-var (start), \
+             --status, --resume, or --cancel\n{}",
+                rotate_usage()
+            ));
+        }
+
+        let db = open_db().map_err(rotate_not_configured_hint)?;
+
+        if status {
+            return keys_rotate_status(&db);
+        }
+        if resume {
+            let report = db
+                .resume_pending_index_rotation()
+                .map_err(rotate_error_hint)?;
+            return match report {
+                Some(r) => {
+                    print_rotation_report("Resumed index key rotation", &r);
+                    Ok(())
                 }
-            }
+                None => {
+                    println!("No pending index key rotation to resume.");
+                    Ok(())
+                }
+            };
+        }
+        if cancel {
+            let report = db.cancel_pending_rotation().map_err(rotate_error_hint)?;
+            print_rotation_report("Cancelled index key rotation (rolled back)", &report);
+            return Ok(());
         }
 
-        let value = serde_json::json!({
-            "ok": true,
-            "nodes_imported": node_report.nodes_imported,
-            "edges_imported": edges_imported,
-            "rows_read": node_report.rows_read,
-        });
-        println!(
-            "{}",
-            serde_json::to_string(&value).map_err(|e| format!("failed to render JSON: {e}"))?
-        );
-        Ok(())
-    }
-
-    /// `aletheia export <out_prefix> --format parquet [--mode current|history]`
-    ///
-    /// Writes two files: for `current` (the default) `<out_prefix>.nodes.parquet` and
-    /// `<out_prefix>.edges.parquet`; for `history` `<out_prefix>.node_history.parquet`
-    /// and `<out_prefix>.edge_history.parquet`.
-    pub(super) fn handle_export(args: Vec<String>) -> Result<(), String> {
-        let prefix = positional(&args).ok_or_else(usage_export)?;
-        require_parquet_format(&args)?;
-        let mode = arg_value(&args, "--mode").unwrap_or_else(|| "current".to_string());
-
-        let db = open_db()?;
-        let exporter = db.export();
-
-        let value = match mode.as_str() {
-            "current" => {
-                let nodes_path = format!("{prefix}.nodes.parquet");
-                let edges_path = format!("{prefix}.edges.parquet");
-                let nodes = exporter
-                    .nodes_to_parquet(&nodes_path)
-                    .map_err(|e| format!("node export failed: {e}"))?;
-                let edges = exporter
-                    .edges_to_parquet(&edges_path)
-                    .map_err(|e| format!("edge export failed: {e}"))?;
-                serde_json::json!({
-                    "ok": true,
-                    "mode": "current",
-                    "nodes_file": nodes_path,
-                    "edges_file": edges_path,
-                    "nodes_exported": nodes.nodes_exported,
-                    "edges_exported": edges.edges_exported,
-                })
-            }
-            "history" => {
-                let nodes_path = format!("{prefix}.node_history.parquet");
-                let edges_path = format!("{prefix}.edge_history.parquet");
-                let nodes = exporter
-                    .node_history_to_parquet(&nodes_path)
-                    .map_err(|e| format!("node history export failed: {e}"))?;
-                let edges = exporter
-                    .edge_history_to_parquet(&edges_path)
-                    .map_err(|e| format!("edge history export failed: {e}"))?;
-                serde_json::json!({
-                    "ok": true,
-                    "mode": "history",
-                    "node_history_file": nodes_path,
-                    "edge_history_file": edges_path,
-                    "node_versions_exported": nodes.node_versions_exported,
-                    "edge_versions_exported": edges.edge_versions_exported,
-                })
-            }
-            other => {
-                return Err(format!(
-                    "unknown --mode '{other}' (expected current|history)"
-                ));
-            }
+        // Start a rotation.
+        let new_source = if let Some(path) = new_key {
+            aletheiadb::encryption::config::KeyProviderConfig::File { path: path.into() }
+        } else if let Some(var) = new_env_var {
+            aletheiadb::encryption::config::KeyProviderConfig::Env { variable: var }
+        } else {
+            return Err(rotate_usage());
         };
-        println!(
-            "{}",
-            serde_json::to_string(&value).map_err(|e| format!("failed to render JSON: {e}"))?
+
+        eprintln!("Starting index key rotation (re-encrypting persisted index files)...");
+        let report = db
+            .rotate_index_keys(new_source)
+            .map_err(rotate_error_hint)?;
+        // Progress/summary to stderr so scripts can separate it from the report.
+        eprintln!(
+            "  re-encrypted {}/{} index files ({} already current) in {} ms",
+            report.files_reencrypted, report.files_total, report.files_skipped, report.duration_ms
         );
+        print_rotation_report("Index key rotation complete", &report);
         Ok(())
     }
 
-    /// The first non-flag, non-flag-value token (the required output/input path).
-    fn positional(args: &[String]) -> Option<String> {
-        let mut iter = args.iter();
-        while let Some(token) = iter.next() {
-            if token.starts_with("--") {
-                // Skip this flag's value too.
-                iter.next();
-            } else {
-                return Some(token.clone());
-            }
-        }
-        None
+    /// Usage string for `keys rotate`.
+    fn rotate_usage() -> String {
+        "usage: aletheia keys rotate (--new-key <PATH> | --new-env-var <NAME>) | \
+     --status | --resume | --cancel\n  \
+     Requires an encrypted, index-persistent database (open via ALETHEIADB_CONFIG)."
+            .to_string()
     }
 
-    fn require_parquet_format(args: &[String]) -> Result<(), String> {
-        match arg_value(args, "--format").as_deref() {
-            Some("parquet") => Ok(()),
-            Some(other) => Err(format!("unsupported --format '{other}' (only 'parquet')")),
-            None => Err("missing required --format parquet".to_string()),
+    /// Report the on-disk index key-generation classification.
+    fn keys_rotate_status(db: &AletheiaDB) -> Result<(), String> {
+        let s = db.index_rotation_status().map_err(rotate_error_hint)?;
+        println!("Index key rotation status");
+        println!("  files at current key: {}", s.at_current);
+        println!("  files at old key:     {}", s.at_old);
+        println!("  files at unknown key: {}", s.unknown);
+        println!("  plaintext files:      {}", s.plaintext);
+        if s.is_fully_rotated() {
+            println!("  state: no rotation pending (all files at the current key version)");
+        } else {
+            println!(
+                "  state: a rotation appears incomplete — run `keys rotate --resume` to finish \
+             it, or `keys rotate --cancel` to roll it back"
+            );
+        }
+        Ok(())
+    }
+
+    /// Print a completed [`RotationReport`](aletheiadb::db::rotation::RotationReport)
+    /// summary. Contains only version numbers and file counts — never key bytes.
+    fn print_rotation_report(headline: &str, r: &aletheiadb::db::rotation::RotationReport) {
+        println!("{headline}");
+        println!("  key version:      {} -> {}", r.old_version, r.new_version);
+        println!("  files total:      {}", r.files_total);
+        println!("  files re-encrypted: {}", r.files_reencrypted);
+        println!("  files skipped:    {}", r.files_skipped);
+        println!("  duration:         {} ms", r.duration_ms);
+    }
+
+    /// Map a database-open failure into a rotation-specific "not configured" hint.
+    fn rotate_not_configured_hint(e: String) -> String {
+        format!(
+            "{e}\n\
+         hint: `keys rotate` requires an encrypted, index-persistent database. Open one via \
+         ALETHEIADB_CONFIG pointing at a TOML config with encryption + index persistence enabled."
+        )
+    }
+
+    /// Map a rotation engine error into a CLI-friendly message. The engine's error
+    /// Display never contains key bytes (only categories, layer names, and version
+    /// numbers), so it is safe to surface directly, with a remediation hint for the
+    /// common not-configured case.
+    fn rotate_error_hint(e: impl std::fmt::Display) -> String {
+        let msg = e.to_string();
+        if msg.contains("not configured")
+            || msg.contains("not enabled")
+            || msg.contains("persistence")
+        {
+            format!(
+                "{msg}\n\
+             hint: `keys rotate` requires an encrypted, index-persistent database. Open one via \
+             ALETHEIADB_CONFIG pointing at a TOML config with encryption + index persistence \
+             enabled."
+            )
+        } else {
+            msg
         }
     }
 
-    fn parse_column_type(spec: &str) -> Result<ColumnType, String> {
-        match spec {
-            "string" => Ok(ColumnType::String),
-            "int" => Ok(ColumnType::Int),
-            "float" => Ok(ColumnType::Float),
-            "bool" => Ok(ColumnType::Bool),
-            "timestamp" => Ok(ColumnType::Timestamp),
-            "embedding" => Ok(ColumnType::Embedding),
-            other => Err(format!(
-                "unknown property type '{other}' (expected string|int|float|bool|timestamp|embedding)"
+    /// `aletheia encryption <status|verify|enable|disable>` — encryption-at-rest
+    /// operator commands (Issue #490).
+    fn handle_encryption(args: Vec<String>) -> Result<(), String> {
+        match args.first().map(String::as_str) {
+            Some("status") => encryption_status(&args[1..]),
+            Some("verify") => encryption_verify(&args[1..]),
+            Some("enable") => encryption_enable(&args[1..]),
+            Some("disable") => encryption_disable(&args[1..]),
+            Some(sub) => Err(format!(
+                "unknown encryption subcommand '{sub}'\n{}",
+                encryption_usage()
+            )),
+            None => Err(format!(
+                "usage: aletheia encryption <status|verify|enable|disable>\n{}",
+                encryption_usage()
             )),
         }
     }
 
-    /// Parse repeated `<flag> name:type` flags into `(column, type)` pairs. The column
-    /// and property name are the same (`name`), matching a column-per-key export. `flag`
-    /// is `--property` for nodes and `--edge-property` for edges so the two mappings are
-    /// scoped independently.
-    fn parse_properties(args: &[String], flag: &str) -> Result<Vec<(String, ColumnType)>, String> {
-        let mut out = Vec::new();
-        for spec in arg_values(args, flag) {
-            let (name, ty) = spec
-                .split_once(':')
-                .ok_or_else(|| format!("invalid {flag} '{spec}' (expected name:type)"))?;
-            if name.is_empty() {
-                return Err(format!("invalid {flag} '{spec}' (empty name)"));
+    /// Usage detail for the `encryption` subcommand group.
+    fn encryption_usage() -> String {
+        "  encryption status  [--key-file PATH | --env-var NAME]   Per-layer encryption status\n\
+     \x20 encryption verify                                       Verify the configured DB's encrypted data decrypts\n\
+     \x20 encryption enable  (--key-file PATH | --env-var NAME)   Migrate a plaintext DB to encrypted-at-rest\n\
+     \x20 encryption disable                                      Migrate an encrypted DB back to plaintext-at-rest"
+        .to_string()
+    }
+
+    /// `encryption status` — per-layer encryption status table.
+    ///
+    /// The overall/provider/algorithm block is derived from the resolved
+    /// [`EncryptionConfig`]. Because AletheiaDB encrypts uniformly (one master key
+    /// protects every at-rest layer), when encryption is enabled every layer is
+    /// encrypted; the per-layer table reflects that and, when a durable database is
+    /// configured, enriches the index row with live rotation status and the cold
+    /// row with whether the cold tier is configured.
+    fn encryption_status(args: &[String]) -> Result<(), String> {
+        let config = resolve_encryption_config(args)?;
+        let status = aletheiadb::encryption::cli::get_encryption_status(&config);
+        print!(
+            "{}",
+            aletheiadb::encryption::cli::format_encryption_status(&status)
+        );
+
+        println!(
+            "\nPer-layer (encryption at rest is uniform: one master key protects every layer)"
+        );
+        println!(
+            "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}"
+        );
+
+        if !status.enabled {
+            println!("WAL:            PLAINTEXT (encryption disabled)");
+            println!("Index:          PLAINTEXT (encryption disabled)");
+            println!("Checkpoints:    PLAINTEXT (encryption disabled)");
+            println!("Cold storage:   PLAINTEXT (encryption disabled)");
+            return Ok(());
+        }
+
+        // Best-effort live enrichment: only when a durable DB is configured.
+        let live = if env::var(aletheiadb::config::DATA_DIR_ENV).is_ok() || config_env_present() {
+            open_db().ok()
+        } else {
+            None
+        };
+
+        println!("WAL:            ENCRYPTED (master-key-derived DEK)");
+        match live.as_ref().map(|db| db.index_rotation_status()) {
+            Some(Ok(s)) => {
+                let rotated = if s.is_fully_rotated() {
+                    "fully rotated"
+                } else {
+                    "rotation incomplete"
+                };
+                println!(
+                    "Index:          ENCRYPTED ({} files at current key, {} old, {} unknown; {})",
+                    s.at_current, s.at_old, s.unknown, rotated
+                );
             }
-            out.push((name.to_string(), parse_column_type(ty)?));
+            _ => println!("Index:          ENCRYPTED (master-key-derived DEK)"),
+        }
+        println!("Checkpoints:    ENCRYPTED (master-key-derived DEK)");
+        match live.as_ref().map(aletheiadb::AletheiaDB::stats) {
+            Some(stats) if stats.cold_storage.enabled => {
+                println!("Cold storage:   ENCRYPTED (master-key-derived DEK)");
+            }
+            Some(_) => println!("Cold storage:   not configured"),
+            None => println!("Cold storage:   ENCRYPTED if configured (master-key-derived DEK)"),
+        }
+        Ok(())
+    }
+
+    /// `encryption verify` — check that the **configured** database's encrypted
+    /// data at rest is readable under its key, beyond `keys verify`'s key
+    /// health-check.
+    ///
+    /// Two distinct signals, with different strengths (we are careful not to
+    /// overstate either):
+    ///
+    /// * **WAL — a genuine decrypt proof.** Opening the database replays the
+    ///   (encrypted) WAL through the configured cipher; a wrong or missing key
+    ///   fails the open with an authentication error. A successful open therefore
+    ///   *proves* the WAL actually AEAD-decrypts.
+    /// * **Index — header classification AND a body decrypt probe.** On success we
+    ///   *classify* every persisted index file by reading its 10-byte `AEIX` header
+    ///   key-version and matching it against the live keyring (`at_current` /
+    ///   `at_old` / `unknown` / `plaintext`). Header classification alone can
+    ///   false-PASS when a wrong key shares the same key-version number, so we
+    ///   additionally run an *active* body decrypt probe (Issue #3618): the manifest
+    ///   body plus one representative encrypted file per distinct key generation are
+    ///   AEAD-decrypted through the keyring. A wrong key (or a corrupted body) fails
+    ///   the AEAD auth tag here even when the header matches, turning what was a
+    ///   false-PASS into a FAIL. No key bytes or file paths are ever printed.
+    ///
+    /// Operates on the ambient configuration only (`ALETHEIADB_CONFIG` /
+    /// `ALETHEIADB_DATA_DIR`); it does not accept `--key-file` / `--env-var`, which
+    /// would not affect the actual open and could mislead. Clear PASS/FAIL with a
+    /// matching exit code; no key bytes are ever printed.
+    fn encryption_verify(_args: &[String]) -> Result<(), String> {
+        // Resolve from the ambient config only (ignore any CLI key flags): verify
+        // must reflect the database `open_db()` will actually open, not a key the
+        // real open path never consults.
+        let config = resolve_encryption_config(&[])?;
+        if !config.enabled {
+            println!("Encryption is not enabled for this configuration; nothing to verify.");
+            return Ok(());
+        }
+
+        if !(env::var(aletheiadb::config::DATA_DIR_ENV).is_ok() || config_env_present()) {
+            return Err(
+                "encryption verify requires a configured database to open and decrypt. Set \
+             ALETHEIADB_CONFIG (or ALETHEIADB_DATA_DIR) to point at the database."
+                    .to_string(),
+            );
+        }
+
+        // Opening replays the WAL through the cipher (and loads index files when
+        // load_on_startup is set). A wrong/missing key fails here — the primary,
+        // genuine decryptability signal.
+        let db = open_db().map_err(|e| format!("encryption verify FAILED: {e}"))?;
+
+        if !db.is_encryption_enabled() {
+            println!(
+                "Opened database is not encrypted at rest; nothing to verify (WAL/index are plaintext)."
+            );
+            return Ok(());
+        }
+
+        // Active probe: classify every persisted index file by its AEIX header
+        // key-version against the live keyring. An `unknown`-key file is one whose
+        // header names a key the keyring does not hold — a genuine problem.
+        match db.index_rotation_status() {
+            Ok(s) => {
+                if s.unknown > 0 {
+                    return Err(format!(
+                        "encryption verify FAILED: {} index file(s) carry an AEIX header \
+                     key-version not held by the configured keyring",
+                        s.unknown
+                    ));
+                }
+                // Header classification alone can FALSE-PASS: a wrong key that shares
+                // the same key_version number matches the header while decrypting
+                // nothing (Issue #3618). Actively probe that index bodies AEAD-decrypt
+                // under the live keyring — a wrong key or a corrupted body fails here.
+                let probe = db
+                    .verify_index_decryptable()
+                    .map_err(|e| format!("encryption verify FAILED: {e}"))?;
+                if !probe.decrypt_failed.is_empty() {
+                    // Report a count and a generic reason only — never a path or key
+                    // material that could leak secrets.
+                    return Err(format!(
+                        "encryption verify FAILED: {} index file(s) present a body that does \
+                     NOT decrypt with the configured key material (wrong key or corruption)",
+                        probe.decrypt_failed.len()
+                    ));
+                }
+                let stats = db.stats();
+                println!("encryption verify: PASS");
+                println!(
+                    "  WAL:   decrypted and replayed ({} nodes, {} edges recovered)",
+                    stats.current.node_count, stats.current.edge_count
+                );
+                println!(
+                    "  Index: {} encrypted file(s) classified at a current/old key version \
+                 by AEIX header ({} plaintext)",
+                    s.at_current + s.at_old,
+                    s.plaintext
+                );
+                println!(
+                    "  Index: {} encrypted file(s) body-decrypted with the live keyring",
+                    probe.decrypted_ok
+                );
+            }
+            Err(e) if rotation_status_not_enabled(&e) => {
+                // Index persistence (or index encryption) is not enabled: there is
+                // nothing to classify, but the successful open already proved WAL
+                // decryptability, which is a valid PASS.
+                let stats = db.stats();
+                println!("encryption verify: PASS");
+                println!(
+                    "  WAL:   decrypted and replayed ({} nodes, {} edges recovered)",
+                    stats.current.node_count, stats.current.edge_count
+                );
+                println!("  Index: index persistence not enabled (nothing to classify)");
+            }
+            Err(e) => {
+                // A real error scanning/reading the index files (IO error, an
+                // unreadable/short AEIX header, etc.) must FAIL, never false-PASS.
+                return Err(format!("encryption verify FAILED: {e}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Does this [`index_rotation_status`](aletheiadb::AletheiaDB::index_rotation_status)
+    /// error mean "index persistence / index encryption is simply not enabled"
+    /// (a benign, PASS-able condition for `encryption verify`) as opposed to a real
+    /// IO/read failure that must FAIL? The not-enabled cases surface as
+    /// [`StorageError::InconsistentState`](aletheiadb::StorageError::InconsistentState)
+    /// whose reason names the missing layer; everything else (IO, corrupt/short
+    /// header, foreign key) is a genuine failure.
+    fn rotation_status_not_enabled(e: &aletheiadb::Error) -> bool {
+        matches!(
+            e,
+            aletheiadb::Error::Storage(aletheiadb::StorageError::InconsistentState { reason })
+                if reason.contains("not enabled") || reason.contains("not configured")
+        )
+    }
+
+    /// `encryption enable` — migrate a plaintext database to encrypted-at-rest in
+    /// place (Issue #3616 PR3 / #3700), driving the shipped
+    /// [`AletheiaDB::enable_encryption`](aletheiadb::AletheiaDB::enable_encryption)
+    /// migration engine.
+    ///
+    /// The database to migrate is the ambient one (`ALETHEIADB_CONFIG` /
+    /// `ALETHEIADB_DATA_DIR`), exactly like `encryption verify` / `keys rotate`; the
+    /// operator supplies the NEW master key source via `--key-file PATH` or
+    /// `--env-var NAME` (only file/env references round-trip through the durable
+    /// authority — a secret-backed source is refused by the engine). The engine
+    /// migrates WAL + index + checkpoint (+ cold when a cold tier is present) and
+    /// flips the durable `encryption.state` authority so the NEXT open comes up
+    /// encrypted; this process must therefore NOT keep writing through the returned
+    /// (quiesced) handle — it exits, and the next `aletheia` invocation reopens
+    /// encrypted. Never prints key bytes.
+    fn encryption_enable(args: &[String]) -> Result<(), String> {
+        require_configured_db("encryption enable")?;
+
+        // The NEW master key source. Only file/env references can be persisted into
+        // the durable authority without leaking a secret, so those are the only two
+        // the CLI accepts here.
+        let key_source = if let Some(path) = arg_value(args, "--key-file") {
+            aletheiadb::encryption::config::KeyProviderConfig::File { path: path.into() }
+        } else if let Some(var) = arg_value(args, "--env-var") {
+            aletheiadb::encryption::config::KeyProviderConfig::Env { variable: var }
+        } else {
+            return Err(
+                "encryption enable requires a key source: --key-file <PATH> or --env-var <NAME> \
+             (the master key the database is migrated TO)"
+                    .to_string(),
+            );
+        };
+
+        let mut db = open_db().map_err(|e| enable_disable_not_configured_hint("enable", e))?;
+        let report = db
+            .enable_encryption(key_source)
+            .map_err(|e| format!("encryption enable FAILED: {e}"))?;
+
+        println!("encryption enable: OK");
+        println!("  encryption is now ENABLED at rest (durable authority flipped)");
+        println!("  WAL:         {}", migrated_label(report.wal_migrated));
+        println!("  Index:       {}", migrated_label(report.index_migrated));
+        println!(
+            "  Checkpoints: {}",
+            migrated_label(report.checkpoint_migrated)
+        );
+        println!(
+            "  Cold:        {}",
+            if report.cold_migrated {
+                "encrypted"
+            } else {
+                "not configured"
+            }
+        );
+        println!(
+            "  Reopen the database (next `aletheia` invocation) to resume normal \
+         operation under the cipher."
+        );
+        Ok(())
+    }
+
+    /// `encryption disable` — migrate an encrypted database back to plaintext-at-rest
+    /// in place (Issue #3616 PR4 / #3718), driving the shipped
+    /// [`AletheiaDB::disable_encryption`](aletheiadb::AletheiaDB::disable_encryption)
+    /// migration engine.
+    ///
+    /// The database to migrate is the ambient one (`ALETHEIADB_CONFIG` /
+    /// `ALETHEIADB_DATA_DIR`). No key source is taken: the current key is sourced
+    /// from the configured database itself. The engine strips the cipher from WAL +
+    /// index + checkpoint (+ cold when present) and flips the durable
+    /// `encryption.state` authority to `disabled` so the NEXT open comes up
+    /// plaintext; the process exits and the next `aletheia` invocation reopens
+    /// plaintext.
+    fn encryption_disable(_args: &[String]) -> Result<(), String> {
+        require_configured_db("encryption disable")?;
+
+        let mut db = open_db().map_err(|e| enable_disable_not_configured_hint("disable", e))?;
+        let report = db
+            .disable_encryption()
+            .map_err(|e| format!("encryption disable FAILED: {e}"))?;
+
+        println!("encryption disable: OK");
+        println!("  encryption is now DISABLED at rest (durable authority flipped)");
+        println!("  WAL:         {}", stripped_label(report.wal_migrated));
+        println!("  Index:       {}", stripped_label(report.index_migrated));
+        println!(
+            "  Checkpoints: {}",
+            stripped_label(report.checkpoint_migrated)
+        );
+        println!(
+            "  Cold:        {}",
+            if report.cold_migrated {
+                "plaintext"
+            } else {
+                "not configured"
+            }
+        );
+        println!(
+            "  Reopen the database (next `aletheia` invocation) to resume normal \
+         plaintext operation."
+        );
+        Ok(())
+    }
+
+    /// Per-layer status label for a completed `encryption enable` migration.
+    fn migrated_label(migrated: bool) -> &'static str {
+        if migrated { "encrypted" } else { "unchanged" }
+    }
+
+    /// Per-layer status label for a completed `encryption disable` migration.
+    fn stripped_label(migrated: bool) -> &'static str {
+        if migrated { "plaintext" } else { "unchanged" }
+    }
+
+    /// Both `encryption enable` and `encryption disable` operate on a durable
+    /// database supplied via the ambient config env vars (`ALETHEIADB_CONFIG` /
+    /// `ALETHEIADB_DATA_DIR`); refuse up front with a clear message when neither is
+    /// set rather than migrating an ephemeral tempdir the engine would reject anyway.
+    fn require_configured_db(verb: &str) -> Result<(), String> {
+        if env::var(aletheiadb::config::DATA_DIR_ENV).is_ok() || config_env_present() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{verb} requires a configured durable database. Set ALETHEIADB_CONFIG (or \
+             ALETHEIADB_DATA_DIR) to point at the database to migrate."
+            ))
+        }
+    }
+
+    /// Map a database-open failure into an enable/disable "not configured" hint.
+    fn enable_disable_not_configured_hint(verb: &str, e: String) -> String {
+        format!(
+            "{e}\n\
+         hint: `encryption {verb}` requires a durable, index-persistent database. Open one via \
+         ALETHEIADB_CONFIG pointing at a TOML config with index persistence enabled."
+        )
+    }
+
+    /// Whether `ALETHEIADB_CONFIG` is present in the environment (a durable DB is
+    /// configured via TOML). Kept as a helper so the check reads the same across
+    /// the encryption handlers regardless of the `config-toml` feature.
+    fn config_env_present() -> bool {
+        env::var(aletheiadb::config::CONFIG_ENV).is_ok()
+    }
+
+    /// Resolve the [`EncryptionConfig`](aletheiadb::encryption::config::EncryptionConfig)
+    /// for `keys status` from CLI flags or ambient config.
+    ///
+    /// Precedence: `--key-file` > `--env-var` > `ALETHEIADB_CONFIG` (TOML, when
+    /// `config-toml` is compiled in) > disabled/not-configured.
+    fn resolve_encryption_config(
+        args: &[String],
+    ) -> Result<aletheiadb::encryption::config::EncryptionConfig, String> {
+        use aletheiadb::encryption::config::EncryptionConfig;
+
+        if let Some(path) = arg_value(args, "--key-file") {
+            return Ok(EncryptionConfig::file_based(path));
+        }
+        if let Some(var) = arg_value(args, "--env-var") {
+            return Ok(EncryptionConfig::env_based(var));
+        }
+        #[cfg(feature = "config-toml")]
+        if let Ok(cfg_path) = env::var(aletheiadb::config::CONFIG_ENV) {
+            let cfg = aletheiadb::config::AletheiaDBConfig::from_toml_file(&cfg_path)
+                .map_err(|e| format!("failed to load config '{cfg_path}': {e}"))?;
+            return Ok(cfg.encryption);
+        }
+        Ok(EncryptionConfig::disabled())
+    }
+
+    /// Tighten a freshly written key file to owner-only permissions (`0600`) on
+    /// Unix. A no-op on non-Unix platforms (which lack POSIX mode bits).
+    #[cfg(unix)]
+    fn restrict_key_permissions(path: &Path) -> Result<(), String> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            format!(
+                "failed to set owner-only permissions on key file '{}': {e}",
+                path.display()
+            )
+        })
+    }
+
+    /// Non-Unix no-op for [`restrict_key_permissions`].
+    #[cfg(not(unix))]
+    fn restrict_key_permissions(_path: &Path) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Turn a chain API error (notably "chain not enabled") into a CLI-friendly
+    /// message with remediation guidance.
+    fn chain_error_hint(e: impl std::fmt::Display) -> String {
+        format!(
+            "{e}\n\
+         hint: `aletheia verify` requires the provenance hash chain to be enabled for the \
+         opened database. Open it via ALETHEIADB_CONFIG pointing at a TOML config that \
+         carries a `[chain]` section with `enabled = true`."
+        )
+    }
+
+    /// Parse an `--entity <node|edge>:<id>` argument into its kind and id.
+    fn parse_entity_arg(spec: &str) -> Result<(EntityKind, u64), String> {
+        let (kind_str, id_str) = spec.split_once(':').ok_or_else(|| {
+            format!("invalid --entity '{spec}': expected '<node|edge>:<id>' (e.g. node:42)")
+        })?;
+        let kind = match kind_str.trim().to_ascii_lowercase().as_str() {
+            "node" => EntityKind::Node,
+            "edge" => EntityKind::Edge,
+            other => {
+                return Err(format!(
+                    "invalid --entity kind '{other}': expected 'node' or 'edge'"
+                ));
+            }
+        };
+        let id = id_str
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| format!("invalid --entity id '{id_str}': {e}"))?;
+        Ok((kind, id))
+    }
+
+    /// Render a verification result and return non-zero (via `Err`) on failure.
+    ///
+    /// The full result is printed to stdout in both success and failure cases so a
+    /// caller always sees the details; on failure a terse `Err` drives the
+    /// process exit code to non-zero (main prints it to stderr).
+    fn finish_verification(
+        result: &ChainVerification,
+        scope: &str,
+        json: bool,
+    ) -> Result<(), String> {
+        println!("{}", render_verification(result, scope, json)?);
+        if result.passed {
+            Ok(())
+        } else {
+            Err(format!(
+                "provenance chain verification FAILED ({scope}){}",
+                result
+                    .earliest_broken_seq
+                    .map(|s| format!(" at seq {s}"))
+                    .unwrap_or_default()
+            ))
+        }
+    }
+
+    /// Render a [`ChainVerification`] as human-readable text or JSON.
+    fn render_verification(
+        result: &ChainVerification,
+        scope: &str,
+        json: bool,
+    ) -> Result<String, String> {
+        if json {
+            let value = serde_json::json!({
+                "scope": scope,
+                "passed": result.passed,
+                "head_seq": result.head_seq,
+                "head_digest": result.head_digest_hex,
+                "earliest_broken_seq": result.earliest_broken_seq,
+                "reason": result.reason,
+                "transactions_checked": result.transactions_checked,
+            });
+            return serde_json::to_string_pretty(&value)
+                .map_err(|e| format!("failed to render JSON output: {e}"));
+        }
+
+        let status = if result.passed { "PASS" } else { "FAIL" };
+        let mut out = String::new();
+        out.push_str(&format!(
+            "Provenance chain verification: {status} (scope: {scope})\n"
+        ));
+        out.push_str(&format!("  head seq:             {}\n", result.head_seq));
+        out.push_str(&format!(
+            "  head digest:          {}\n",
+            result.head_digest_hex
+        ));
+        out.push_str(&format!(
+            "  transactions checked: {}",
+            result.transactions_checked
+        ));
+        if !result.passed {
+            if let Some(seq) = result.earliest_broken_seq {
+                out.push_str(&format!("\n  earliest broken seq:  {seq}"));
+            }
+            if let Some(reason) = &result.reason {
+                out.push_str(&format!("\n  reason:               {reason}"));
+            }
         }
         Ok(out)
     }
 
-    fn label_source(args: &[String]) -> Result<LabelSource, String> {
-        match (
-            arg_value(args, "--label"),
-            arg_value(args, "--label-column"),
-        ) {
-            (Some(_), Some(_)) => Err("use only one of --label / --label-column".to_string()),
-            (Some(fixed), None) => Ok(LabelSource::fixed(fixed)),
-            (None, Some(col)) => Ok(LabelSource::column(col)),
-            (None, None) => Err("missing required --label or --label-column".to_string()),
+    /// Render the confirmation for an `--export-head` action.
+    #[cfg(feature = "serde")]
+    fn render_head_export(head: &ChainHead, path: &str, json: bool) -> Result<String, String> {
+        if json {
+            let value = serde_json::json!({
+                "ok": true,
+                "path": path,
+                "seq": head.seq,
+                "digest": aletheiadb::provenance_chain::to_hex(&head.digest),
+            });
+            return serde_json::to_string(&value)
+                .map_err(|e| format!("failed to render JSON output: {e}"));
         }
+        Ok(format!(
+            "Exported chain head anchor to {path}\n  seq:    {}\n  digest: {}",
+            head.seq,
+            aletheiadb::provenance_chain::to_hex(&head.digest)
+        ))
     }
 
-    fn build_node_mapping(args: &[String]) -> Result<NodeMapping, String> {
-        let label = label_source(args)?;
-        let key = arg_value(args, "--key").ok_or_else(|| "missing required --key".to_string())?;
-        let mut mapping = NodeMapping::new(label, key);
-        for (name, ty) in parse_properties(args, "--property")? {
-            mapping = mapping.property_same(name, ty);
-        }
-        if let Some(col) = arg_value(args, "--valid-time-column") {
-            mapping = mapping.valid_time_column(col);
-        }
-        Ok(mapping)
+    /// Serialize a [`ChainHead`] to a JSON file (pretty, digests as hex).
+    #[cfg(feature = "serde")]
+    fn write_chain_head(head: &ChainHead, path: &str) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(head)
+            .map_err(|e| format!("failed to serialize chain head: {e}"))?;
+        fs::write(path, bytes).map_err(|e| format!("failed to write chain head to '{path}': {e}"))
     }
 
-    fn build_edge_mapping(args: &[String]) -> Result<EdgeMapping, String> {
-        let label = arg_value(args, "--edge-label")
-            .map(LabelSource::fixed)
-            .ok_or_else(|| "missing required --edge-label for --edges".to_string())?;
-        let source = arg_value(args, "--source-key")
-            .ok_or_else(|| "missing required --source-key for --edges".to_string())?;
-        let target = arg_value(args, "--target-key")
-            .ok_or_else(|| "missing required --target-key for --edges".to_string())?;
-        let mut mapping = EdgeMapping::new(label, source, target);
-        // Edge properties/valid-time use their own flags so they are scoped independently
-        // from the node `--property` / `--valid-time-column` in a mixed import.
-        for (name, ty) in parse_properties(args, "--edge-property")? {
-            mapping = mapping.property_same(name, ty);
+    /// Load a [`ChainHead`] previously exported to a JSON file.
+    #[cfg(feature = "serde")]
+    fn read_chain_head(path: &str) -> Result<ChainHead, String> {
+        let bytes =
+            fs::read(path).map_err(|e| format!("failed to read chain head from '{path}': {e}"))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| format!("'{path}' is not a valid exported chain head: {e}"))
+    }
+
+    /// `aletheia import` — load an external graph export.
+    ///
+    /// Dispatches on `--format`: `neo4j-csv` (the default) loads a Neo4j CSV export
+    /// (Issue #3356); `neo4j-cypher` (or any `.cypher` input) loads an
+    /// `apoc.export.cypher.all` script dump via [`handle_import_cypher`] (Issue
+    /// #3356); `parquet` loads a Parquet file via the mapping contract (Issue
+    /// #3364, requires `--features parquet`). A binary Neo4j `.dump` archive is
+    /// unsupported and rejected with an actionable message pointing at CSV/Cypher.
+    #[cfg(feature = "import")]
+    fn handle_import(args: Vec<String>) -> Result<(), String> {
+        use aletheiadb::api::import::{FailureMode, LabelStrategy, Neo4jCsvOptions};
+
+        let format = arg_value(&args, "--format").unwrap_or_else(|| "neo4j-csv".to_string());
+
+        // The Parquet import path (Issue #3364) lives in its own module and reads a
+        // different flag set; dispatch to it before any neo4j-csv-specific validation so
+        // both formats share the single `import` verb.
+        #[cfg(feature = "parquet")]
+        if format == "parquet" {
+            return parquet_io::handle_import(args);
         }
-        if let Some(col) = arg_value(args, "--edge-valid-time-column") {
-            mapping = mapping.valid_time_column(col);
+        #[cfg(not(feature = "parquet"))]
+        if format == "parquet" {
+            return Err(
+                "the parquet import format requires building with --features parquet".to_string(),
+            );
         }
-        Ok(mapping)
-    }
 
-    fn usage_import() -> String {
-        "usage: aletheia import <nodes_file> --format parquet --label L --key COL \
-         [--property name:type ...] [--label-column COL] [--valid-time-column COL] \
-         [--edges FILE --edge-label L --source-key COL --target-key COL \
-         [--edge-property name:type ...] [--edge-valid-time-column COL]] \
-         (note: rows commit in chunks, so an error mid-import can leave the database \
-         partially written)"
-            .to_string()
-    }
-
-    fn usage_export() -> String {
-        "usage: aletheia export <out_prefix> --format parquet [--mode current|history]".to_string()
-    }
-}
-
-/// Signed audit export subcommands (Issue #3358).
-#[cfg(feature = "audit-export")]
-mod audit {
-    use super::{arg_value, open_db, parse_edge_id, parse_node_id};
-    use aletheiadb::audit::{
-        AuditPublicKey, AuditScope, AuditSigningKey, ExportOptions, verify_json_bytes,
-    };
-    use std::path::Path;
-
-    /// `aletheia audit-keygen <key_file>` — generate a signing key (0600) and
-    /// print its public key. The private seed is written to `<key_file>`.
-    pub(super) fn handle_keygen(args: Vec<String>) -> Result<(), String> {
-        let path = args
-            .first()
-            .ok_or_else(|| "usage: aletheia audit-keygen <key_file>".to_string())?;
-        if Path::new(path).exists() {
-            return Err(format!("refusing to overwrite existing key file '{path}'"));
+        // History-preserving EDN importers (Issue #3384) read their own flag sets
+        // (`--history` / `--datoms` + `--schema`); dispatch before any neo4j-csv or
+        // cypher handling so those paths are untouched and a plain build still falls
+        // through to the neo4j-csv fallback for every other format.
+        if format == "xtdb" {
+            return handle_import_xtdb(&args);
         }
-        let key = AuditSigningKey::generate();
-        key.write_to_file(path)
-            .map_err(|e| format!("failed to write key file: {e}"))?;
-        let value = serde_json::json!({
-            "ok": true,
-            "key_file": path,
-            "public_key": key.public_key().to_hex(),
-        });
-        let rendered = serde_json::to_string(&value)
-            .map_err(|e| format!("failed to render JSON output: {e}"))?;
-        println!("{rendered}");
-        Ok(())
-    }
+        if format == "datomic" {
+            return handle_import_datomic(&args);
+        }
 
-    /// `aletheia audit-export <node|edge> <id> --key <file> --out <path>` —
-    /// sign an entity's full bi-temporal history into a portable artifact.
-    pub(super) fn handle_export(args: Vec<String>) -> Result<(), String> {
-        let kind = args.first().map(String::as_str).ok_or_else(usage_export)?;
-        let id_str = args.get(1).ok_or_else(usage_export)?;
-        let key_file = arg_value(&args, "--key").ok_or_else(usage_export)?;
-        let out = arg_value(&args, "--out").ok_or_else(usage_export)?;
-        let db_id = arg_value(&args, "--db-id").unwrap_or_else(|| "aletheiadb".to_string());
+        let nodes = arg_values(&args, "--nodes");
+        let rels = arg_values(&args, "--relationships");
 
-        let scope = match kind {
-            "node" => AuditScope::node(parse_node_id(id_str)?),
-            "edge" => AuditScope::edge(parse_edge_id(id_str)?),
+        // APOC Cypher-script dump import (Issue #3356): a single `.cypher` file (or
+        // `--format neo4j-cypher`) carries both nodes and relationships. Route it to
+        // the dedicated library entry point before the CSV-specific handling.
+        let cypher_selected = matches!(format.as_str(), "neo4j-cypher" | "cypher");
+        let has_cypher_file = nodes
+            .iter()
+            .chain(rels.iter())
+            .any(|p| p.to_ascii_lowercase().ends_with(".cypher"));
+        if cypher_selected || has_cypher_file {
+            return handle_import_cypher(&args, &nodes, &rels);
+        }
+
+        // Reject binary dump inputs with a clear pointer to CSV.
+        for path in nodes.iter().chain(rels.iter()) {
+            let lower = path.to_ascii_lowercase();
+            if lower.ends_with(".dump") {
+                return Err(
+                    "neo4j binary dump import is not supported; export to CSV with \
+                'neo4j-admin database import' headers or apoc.export.csv"
+                        .to_string(),
+                );
+            }
+        }
+
+        match format.as_str() {
+            "neo4j-csv" | "neo4j" => {}
+            "neo4j-dump" | "dump" => {
+                return Err(
+                    "neo4j binary dump import is not supported; export to CSV with \
+                'neo4j-admin database import' headers or apoc.export.csv"
+                        .to_string(),
+                );
+            }
             other => {
                 return Err(format!(
-                    "unknown entity kind '{other}' (expected node|edge)"
+                    "unsupported import format '{other}'; supported: neo4j-csv"
                 ));
             }
-        };
-
-        let mut options = ExportOptions::new(db_id);
-        if let Some(redact) = arg_value(&args, "--redact") {
-            let keys: Vec<String> = redact
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect();
-            options = options.redact(keys);
         }
 
-        let key = AuditSigningKey::from_file(&key_file)
-            .map_err(|e| format!("failed to load signing key: {e}"))?;
-        let db = open_db()?;
-        let export = db
-            .audit_export(scope, &key, &options)
-            .map_err(|e| format!("audit export failed: {e}"))?;
-        let bytes = export
-            .to_json_bytes()
-            .map_err(|e| format!("failed to serialize artifact: {e}"))?;
-        std::fs::write(&out, &bytes).map_err(|e| format!("failed to write artifact: {e}"))?;
+        if nodes.is_empty() && rels.is_empty() {
+            return Err(
+                "usage: aletheia import --format neo4j-csv --nodes <file>... \
+            [--relationships <file>...] [options]"
+                    .to_string(),
+            );
+        }
 
-        let value = serde_json::json!({
-            "ok": true,
-            "artifact": out,
-            "entity_count": export.entity_count(),
-            "version_count": export.version_count(),
-            "public_key": key.public_key().to_hex(),
-            "chain_root": export.chain.root,
-            "anchor_lsn": export.metadata().chain_anchor.source_lsn,
-        });
-        let rendered = serde_json::to_string(&value)
-            .map_err(|e| format!("failed to render JSON output: {e}"))?;
-        println!("{rendered}");
-        Ok(())
-    }
-
-    /// `aletheia audit-verify <artifact> [--public-key HEX]` — verify OFFLINE.
-    /// Exits non-zero (via `Err`) when verification fails.
-    pub(super) fn handle_verify(args: Vec<String>) -> Result<(), String> {
-        let path = args.first().ok_or_else(|| {
-            "usage: aletheia audit-verify <artifact> [--public-key HEX]".to_string()
-        })?;
-        let bytes = std::fs::read(path).map_err(|e| format!("failed to read artifact: {e}"))?;
-
-        let expected = match arg_value(&args, "--public-key") {
-            Some(hex) => Some(
-                AuditPublicKey::from_hex(&hex).map_err(|e| format!("invalid --public-key: {e}"))?,
-            ),
-            None => None,
-        };
-
-        match verify_json_bytes(&bytes, expected.as_ref()) {
-            Ok(report) => {
-                println!("{}", report.summary());
-                println!("  entity summary: {}", report.entity_summary);
-                if !report.redacted_keys.is_empty() {
-                    println!("  redacted keys: {}", report.redacted_keys.join(", "));
+        let mut opts = Neo4jCsvOptions::new();
+        if let Some(d) = arg_value(&args, "--array-delimiter") {
+            opts.array_delimiter = single_char(&d, "--array-delimiter")?;
+        }
+        if let Some(d) = arg_value(&args, "--delimiter") {
+            opts.delimiter = single_byte(&d, "--delimiter")?;
+        }
+        if let Some(q) = arg_value(&args, "--quote") {
+            opts.quote = single_byte(&q, "--quote")?;
+        }
+        for name in arg_values(&args, "--vector-property") {
+            opts.vector_properties.insert(name);
+        }
+        if let Some(name) = arg_value(&args, "--valid-from-property") {
+            opts.valid_from_property = Some(name);
+        }
+        if let Some(strategy) = arg_value(&args, "--label-strategy") {
+            opts.label_strategy = match strategy.as_str() {
+                "first" => LabelStrategy::First,
+                "concat" => LabelStrategy::Concat,
+                "property" => LabelStrategy::Property,
+                other => {
+                    return Err(format!(
+                        "invalid --label-strategy '{other}', expected first|concat|property"
+                    ));
                 }
-                if !report.trusted_key {
-                    println!(
-                        "  NOTE: no --public-key supplied; trust in the embedded key is \
-                         self-asserted. Supply the signer's known public key to establish trust."
-                    );
-                }
-                Ok(())
+            };
+        }
+        if args.iter().any(|a| a == "--strict-types") {
+            opts.strict_types = true;
+        }
+        let failure_mode = match arg_value(&args, "--on-error").as_deref() {
+            None | Some("abort") => FailureMode::Abort,
+            Some("skip") => FailureMode::SkipAndReport,
+            Some(other) => {
+                return Err(format!("invalid --on-error '{other}', expected abort|skip"));
             }
-            Err(e) => Err(format!("VERIFICATION FAILED: {e}")),
+        };
+
+        let node_paths: Vec<PathBuf> = nodes.iter().map(PathBuf::from).collect();
+        let rel_paths: Vec<PathBuf> = rels.iter().map(PathBuf::from).collect();
+
+        let db = open_db()?;
+        let mut importer = db.import().failure_mode(failure_mode);
+        let report = importer
+            .neo4j_import_csv(&node_paths, &rel_paths, &opts)
+            .map_err(|e| format!("import failed: {e}"))?;
+
+        let value = serde_json::to_value(&report)
+            .map_err(|e| format!("failed to render report JSON: {e}"))?;
+        if let Some(report_path) = arg_value(&args, "--report") {
+            let rendered = serde_json::to_string_pretty(&value)
+                .map_err(|e| format!("failed to render report JSON: {e}"))?;
+            fs::write(&report_path, rendered)
+                .map_err(|e| format!("failed to write report to '{report_path}': {e}"))?;
+        }
+        print_json_pretty(&value)
+    }
+
+    /// Import an APOC Cypher-script dump (`apoc.export.cypher.all`), Issue #3356.
+    ///
+    /// A single `.cypher` dump file carries both nodes and relationships, so it is
+    /// supplied via `--nodes <file>` (or `--relationships <file>`). Options mirror
+    /// the CSV importer's `--label-strategy`, `--vector-property`,
+    /// `--valid-from-property`, `--strict-types`, and `--on-error` flags.
+    #[cfg(feature = "import")]
+    fn handle_import_cypher(
+        args: &[String],
+        nodes: &[String],
+        rels: &[String],
+    ) -> Result<(), String> {
+        use aletheiadb::api::import::{FailureMode, LabelStrategy, Neo4jCypherOptions};
+
+        let paths: Vec<String> = nodes.iter().chain(rels.iter()).cloned().collect();
+        let path = match paths.as_slice() {
+            [single] => single.clone(),
+            [] => {
+                return Err(
+                    "usage: aletheia import --format neo4j-cypher --nodes <dump.cypher> [options]"
+                        .to_string(),
+                );
+            }
+            _ => {
+                return Err(
+                    "the APOC Cypher-script dump import takes a single dump file (one \
+                 apoc.export.cypher.all output holds both nodes and relationships)"
+                        .to_string(),
+                );
+            }
+        };
+
+        let mut opts = Neo4jCypherOptions::new();
+        for name in arg_values(args, "--vector-property") {
+            opts.vector_properties.insert(name);
+        }
+        if let Some(name) = arg_value(args, "--valid-from-property") {
+            opts.valid_from_property = Some(name);
+        }
+        if let Some(strategy) = arg_value(args, "--label-strategy") {
+            opts.label_strategy = match strategy.as_str() {
+                "first" => LabelStrategy::First,
+                "concat" => LabelStrategy::Concat,
+                "property" => LabelStrategy::Property,
+                other => {
+                    return Err(format!(
+                        "invalid --label-strategy '{other}', expected first|concat|property"
+                    ));
+                }
+            };
+        }
+        if args.iter().any(|a| a == "--strict-types") {
+            opts.strict_types = true;
+        }
+        let failure_mode = match arg_value(args, "--on-error").as_deref() {
+            None | Some("abort") => FailureMode::Abort,
+            Some("skip") => FailureMode::SkipAndReport,
+            Some(other) => {
+                return Err(format!("invalid --on-error '{other}', expected abort|skip"));
+            }
+        };
+
+        let db = open_db()?;
+        let mut importer = db.import().failure_mode(failure_mode);
+        let report = importer
+            .neo4j_import_cypher(&path, &opts)
+            .map_err(|e| format!("import failed: {e}"))?;
+
+        let value = serde_json::to_value(&report)
+            .map_err(|e| format!("failed to render report JSON: {e}"))?;
+        if let Some(report_path) = arg_value(args, "--report") {
+            let rendered = serde_json::to_string_pretty(&value)
+                .map_err(|e| format!("failed to render report JSON: {e}"))?;
+            fs::write(&report_path, rendered)
+                .map_err(|e| format!("failed to write report to '{report_path}': {e}"))?;
+        }
+        print_json_pretty(&value)
+    }
+
+    /// Import an XTDB entity-history EDN export (Issue #3384), preserving
+    /// valid-time, provenance, supersession, and deletes.
+    ///
+    /// `aletheia import --format xtdb --history <history.edn> [--label-field type]
+    /// [--default-label Entity] [--ref-field field=LABEL ...] [--on-error abort|skip]
+    /// [--report <out.json>]`
+    #[cfg(feature = "import")]
+    fn handle_import_xtdb(args: &[String]) -> Result<(), String> {
+        use aletheiadb::api::import::XtdbOptions;
+
+        let path = arg_value(args, "--history")
+            .or_else(|| arg_values(args, "--nodes").into_iter().next())
+            .ok_or_else(|| {
+                "usage: aletheia import --format xtdb --history <history.edn> [options]".to_string()
+            })?;
+
+        let mut opts = XtdbOptions::default();
+        if let Some(l) = arg_value(args, "--label-field") {
+            opts.label_field = l;
+        }
+        if let Some(l) = arg_value(args, "--default-label") {
+            opts.default_label = l;
+        }
+        for spec in arg_values(args, "--ref-field") {
+            match spec.split_once('=') {
+                Some((field, label)) => {
+                    opts.ref_fields.insert(field.to_string(), label.to_string());
+                }
+                None => {
+                    return Err(format!(
+                        "invalid --ref-field '{spec}', expected field=EDGE_LABEL"
+                    ));
+                }
+            }
+        }
+        opts.failure_mode = parse_on_error(args)?;
+
+        let db = open_db()?;
+        let mut importer = db.import().failure_mode(opts.failure_mode);
+        let report = importer
+            .xtdb_import(&path, &opts)
+            .map_err(|e| format!("import failed: {e}"))?;
+        emit_import_report(args, &report)
+    }
+
+    /// Import a Datomic datom-stream EDN export + attribute schema (Issue #3384).
+    ///
+    /// `aletheia import --format datomic --datoms <log.edn> --schema <schema.edn>
+    /// [--valid-time-attr ns/attr] [--default-label Entity] [--on-error abort|skip]
+    /// [--report <out.json>]`
+    #[cfg(feature = "import")]
+    fn handle_import_datomic(args: &[String]) -> Result<(), String> {
+        use aletheiadb::api::import::DatomicOptions;
+
+        let datoms = arg_value(args, "--datoms").ok_or_else(|| {
+        "usage: aletheia import --format datomic --datoms <log.edn> --schema <schema.edn> [options]"
+            .to_string()
+    })?;
+        let schema = arg_value(args, "--schema").ok_or_else(|| {
+            "aletheia import --format datomic requires --schema <schema.edn>".to_string()
+        })?;
+
+        let mut opts = DatomicOptions::default();
+        if let Some(a) = arg_value(args, "--valid-time-attr") {
+            opts.valid_time_attr = Some(a);
+        }
+        if let Some(l) = arg_value(args, "--default-label") {
+            opts.default_label = l;
+        }
+        if let Some(a) = arg_value(args, "--label-attr") {
+            opts.label_attr = Some(a);
+        }
+        opts.failure_mode = parse_on_error(args)?;
+
+        let db = open_db()?;
+        let mut importer = db.import().failure_mode(opts.failure_mode);
+        let report = importer
+            .datomic_import(&datoms, &schema, &opts)
+            .map_err(|e| format!("import failed: {e}"))?;
+        emit_import_report(args, &report)
+    }
+
+    /// Parse the `--on-error abort|skip` flag into a [`FailureMode`], shared by the
+    /// XTDB / Datomic history importers (Issue #3384).
+    #[cfg(feature = "import")]
+    fn parse_on_error(args: &[String]) -> Result<aletheiadb::api::import::FailureMode, String> {
+        use aletheiadb::api::import::FailureMode;
+        match arg_value(args, "--on-error").as_deref() {
+            None | Some("abort") => Ok(FailureMode::Abort),
+            Some("skip") => Ok(FailureMode::SkipAndReport),
+            Some(other) => Err(format!("invalid --on-error '{other}', expected abort|skip")),
         }
     }
 
-    /// `aletheia audit-render <artifact>` — render a human-readable chronology.
-    pub(super) fn handle_render(args: Vec<String>) -> Result<(), String> {
-        let path = args
-            .first()
-            .ok_or_else(|| "usage: aletheia audit-render <artifact>".to_string())?;
-        let bytes = std::fs::read(path).map_err(|e| format!("failed to read artifact: {e}"))?;
-        let export = aletheiadb::audit::AuditExport::from_json_bytes(&bytes)
-            .map_err(|e| format!("failed to parse artifact: {e}"))?;
-        print!("{}", export.render_chronology());
-        Ok(())
+    /// Render a serializable import report to stdout and, when `--report <path>` is
+    /// given, to a JSON file (Issue #3384).
+    #[cfg(feature = "import")]
+    fn emit_import_report<R: serde::Serialize>(args: &[String], report: &R) -> Result<(), String> {
+        let value = serde_json::to_value(report)
+            .map_err(|e| format!("failed to render report JSON: {e}"))?;
+        if let Some(report_path) = arg_value(args, "--report") {
+            let rendered = serde_json::to_string_pretty(&value)
+                .map_err(|e| format!("failed to render report JSON: {e}"))?;
+            fs::write(&report_path, rendered)
+                .map_err(|e| format!("failed to write report to '{report_path}': {e}"))?;
+        }
+        print_json_pretty(&value)
     }
 
-    fn usage_export() -> String {
-        "usage: aletheia audit-export <node|edge> <id> --key <key_file> --out <path> \
-         [--db-id ID] [--redact k1,k2]"
-            .to_string()
+    /// Stub `import` handler when the `import` feature is not compiled in.
+    #[cfg(not(feature = "import"))]
+    fn handle_import(_args: Vec<String>) -> Result<(), String> {
+        Err("the 'import' subcommand requires building with --features import".to_string())
     }
-}
 
-/// GDPR crypto-shred operator commands (Issue #3359).
-///
-/// `designate-subject` groups entities and/or specific property keys under an
-/// erasure subject; `erase-subject` irreversibly destroys the subject's key
-/// material and prints a signed [`ErasureAttestation`]. Both run in the CLI's
-/// local-admin context (no RBAC — the same trust level as `backup` / `keys
-/// rotate`) and open the database via [`open_db`], honouring `ALETHEIADB_CONFIG`
-/// / `ALETHEIADB_DATA_DIR`. Designation requires encryption configured (via an
-/// `ALETHEIADB_CONFIG` TOML enabling a key provider); an unconfigured database
-/// surfaces a clean error and a non-zero exit.
-///
-/// **Security:** command output carries only the subject id, an entity count, a
-/// timestamp, and the attestation signature / signer public key — never key
-/// material or plaintext property content.
-#[cfg(feature = "audit-export")]
-mod crypto_shred_cli {
-    use super::open_db;
-    use aletheiadb::db::{CryptoShredError, DesignationTarget, ErasureAttestation};
-
-    /// Collect every value of a repeatable `--flag value` option, in order.
-    ///
-    /// A local, feature-independent equivalent of the `import`-gated
-    /// `arg_values` helper (the crypto-shred verbs are gated on `audit-export`,
-    /// not `import`, so they cannot rely on it).
-    fn repeated_values(args: &[String], flag: &str) -> Vec<String> {
+    /// Collect every value following each occurrence of `flag` (repeatable flags).
+    #[cfg(feature = "import")]
+    fn arg_values(args: &[String], flag: &str) -> Vec<String> {
         let mut out = Vec::new();
         let mut iter = args.iter();
         while let Some(token) = iter.next() {
@@ -3219,1112 +2017,2363 @@ mod crypto_shred_cli {
         out
     }
 
-    /// `aletheia designate-subject <subject_id> --target <kind>:<id>[:key1,key2] ...`
-    ///
-    /// Designate one or more targets under `subject_id`. `--target` is
-    /// repeatable; at least one is required.
-    pub(super) fn handle_designate_subject(args: Vec<String>) -> Result<(), String> {
-        let subject_id = positional_subject_id(&args, "designate-subject")?;
-        let specs = repeated_values(&args, "--target");
-        if specs.is_empty() {
-            return Err(usage_designate());
+    /// Parse a single-character CLI argument into a `char`.
+    #[cfg(feature = "import")]
+    fn single_char(value: &str, flag: &str) -> Result<char, String> {
+        let mut chars = value.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) => Ok(c),
+            _ => Err(format!("{flag} must be a single character, got '{value}'")),
         }
-        let targets = specs
-            .iter()
-            .map(|spec| parse_target(spec))
-            .collect::<Result<Vec<_>, String>>()?;
-        let count = targets.len();
+    }
 
-        let db = open_db()?;
-        db.designate_subject(subject_id.clone(), targets)
-            .map_err(cli_error)?;
+    /// Parse a single-ASCII-byte CLI argument (field delimiter / quote).
+    #[cfg(feature = "import")]
+    fn single_byte(value: &str, flag: &str) -> Result<u8, String> {
+        let bytes = value.as_bytes();
+        if bytes.len() == 1 {
+            Ok(bytes[0])
+        } else {
+            Err(format!(
+                "{flag} must be a single ASCII character, got '{value}'"
+            ))
+        }
+    }
 
+    /// `aletheia demo` — boot a seeded, ephemeral bi-temporal graph and print a
+    /// guided tour of showcase queries (Issue #3380 AC3).
+    ///
+    /// This mirrors the seed + guided-query flow in `examples/demo.rs` so the
+    /// one-command CLI experience stays in sync with the Rust-native example and
+    /// the CI behavior guard (`tests/quickstart_demo.rs`). It requires no data
+    /// directory, no server, and no network: the database is ephemeral
+    /// (`AletheiaDB::new()`), so nothing is written to disk.
+    ///
+    /// Any surplus arguments are ignored; the demo is a zero-configuration,
+    /// one-shot showcase.
+    fn handle_demo(_args: Vec<String>) -> Result<(), String> {
+        let db =
+            AletheiaDB::new().map_err(|e| format!("failed to initialize demo database: {e}"))?;
+        run_demo(&db)
+    }
+
+    /// Builds a small string-valued `PropertyMap` for the demo seed. Keeps the
+    /// seeding code legible without depending on the `properties!` macro.
+    fn demo_props(pairs: &[(&str, &str)]) -> PropertyMap {
+        let mut builder = PropertyMapBuilder::new();
+        for (key, value) in pairs {
+            builder = builder.insert(key, PropertyValue::string(*value));
+        }
+        builder.build()
+    }
+
+    /// Renders a `PropertyValue` for human-readable demo output (no Debug leakage
+    /// for the common scalar cases).
+    fn demo_display_value(value: &PropertyValue) -> String {
+        match value {
+            PropertyValue::String(s) => s.to_string(),
+            PropertyValue::Int(i) => i.to_string(),
+            PropertyValue::Float(f) => f.to_string(),
+            PropertyValue::Bool(b) => b.to_string(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// Extracts a string-valued property from a node, or a placeholder if absent.
+    fn demo_prop_str(node: &Node, key: &str) -> String {
+        node.properties
+            .get(key)
+            .map(demo_display_value)
+            .unwrap_or_else(|| "<none>".to_string())
+    }
+
+    /// Seeds a small story-driven bi-temporal dataset into `db` and prints a guided
+    /// sequence of showcase queries: a current-state lookup, an `AS OF`
+    /// point-in-time lookup, a graph traversal, and the full version history of a
+    /// node. Tells the same story as `examples/demo.rs` (the query ordering and
+    /// filler count differ; both flows are exercised in CI).
+    ///
+    /// Extracted from [`handle_demo`] so the seed + query flow is unit-testable
+    /// against an injected database instance.
+    fn run_demo(db: &AletheiaDB) -> Result<(), String> {
+        // The `update_node` transaction method lives on the `WriteOps` trait.
+        use aletheiadb::api::WriteOps;
+
+        // A small, deterministic filler cohort so the graph is more than a toy of a
+        // few nodes, while keeping the one-shot CLI demo well under a second.
+        const FILLER_ENGINEERS: usize = 20;
+
+        println!("════════════════════════════════════════════════════════");
+        println!("  AletheiaDB — bi-temporal graph demo");
+        println!("  Ephemeral demo data (in-memory; nothing written to disk)");
+        println!("════════════════════════════════════════════════════════\n");
+
+        // ── Seed the graph ──────────────────────────────────────────────────────
+        let company = db
+            .create_node("Company", demo_props(&[("name", "Aletheia Labs")]))
+            .map_err(|e| format!("failed to seed Company: {e}"))?;
+
+        let alice = db
+            .create_node(
+                "Person",
+                demo_props(&[("name", "Alice"), ("title", "Engineer")]),
+            )
+            .map_err(|e| format!("failed to seed Alice: {e}"))?;
+        let bob = db
+            .create_node(
+                "Person",
+                demo_props(&[("name", "Bob"), ("title", "Engineer")]),
+            )
+            .map_err(|e| format!("failed to seed Bob: {e}"))?;
+        let carol = db
+            .create_node(
+                "Person",
+                demo_props(&[("name", "Carol"), ("title", "Designer")]),
+            )
+            .map_err(|e| format!("failed to seed Carol: {e}"))?;
+
+        db.create_edge(alice, company, "WORKS_AT", PropertyMap::new())
+            .map_err(|e| format!("failed to seed Alice WORKS_AT: {e}"))?;
+        db.create_edge(bob, company, "WORKS_AT", PropertyMap::new())
+            .map_err(|e| format!("failed to seed Bob WORKS_AT: {e}"))?;
+        db.create_edge(carol, company, "WORKS_AT", PropertyMap::new())
+            .map_err(|e| format!("failed to seed Carol WORKS_AT: {e}"))?;
+        db.create_edge(alice, bob, "KNOWS", PropertyMap::new())
+            .map_err(|e| format!("failed to seed Alice KNOWS Bob: {e}"))?;
+        db.create_edge(bob, carol, "KNOWS", PropertyMap::new())
+            .map_err(|e| format!("failed to seed Bob KNOWS Carol: {e}"))?;
+
+        let mut previous: Option<NodeId> = None;
+        for i in 0..FILLER_ENGINEERS {
+            let person = db
+                .create_node(
+                    "Person",
+                    demo_props(&[("name", &format!("Engineer {i}")), ("title", "Engineer")]),
+                )
+                .map_err(|e| format!("failed to seed filler engineer {i}: {e}"))?;
+            db.create_edge(person, company, "WORKS_AT", PropertyMap::new())
+                .map_err(|e| format!("failed to seed filler WORKS_AT: {e}"))?;
+            if let Some(prev) = previous {
+                db.create_edge(prev, person, "KNOWS", PropertyMap::new())
+                    .map_err(|e| format!("failed to seed filler KNOWS: {e}"))?;
+            }
+            previous = Some(person);
+        }
+
+        // Capture the founding moment *after* the initial hire, so a query "as of
+        // founding" sees Alice as an Engineer.
+        let t_founding = aletheiadb::time::now();
+
+        // The story unfolds: Alice is promoted twice. Each update creates a new
+        // bi-temporal version; the old versions are preserved and stay queryable.
+        // A tiny sleep between writes guarantees strictly-later transaction
+        // timestamps so point-in-time reads resolve to distinct versions.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        db.write(|tx| {
+            tx.update_node(
+                alice,
+                demo_props(&[("name", "Alice"), ("title", "Staff Engineer")]),
+            )
+        })
+        .map_err(|e| format!("failed to promote Alice to Staff Engineer: {e}"))?;
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        db.write(|tx| tx.update_node(alice, demo_props(&[("name", "Alice"), ("title", "CTO")])))
+            .map_err(|e| format!("failed to promote Alice to CTO: {e}"))?;
+
+        println!(
+            "Seeded {} nodes and {} edges (a Company \"Aletheia Labs\" plus its people)\n\
+         with genuine bi-temporal version history.\n",
+            db.node_count(),
+            db.edge_count()
+        );
+
+        // ── Query 1: current-state lookup ───────────────────────────────────────
+        println!("── Query 1 of 4: Current-state lookup ──");
+        println!("  db.get_node(alice_id)");
+        let alice_now = db
+            .get_node(alice)
+            .map_err(|e| format!("current-state lookup of Alice failed: {e}"))?;
+        let title_now = demo_prop_str(&alice_now, "title");
+        println!("  → Alice is currently: {title_now}");
+        println!(
+            "  what you just saw: the *latest* fact — sub-microsecond, no temporal overhead.\n"
+        );
+
+        // ── Query 2: AS OF point-in-time (the differentiator) ───────────────────
+        println!("── Query 2 of 4: Time-travel — AS OF the founding day ──");
+        println!("  db.get_node_at_time(alice_id, t_founding, t_founding)");
+        let alice_founding = db
+            .get_node_at_time(alice, t_founding, t_founding)
+            .map_err(|e| format!("AS OF point-in-time lookup of Alice failed: {e}"))?;
+        let title_founding = demo_prop_str(&alice_founding, "title");
+        println!("  → On founding day, Alice was: {title_founding}");
+        println!(
+            "  what you just saw: the SAME node, a different answer — \
+         \"{title_founding}\" then vs \"{title_now}\" now.\n"
+        );
+
+        // Guard the demo's headline invariant: the AS OF reconstruction must return
+        // the *founding-day* fact, not silently regress to current state. Uses the
+        // demo's `Result<(), String>` convention rather than a panic to match the
+        // CLI error style (cf. the `assert_ne!` guard in examples/demo.rs:140).
+        if title_founding == title_now {
+            return Err(format!(
+                "demo invariant broken: AS OF returned current state ({title_now})"
+            ));
+        }
+
+        // ── Query 3: a traversal ────────────────────────────────────────────────
+        println!("── Query 3 of 4: Traversal (who does Alice know?) ──");
+        println!("  db.get_outgoing_edges_with_label(alice_id, \"KNOWS\")");
+        for edge_id in db.get_outgoing_edges_with_label(alice, "KNOWS") {
+            let target = db
+                .get_edge_target(edge_id)
+                .map_err(|e| format!("failed to resolve KNOWS target: {e}"))?;
+            let person = db
+                .get_node(target)
+                .map_err(|e| format!("failed to load known person: {e}"))?;
+            println!(
+                "  → Alice KNOWS {} ({})",
+                demo_prop_str(&person, "name"),
+                demo_prop_str(&person, "title")
+            );
+        }
+        println!("  what you just saw: a single-hop graph traversal over the current graph.\n");
+
+        // ── Query 4: full history / provenance ──────────────────────────────────
+        println!("── Query 4 of 4: History — every version of a fact ──");
+        println!("  db.get_node_history(alice_id)");
+        let history = db
+            .get_node_history(alice)
+            .map_err(|e| format!("failed to load Alice's history: {e}"))?;
+        for version in &history.versions {
+            let title = version
+                .properties
+                .get("title")
+                .map(demo_display_value)
+                .unwrap_or_else(|| "<none>".to_string());
+            println!("  → v{}: title = {title}", version.version_number);
+        }
+        println!(
+            "  what you just saw: {} preserved versions of one node — the audit trail is free.\n",
+            history.versions.len()
+        );
+
+        println!("────────────────────────────────────────────────────────");
+        println!("Next: open a durable database with `AletheiaDB::open(\"./mydb\")`,");
+        println!("or point an MCP client at AletheiaDB — see docs/guides/quickstart.md.");
+
+        Ok(())
+    }
+
+    /// Builds the JSON success line emitted by `aletheia restore`.
+    ///
+    /// The data-directory path is serialized through `serde_json` so any characters
+    /// that are special in JSON strings (notably Windows path backslashes, e.g.
+    /// `C:\Users\...`, which are invalid `\U`/`\R` escapes if interpolated raw) are
+    /// correctly escaped and the output stays valid JSON on every platform.
+    fn restore_success_json(data_dir: &Path) -> Result<String, String> {
         let value = serde_json::json!({
             "ok": true,
-            "subject_id": subject_id,
-            "targets_designated": count,
+            "data_dir": data_dir.display().to_string(),
         });
-        let rendered = serde_json::to_string(&value)
-            .map_err(|e| format!("failed to render JSON output: {e}"))?;
-        println!("{rendered}");
-        Ok(())
+        serde_json::to_string(&value).map_err(|e| format!("failed to render JSON output: {e}"))
     }
 
-    /// `aletheia erase-subject <subject_id>` — irreversibly erase and print the
-    /// signed attestation as JSON.
-    pub(super) fn handle_erase_subject(args: Vec<String>) -> Result<(), String> {
-        let subject_id = positional_subject_id(&args, "erase-subject")?;
-        let db = open_db()?;
-        let attestation = db.erase_subject(subject_id).map_err(cli_error)?;
-        println!("{}", attestation_json(&attestation)?);
-        Ok(())
+    /// Opens the AletheiaDB database, honouring environment-driven config:
+    /// `ALETHEIADB_CONFIG` (TOML path) takes precedence over `ALETHEIADB_DATA_DIR`
+    /// (canonical durable layout). With neither set the database is ephemeral.
+    ///
+    /// Converts underlying database errors into a clean string for CLI output.
+    fn open_db() -> Result<AletheiaDB, String> {
+        AletheiaDB::open_from_env().map_err(|e| format!("failed to initialize database: {e}"))
     }
 
-    /// Extract the leading positional `<subject_id>` argument, rejecting a
-    /// missing value or a leading flag.
-    fn positional_subject_id(args: &[String], verb: &str) -> Result<String, String> {
-        match args.first() {
-            Some(id) if !id.starts_with("--") => Ok(id.clone()),
-            _ if verb == "designate-subject" => Err(usage_designate()),
-            _ => Err("usage: aletheia erase-subject <subject_id>".to_string()),
+    /// Handles all subcommands under `aletheia node`.
+    ///
+    /// Routes to either `create` or `get` based on the first argument in `args`.
+    fn handle_node(args: Vec<String>) -> Result<(), String> {
+        match args.first().map(String::as_str) {
+            Some("create") => {
+                if args.len() < 2 {
+                    return Err(
+                        "usage: aletheia node create <label> [--properties JSON]".to_string()
+                    );
+                }
+                let label = &args[1];
+                let properties = parse_optional_properties(&args[2..])?;
+                let db = open_db()?;
+                let node_id = db
+                    .create_node(label, properties)
+                    .map_err(|e| format!("create_node failed: {e}"))?;
+                print_json_pretty(&serde_json::json!({ "node_id": node_id.as_u64() }))
+            }
+            Some("get") => {
+                if args.len() != 2 {
+                    return Err("usage: aletheia node get <node_id>".to_string());
+                }
+                let node_id = parse_node_id(&args[1])?;
+                let db = open_db()?;
+                let node = db
+                    .get_node(node_id)
+                    .map_err(|e| format!("get_node failed: {e}"))?;
+                print_json_pretty(&node_to_json(&node))
+            }
+            Some(sub) => Err(format!("unknown node subcommand '{sub}'")),
+            None => Err("usage: aletheia node <create|get> ...".to_string()),
         }
     }
 
-    /// Parse one `--target` value into a [`DesignationTarget`].
+    /// Handles all subcommands under `aletheia edge`.
     ///
-    /// Grammar: `<kind>:<id>` seals the whole entity; `<kind>:<id>:key1,key2`
-    /// seals only the listed property keys. `kind` is `node` or `edge`; `id` is
-    /// a `u64`; keys are a non-empty comma-separated list.
-    pub(super) fn parse_target(spec: &str) -> Result<DesignationTarget, String> {
-        // Split into at most three fields: kind, id, and the (optional) key list.
-        // The key list itself may not contain ':' so a 2-way splitn after the id
-        // is exact.
-        let mut parts = spec.splitn(3, ':');
-        let kind = parts.next().unwrap_or("");
-        let id_str = parts
-            .next()
-            .ok_or_else(|| format!("invalid --target '{spec}': expected <kind>:<id>[:keys]"))?;
-        let keys_str = parts.next();
+    /// Routes to either `create` or `get` based on the first argument in `args`.
+    fn handle_edge(args: Vec<String>) -> Result<(), String> {
+        match args.first().map(String::as_str) {
+            Some("create") => {
+                if args.len() < 4 {
+                    return Err(
+                    "usage: aletheia edge create <source_id> <target_id> <label> [--properties JSON]"
+                        .to_string(),
+                );
+                }
+                let source = parse_node_id(&args[1])?;
+                let target = parse_node_id(&args[2])?;
+                let label = &args[3];
+                let properties = parse_optional_properties(&args[4..])?;
+                let db = open_db()?;
+                let edge_id = db
+                    .create_edge(source, target, label, properties)
+                    .map_err(|e| format!("create_edge failed: {e}"))?;
+                print_json_pretty(&serde_json::json!({ "edge_id": edge_id.as_u64() }))
+            }
+            Some("get") => {
+                if args.len() != 2 {
+                    return Err("usage: aletheia edge get <edge_id>".to_string());
+                }
+                let edge_id = parse_edge_id(&args[1])?;
+                let db = open_db()?;
+                let edge = db
+                    .get_edge(edge_id)
+                    .map_err(|e| format!("get_edge failed: {e}"))?;
+                print_json_pretty(&edge_to_json(&edge))
+            }
+            Some(sub) => Err(format!("unknown edge subcommand '{sub}'")),
+            None => Err("usage: aletheia edge <create|get> ...".to_string()),
+        }
+    }
 
-        let id: u64 = id_str.parse().map_err(|_| {
-            format!("invalid --target '{spec}': entity id '{id_str}' is not a valid integer")
+    /// Handles the `aletheia traverse` command.
+    ///
+    /// Performs a single-hop graph traversal from a starting node, following edges
+    /// with a specific label in the specified direction. Outputs results as JSON.
+    fn handle_traverse(args: Vec<String>) -> Result<(), String> {
+        if args.len() < 2 {
+            return Err(
+            "usage: aletheia traverse <start_node_id> <edge_label> [--direction outgoing|incoming|both]"
+                .to_string(),
+        );
+        }
+
+        let start = parse_node_id(&args[0])?;
+        let label = &args[1];
+        let direction = parse_direction(&args[2..])?;
+
+        let db = open_db()?;
+        let mut reached = Vec::new();
+
+        if direction == "outgoing" || direction == "both" {
+            for edge_id in db.get_outgoing_edges_with_label(start, label) {
+                let target = db.get_edge_target(edge_id).map_err(|e| {
+                    format!(
+                        "failed to resolve target for edge {}: {e}",
+                        edge_id.as_u64()
+                    )
+                })?;
+                reached.push(serde_json::json!({
+                    "edge_id": edge_id.as_u64(),
+                    "direction": "outgoing",
+                    "node_id": target.as_u64(),
+                }));
+            }
+        }
+
+        if direction == "incoming" || direction == "both" {
+            for edge_id in db.get_incoming_edges_with_label(start, label) {
+                let source = db.get_edge_source(edge_id).map_err(|e| {
+                    format!(
+                        "failed to resolve source for edge {}: {e}",
+                        edge_id.as_u64()
+                    )
+                })?;
+                reached.push(serde_json::json!({
+                    "edge_id": edge_id.as_u64(),
+                    "direction": "incoming",
+                    "node_id": source.as_u64(),
+                }));
+            }
+        }
+
+        print_json_pretty(&serde_json::json!({
+            "start_node_id": start.as_u64(),
+            "edge_label": label,
+            "direction": direction,
+            "results": reached,
+        }))
+    }
+
+    /// Handles all subcommands under `aletheia daemon`.
+    ///
+    /// Routes to `start`, `stop`, or `status` to manage the background server process.
+    fn handle_daemon(args: Vec<String>) -> Result<(), String> {
+        match args.first().map(String::as_str) {
+            Some("start") => daemon_start(&args[1..]),
+            Some("stop") => daemon_stop(&args[1..]),
+            Some("status") => daemon_status(&args[1..]),
+            Some(sub) => Err(format!("unknown daemon subcommand '{sub}'")),
+            None => Err("usage: aletheia daemon <start|stop|status> ...".to_string()),
+        }
+    }
+
+    /// Starts the AletheiaDB background server daemon.
+    ///
+    /// 1. Checks if it's already running.
+    /// 2. Spawns the `aletheia-server` process in the background.
+    /// 3. Writes the PID and executable path to `.aletheia/daemon.pid`.
+    fn daemon_start(args: &[String]) -> Result<(), String> {
+        let pid_file = PathBuf::from(
+            arg_value(args, "--pid-file").unwrap_or_else(|| DEFAULT_PID_FILE.to_string()),
+        );
+        let log_file = PathBuf::from(
+            arg_value(args, "--log-file").unwrap_or_else(|| DEFAULT_LOG_FILE.to_string()),
+        );
+        let host = arg_value(args, "--host").unwrap_or_else(|| DEFAULT_HOST.to_string());
+        let port = arg_value(args, "--port")
+            .map(|s| {
+                s.parse::<u16>()
+                    .map_err(|e| format!("invalid port '{s}': {e}"))
+            })
+            .transpose()?
+            .unwrap_or(DEFAULT_PORT);
+
+        if let Some(meta) = read_daemon_metadata(&pid_file)?
+            && is_expected_daemon_running(&meta)
+        {
+            return Err(format!(
+                "daemon already running with pid {} ({})",
+                meta.pid,
+                meta.server_exe.display()
+            ));
+        }
+
+        ensure_parent_dir(&pid_file)?;
+        ensure_parent_dir(&log_file)?;
+
+        let server_exe = resolve_server_executable()?;
+
+        let log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_file)
+            .map_err(|e| format!("failed to open log file '{}': {e}", log_file.display()))?;
+
+        let mut cmd = Command::new(&server_exe);
+        cmd.env("ALETHEIADB_HOST", &host)
+            .env("ALETHEIADB_PORT", port.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
+            .stderr(Stdio::from(log));
+
+        let child = cmd.spawn().map_err(|e| {
+            format!(
+                "failed to launch daemon process '{}': {e}",
+                server_exe.display()
+            )
         })?;
 
-        let keys = match keys_str {
-            Some(raw) => {
-                let keys: Vec<String> = raw
+        let metadata = DaemonMetadata {
+            pid: child.id(),
+            server_exe,
+        };
+
+        write_daemon_metadata(&pid_file, &metadata)?;
+
+        println!(
+            "daemon started (pid={}, host={}, port={}, exe={}, log={})",
+            metadata.pid,
+            host,
+            port,
+            metadata.server_exe.display(),
+            log_file.display()
+        );
+        Ok(())
+    }
+
+    /// Stops the running AletheiaDB background server daemon.
+    ///
+    /// Reads the PID from the pid-file, verifies the process is still the expected
+    /// server executable, and sends a kill signal. Cleans up the pid-file afterwards.
+    fn daemon_stop(args: &[String]) -> Result<(), String> {
+        let pid_file = PathBuf::from(
+            arg_value(args, "--pid-file").unwrap_or_else(|| DEFAULT_PID_FILE.to_string()),
+        );
+        let meta = read_daemon_metadata(&pid_file)?.ok_or_else(|| {
+            format!(
+                "no pid file found at '{}' (daemon not running?)",
+                pid_file.display()
+            )
+        })?;
+
+        if !is_expected_daemon_running(&meta) {
+            return Err(format!(
+                "refusing to stop pid {}: process does not match expected daemon binary '{}'",
+                meta.pid,
+                meta.server_exe.display()
+            ));
+        }
+
+        let status = Command::new("kill")
+            .arg(meta.pid.to_string())
+            .status()
+            .map_err(|e| format!("failed to invoke kill: {e}"))?;
+
+        if !status.success() {
+            return Err(format!("failed to stop daemon process {}", meta.pid));
+        }
+
+        fs::remove_file(&pid_file)
+            .map_err(|e| format!("failed to remove pid file '{}': {e}", pid_file.display()))?;
+
+        println!("daemon stopped (pid={})", meta.pid);
+        Ok(())
+    }
+
+    /// Checks and prints the status of the background server daemon.
+    ///
+    /// Verifies whether the process ID in the pid-file is actively running and
+    /// matches the expected server executable.
+    fn daemon_status(args: &[String]) -> Result<(), String> {
+        let pid_file = PathBuf::from(
+            arg_value(args, "--pid-file").unwrap_or_else(|| DEFAULT_PID_FILE.to_string()),
+        );
+        match read_daemon_metadata(&pid_file)? {
+            Some(meta) if is_expected_daemon_running(&meta) => {
+                println!(
+                    "daemon is running (pid={}, exe={})",
+                    meta.pid,
+                    meta.server_exe.display()
+                );
+                Ok(())
+            }
+            Some(meta) => {
+                println!(
+                    "daemon is not running or pid was reused (pid={}, expected_exe={})",
+                    meta.pid,
+                    meta.server_exe.display()
+                );
+                Ok(())
+            }
+            None => {
+                println!("daemon is not running (no pid file)");
+                Ok(())
+            }
+        }
+    }
+
+    /// Resolves the absolute path to the `aletheia-server` executable.
+    ///
+    /// Assumes the server binary is located in the same directory as this CLI binary.
+    fn resolve_server_executable() -> Result<PathBuf, String> {
+        let mut exe_path = env::current_exe()
+            .map_err(|e| format!("failed to get current executable path: {e}"))?;
+
+        exe_path.pop();
+        let server_exe = exe_path.join(SERVER_BIN_NAME);
+
+        if server_exe.is_file() {
+            return Ok(server_exe);
+        }
+
+        #[cfg(windows)]
+        {
+            let server_exe_win = exe_path.join(format!("{}.exe", SERVER_BIN_NAME));
+            if server_exe_win.is_file() {
+                return Ok(server_exe_win);
+            }
+        }
+
+        Err(format!(
+            "could not find '{}' next to CLI binary at '{}'",
+            SERVER_BIN_NAME,
+            exe_path.display()
+        ))
+    }
+
+    /// Checks if the process defined in `meta` is currently running and is the correct binary.
+    ///
+    /// Uses `/proc/<pid>` on Unix systems to verify the process executable. This prevents
+    /// accidentally killing unrelated processes if a PID is reused by the OS after a crash.
+    fn is_expected_daemon_running(meta: &DaemonMetadata) -> bool {
+        let proc_dir = PathBuf::from(format!("/proc/{}", meta.pid));
+        if !proc_dir.exists() {
+            return false;
+        }
+
+        let exe_path = proc_dir.join("exe");
+        if let Ok(current_exe) = fs::read_link(&exe_path) {
+            return current_exe == meta.server_exe;
+        }
+
+        let cmdline_path = proc_dir.join("cmdline");
+        let cmdline = fs::read(cmdline_path).unwrap_or_default();
+        let joined = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+        joined.contains(SERVER_BIN_NAME)
+    }
+
+    /// Writes the daemon's PID and executable path to the specified pid-file.
+    fn write_daemon_metadata(path: &Path, meta: &DaemonMetadata) -> Result<(), String> {
+        let content = format!("{}\n{}\n", meta.pid, meta.server_exe.display());
+        fs::write(path, content)
+            .map_err(|e| format!("failed to write pid file '{}': {e}", path.display()))
+    }
+
+    /// Reads the daemon's PID and executable path from the specified pid-file.
+    fn read_daemon_metadata(path: &Path) -> Result<Option<DaemonMetadata>, String> {
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(path)
+            .map_err(|e| format!("failed reading pid file '{}': {e}", path.display()))?;
+
+        let mut lines = content.lines();
+        let pid_line = lines
+            .next()
+            .ok_or_else(|| format!("pid file '{}' missing pid line", path.display()))?;
+        let exe_line = lines
+            .next()
+            .ok_or_else(|| format!("pid file '{}' missing executable line", path.display()))?;
+
+        let pid = pid_line
+            .parse::<u32>()
+            .map_err(|e| format!("invalid pid in '{}': {e}", path.display()))?;
+
+        Ok(Some(DaemonMetadata {
+            pid,
+            server_exe: PathBuf::from(exe_line),
+        }))
+    }
+
+    /// Ensures the parent directory for a given file path exists, creating it if necessary.
+    fn ensure_parent_dir(path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create directory '{}': {e}", parent.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Extracts the value of a specific command-line flag (e.g., `--port 1963`).
+    fn arg_value(args: &[String], flag: &str) -> Option<String> {
+        let mut iter = args.iter();
+        while let Some(token) = iter.next() {
+            if token == flag {
+                return iter.next().cloned();
+            }
+        }
+        None
+    }
+
+    /// Parses the `--properties` JSON argument if present, converting it to a `PropertyMap`.
+    fn parse_optional_properties(args: &[String]) -> Result<PropertyMap, String> {
+        match arg_value(args, "--properties") {
+            Some(json) => json_to_property_map(&json),
+            None => Ok(PropertyMap::new()),
+        }
+    }
+
+    /// Parses the `--direction` argument for traversals (defaults to "outgoing").
+    fn parse_direction(args: &[String]) -> Result<String, String> {
+        let direction = arg_value(args, "--direction").unwrap_or_else(|| "outgoing".to_string());
+        if matches!(direction.as_str(), "outgoing" | "incoming" | "both") {
+            Ok(direction)
+        } else {
+            Err(format!(
+                "invalid direction '{direction}', expected outgoing|incoming|both"
+            ))
+        }
+    }
+
+    /// Parses a string into a `NodeId`.
+    fn parse_node_id(raw: &str) -> Result<NodeId, String> {
+        let id = raw
+            .parse::<u64>()
+            .map_err(|e| format!("invalid node id '{raw}': {e}"))?;
+        NodeId::new(id).map_err(|e| format!("invalid node id: {e}"))
+    }
+
+    /// Parses a string into an `EdgeId`.
+    fn parse_edge_id(raw: &str) -> Result<EdgeId, String> {
+        let id = raw
+            .parse::<u64>()
+            .map_err(|e| format!("invalid edge id '{raw}': {e}"))?;
+        EdgeId::new(id).map_err(|e| format!("invalid edge id: {e}"))
+    }
+
+    /// Converts a raw JSON string into a structured `PropertyMap`.
+    fn json_to_property_map(raw: &str) -> Result<PropertyMap, String> {
+        let parsed: serde_json::Value = serde_json::from_str(raw)
+            .map_err(|e| format!("invalid JSON properties payload: {e}"))?;
+
+        let object = parsed
+            .as_object()
+            .ok_or_else(|| "properties JSON must be an object".to_string())?;
+
+        let mut map = PropertyMapBuilder::new();
+        for (key, value) in object {
+            let converted = json_to_property_value(value)?;
+            map = map.insert(key, converted);
+        }
+        Ok(map.build())
+    }
+
+    /// Converts a single JSON value into an internal `PropertyValue`.
+    fn json_to_property_value(value: &serde_json::Value) -> Result<PropertyValue, String> {
+        match value {
+            serde_json::Value::Null => Ok(PropertyValue::Null),
+            serde_json::Value::Bool(v) => Ok(PropertyValue::Bool(*v)),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Ok(PropertyValue::Int(i))
+                } else if let Some(f) = n.as_f64() {
+                    Ok(PropertyValue::Float(f))
+                } else {
+                    Err("unsupported numeric value".to_string())
+                }
+            }
+            serde_json::Value::String(s) => Ok(PropertyValue::string(s)),
+            serde_json::Value::Array(arr) => {
+                let values = arr
+                    .iter()
+                    .map(json_to_property_value)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(PropertyValue::array(values))
+            }
+            serde_json::Value::Object(_) => {
+                Err("nested objects are not supported in properties".to_string())
+            }
+        }
+    }
+
+    /// Converts an internal `Node` object into a JSON representation for CLI output.
+    fn node_to_json(node: &Node) -> serde_json::Value {
+        serde_json::json!({
+            "id": node.id.as_u64(),
+            "label": resolve_label(node.label),
+            "properties": property_map_to_json(&node.properties),
+        })
+    }
+
+    /// Converts an internal `Edge` object into a JSON representation for CLI output.
+    fn edge_to_json(edge: &Edge) -> serde_json::Value {
+        serde_json::json!({
+            "id": edge.id.as_u64(),
+            "label": resolve_label(edge.label),
+            "source": edge.source.as_u64(),
+            "target": edge.target.as_u64(),
+            "properties": property_map_to_json(&edge.properties),
+        })
+    }
+
+    /// Resolves an `InternedString` back into its raw string representation.
+    fn resolve_label(label: aletheiadb::InternedString) -> String {
+        GLOBAL_INTERNER
+            .resolve_with(label, |s| s.to_string())
+            .unwrap_or_else(|| "<unknown-label>".to_string())
+    }
+
+    /// Converts an internal `PropertyMap` into a JSON Object.
+    fn property_map_to_json(props: &PropertyMap) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        for (key, value) in props.iter() {
+            let key_string = GLOBAL_INTERNER
+                .resolve_with(*key, |s| s.to_string())
+                .unwrap_or_else(|| "<unknown-key>".to_string());
+            map.insert(key_string, property_value_to_json(value));
+        }
+        serde_json::Value::Object(map)
+    }
+
+    /// Converts an internal `PropertyValue` into a standard JSON Value.
+    fn property_value_to_json(value: &PropertyValue) -> serde_json::Value {
+        match value {
+            PropertyValue::Null => serde_json::Value::Null,
+            PropertyValue::Bool(v) => serde_json::Value::Bool(*v),
+            PropertyValue::Int(v) => serde_json::json!(*v),
+            PropertyValue::Float(v) => serde_json::json!(*v),
+            PropertyValue::String(v) => serde_json::Value::String(v.to_string()),
+            PropertyValue::Bytes(v) => serde_json::json!(v.to_vec()),
+            PropertyValue::Array(values) => {
+                serde_json::Value::Array(values.iter().map(property_value_to_json).collect())
+            }
+            PropertyValue::Vector(values) => {
+                serde_json::Value::Array(values.iter().map(|f| serde_json::json!(*f)).collect())
+            }
+            PropertyValue::SparseVector(values) => serde_json::json!({
+                "indices": values.indices(),
+                "values": values.values(),
+                "dimensions": values.dimension(),
+            }),
+        }
+    }
+
+    /// Pretty-prints a JSON value to standard output.
+    fn print_json_pretty(value: &serde_json::Value) -> Result<(), String> {
+        let rendered = serde_json::to_string_pretty(value)
+            .map_err(|e| format!("failed to render JSON output: {e}"))?;
+
+        let mut stdout = io::stdout().lock();
+        match writeln!(stdout, "{rendered}") {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),
+            Err(e) => Err(format!("error writing JSON output: {e}")),
+        }
+    }
+
+    /// Parquet columnar import/export subcommands (Issue #3364).
+    #[cfg(feature = "parquet")]
+    mod parquet_io {
+        use super::{arg_value, arg_values, open_db};
+        use aletheiadb::api::import::{ColumnType, EdgeMapping, LabelSource, NodeMapping};
+
+        /// `aletheia import <nodes_file> --format parquet --label L --key COL ...`
+        ///
+        /// Loads nodes (and optionally edges) from Parquet using the #3211 mapping
+        /// contract. `--label`/`--label-column` choose the label source; `--key` names the
+        /// business-key column; repeated `--property name:type` add typed property columns
+        /// (`type` in string|int|float|bool|timestamp|embedding).
+        pub(super) fn handle_import(args: Vec<String>) -> Result<(), String> {
+            let nodes_file = positional(&args).ok_or_else(usage_import)?;
+            require_parquet_format(&args)?;
+
+            let node_mapping = build_node_mapping(&args)?;
+            let db = open_db()?;
+            let mut importer = db.import();
+            // Rows commit in chunks, so an error can leave earlier chunks committed. Report
+            // the count committed so far so the operator knows the database is partial.
+            let node_report = match importer.nodes_from_parquet(&nodes_file, node_mapping) {
+                Ok(report) => report,
+                Err(e) => {
+                    return Err(format!(
+                        "node import failed after committing {} node(s): {e} \
+                     (import commits in chunks; the database may be partially written)",
+                        importer.imported_node_count()
+                    ));
+                }
+            };
+
+            let mut edges_imported = 0usize;
+            if let Some(edges_file) = arg_value(&args, "--edges") {
+                let edge_mapping = build_edge_mapping(&args)?;
+                match importer.edges_from_parquet(&edges_file, edge_mapping) {
+                    Ok(edge_report) => edges_imported = edge_report.edges_imported,
+                    Err(e) => {
+                        return Err(format!(
+                            "edge import failed: {e} ({} node(s) committed; edges commit in \
+                         chunks, so the database may be partially written)",
+                            importer.imported_node_count()
+                        ));
+                    }
+                }
+            }
+
+            let value = serde_json::json!({
+                "ok": true,
+                "nodes_imported": node_report.nodes_imported,
+                "edges_imported": edges_imported,
+                "rows_read": node_report.rows_read,
+            });
+            println!(
+                "{}",
+                serde_json::to_string(&value).map_err(|e| format!("failed to render JSON: {e}"))?
+            );
+            Ok(())
+        }
+
+        /// `aletheia export <out_prefix> --format parquet [--mode current|history]`
+        ///
+        /// Writes two files: for `current` (the default) `<out_prefix>.nodes.parquet` and
+        /// `<out_prefix>.edges.parquet`; for `history` `<out_prefix>.node_history.parquet`
+        /// and `<out_prefix>.edge_history.parquet`.
+        pub(super) fn handle_export(args: Vec<String>) -> Result<(), String> {
+            let prefix = positional(&args).ok_or_else(usage_export)?;
+            require_parquet_format(&args)?;
+            let mode = arg_value(&args, "--mode").unwrap_or_else(|| "current".to_string());
+
+            let db = open_db()?;
+            let exporter = db.export();
+
+            let value = match mode.as_str() {
+                "current" => {
+                    let nodes_path = format!("{prefix}.nodes.parquet");
+                    let edges_path = format!("{prefix}.edges.parquet");
+                    let nodes = exporter
+                        .nodes_to_parquet(&nodes_path)
+                        .map_err(|e| format!("node export failed: {e}"))?;
+                    let edges = exporter
+                        .edges_to_parquet(&edges_path)
+                        .map_err(|e| format!("edge export failed: {e}"))?;
+                    serde_json::json!({
+                        "ok": true,
+                        "mode": "current",
+                        "nodes_file": nodes_path,
+                        "edges_file": edges_path,
+                        "nodes_exported": nodes.nodes_exported,
+                        "edges_exported": edges.edges_exported,
+                    })
+                }
+                "history" => {
+                    let nodes_path = format!("{prefix}.node_history.parquet");
+                    let edges_path = format!("{prefix}.edge_history.parquet");
+                    let nodes = exporter
+                        .node_history_to_parquet(&nodes_path)
+                        .map_err(|e| format!("node history export failed: {e}"))?;
+                    let edges = exporter
+                        .edge_history_to_parquet(&edges_path)
+                        .map_err(|e| format!("edge history export failed: {e}"))?;
+                    serde_json::json!({
+                        "ok": true,
+                        "mode": "history",
+                        "node_history_file": nodes_path,
+                        "edge_history_file": edges_path,
+                        "node_versions_exported": nodes.node_versions_exported,
+                        "edge_versions_exported": edges.edge_versions_exported,
+                    })
+                }
+                other => {
+                    return Err(format!(
+                        "unknown --mode '{other}' (expected current|history)"
+                    ));
+                }
+            };
+            println!(
+                "{}",
+                serde_json::to_string(&value).map_err(|e| format!("failed to render JSON: {e}"))?
+            );
+            Ok(())
+        }
+
+        /// The first non-flag, non-flag-value token (the required output/input path).
+        fn positional(args: &[String]) -> Option<String> {
+            let mut iter = args.iter();
+            while let Some(token) = iter.next() {
+                if token.starts_with("--") {
+                    // Skip this flag's value too.
+                    iter.next();
+                } else {
+                    return Some(token.clone());
+                }
+            }
+            None
+        }
+
+        fn require_parquet_format(args: &[String]) -> Result<(), String> {
+            match arg_value(args, "--format").as_deref() {
+                Some("parquet") => Ok(()),
+                Some(other) => Err(format!("unsupported --format '{other}' (only 'parquet')")),
+                None => Err("missing required --format parquet".to_string()),
+            }
+        }
+
+        fn parse_column_type(spec: &str) -> Result<ColumnType, String> {
+            match spec {
+                "string" => Ok(ColumnType::String),
+                "int" => Ok(ColumnType::Int),
+                "float" => Ok(ColumnType::Float),
+                "bool" => Ok(ColumnType::Bool),
+                "timestamp" => Ok(ColumnType::Timestamp),
+                "embedding" => Ok(ColumnType::Embedding),
+                other => Err(format!(
+                    "unknown property type '{other}' (expected string|int|float|bool|timestamp|embedding)"
+                )),
+            }
+        }
+
+        /// Parse repeated `<flag> name:type` flags into `(column, type)` pairs. The column
+        /// and property name are the same (`name`), matching a column-per-key export. `flag`
+        /// is `--property` for nodes and `--edge-property` for edges so the two mappings are
+        /// scoped independently.
+        fn parse_properties(
+            args: &[String],
+            flag: &str,
+        ) -> Result<Vec<(String, ColumnType)>, String> {
+            let mut out = Vec::new();
+            for spec in arg_values(args, flag) {
+                let (name, ty) = spec
+                    .split_once(':')
+                    .ok_or_else(|| format!("invalid {flag} '{spec}' (expected name:type)"))?;
+                if name.is_empty() {
+                    return Err(format!("invalid {flag} '{spec}' (empty name)"));
+                }
+                out.push((name.to_string(), parse_column_type(ty)?));
+            }
+            Ok(out)
+        }
+
+        fn label_source(args: &[String]) -> Result<LabelSource, String> {
+            match (
+                arg_value(args, "--label"),
+                arg_value(args, "--label-column"),
+            ) {
+                (Some(_), Some(_)) => Err("use only one of --label / --label-column".to_string()),
+                (Some(fixed), None) => Ok(LabelSource::fixed(fixed)),
+                (None, Some(col)) => Ok(LabelSource::column(col)),
+                (None, None) => Err("missing required --label or --label-column".to_string()),
+            }
+        }
+
+        fn build_node_mapping(args: &[String]) -> Result<NodeMapping, String> {
+            let label = label_source(args)?;
+            let key =
+                arg_value(args, "--key").ok_or_else(|| "missing required --key".to_string())?;
+            let mut mapping = NodeMapping::new(label, key);
+            for (name, ty) in parse_properties(args, "--property")? {
+                mapping = mapping.property_same(name, ty);
+            }
+            if let Some(col) = arg_value(args, "--valid-time-column") {
+                mapping = mapping.valid_time_column(col);
+            }
+            Ok(mapping)
+        }
+
+        fn build_edge_mapping(args: &[String]) -> Result<EdgeMapping, String> {
+            let label = arg_value(args, "--edge-label")
+                .map(LabelSource::fixed)
+                .ok_or_else(|| "missing required --edge-label for --edges".to_string())?;
+            let source = arg_value(args, "--source-key")
+                .ok_or_else(|| "missing required --source-key for --edges".to_string())?;
+            let target = arg_value(args, "--target-key")
+                .ok_or_else(|| "missing required --target-key for --edges".to_string())?;
+            let mut mapping = EdgeMapping::new(label, source, target);
+            // Edge properties/valid-time use their own flags so they are scoped independently
+            // from the node `--property` / `--valid-time-column` in a mixed import.
+            for (name, ty) in parse_properties(args, "--edge-property")? {
+                mapping = mapping.property_same(name, ty);
+            }
+            if let Some(col) = arg_value(args, "--edge-valid-time-column") {
+                mapping = mapping.valid_time_column(col);
+            }
+            Ok(mapping)
+        }
+
+        fn usage_import() -> String {
+            "usage: aletheia import <nodes_file> --format parquet --label L --key COL \
+         [--property name:type ...] [--label-column COL] [--valid-time-column COL] \
+         [--edges FILE --edge-label L --source-key COL --target-key COL \
+         [--edge-property name:type ...] [--edge-valid-time-column COL]] \
+         (note: rows commit in chunks, so an error mid-import can leave the database \
+         partially written)"
+                .to_string()
+        }
+
+        fn usage_export() -> String {
+            "usage: aletheia export <out_prefix> --format parquet [--mode current|history]"
+                .to_string()
+        }
+    }
+
+    /// Signed audit export subcommands (Issue #3358).
+    #[cfg(feature = "audit-export")]
+    mod audit {
+        use super::{arg_value, open_db, parse_edge_id, parse_node_id};
+        use aletheiadb::audit::{
+            AuditPublicKey, AuditScope, AuditSigningKey, ExportOptions, verify_json_bytes,
+        };
+        use std::path::Path;
+
+        /// `aletheia audit-keygen <key_file>` — generate a signing key (0600) and
+        /// print its public key. The private seed is written to `<key_file>`.
+        pub(super) fn handle_keygen(args: Vec<String>) -> Result<(), String> {
+            let path = args
+                .first()
+                .ok_or_else(|| "usage: aletheia audit-keygen <key_file>".to_string())?;
+            if Path::new(path).exists() {
+                return Err(format!("refusing to overwrite existing key file '{path}'"));
+            }
+            let key = AuditSigningKey::generate();
+            key.write_to_file(path)
+                .map_err(|e| format!("failed to write key file: {e}"))?;
+            let value = serde_json::json!({
+                "ok": true,
+                "key_file": path,
+                "public_key": key.public_key().to_hex(),
+            });
+            let rendered = serde_json::to_string(&value)
+                .map_err(|e| format!("failed to render JSON output: {e}"))?;
+            println!("{rendered}");
+            Ok(())
+        }
+
+        /// `aletheia audit-export <node|edge> <id> --key <file> --out <path>` —
+        /// sign an entity's full bi-temporal history into a portable artifact.
+        pub(super) fn handle_export(args: Vec<String>) -> Result<(), String> {
+            let kind = args.first().map(String::as_str).ok_or_else(usage_export)?;
+            let id_str = args.get(1).ok_or_else(usage_export)?;
+            let key_file = arg_value(&args, "--key").ok_or_else(usage_export)?;
+            let out = arg_value(&args, "--out").ok_or_else(usage_export)?;
+            let db_id = arg_value(&args, "--db-id").unwrap_or_else(|| "aletheiadb".to_string());
+
+            let scope = match kind {
+                "node" => AuditScope::node(parse_node_id(id_str)?),
+                "edge" => AuditScope::edge(parse_edge_id(id_str)?),
+                other => {
+                    return Err(format!(
+                        "unknown entity kind '{other}' (expected node|edge)"
+                    ));
+                }
+            };
+
+            let mut options = ExportOptions::new(db_id);
+            if let Some(redact) = arg_value(&args, "--redact") {
+                let keys: Vec<String> = redact
                     .split(',')
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(String::from)
                     .collect();
-                if keys.is_empty() {
-                    return Err(format!(
-                        "invalid --target '{spec}': property key list must not be empty"
-                    ));
+                options = options.redact(keys);
+            }
+
+            let key = AuditSigningKey::from_file(&key_file)
+                .map_err(|e| format!("failed to load signing key: {e}"))?;
+            let db = open_db()?;
+            let export = db
+                .audit_export(scope, &key, &options)
+                .map_err(|e| format!("audit export failed: {e}"))?;
+            let bytes = export
+                .to_json_bytes()
+                .map_err(|e| format!("failed to serialize artifact: {e}"))?;
+            std::fs::write(&out, &bytes).map_err(|e| format!("failed to write artifact: {e}"))?;
+
+            let value = serde_json::json!({
+                "ok": true,
+                "artifact": out,
+                "entity_count": export.entity_count(),
+                "version_count": export.version_count(),
+                "public_key": key.public_key().to_hex(),
+                "chain_root": export.chain.root,
+                "anchor_lsn": export.metadata().chain_anchor.source_lsn,
+            });
+            let rendered = serde_json::to_string(&value)
+                .map_err(|e| format!("failed to render JSON output: {e}"))?;
+            println!("{rendered}");
+            Ok(())
+        }
+
+        /// `aletheia audit-verify <artifact> [--public-key HEX]` — verify OFFLINE.
+        /// Exits non-zero (via `Err`) when verification fails.
+        pub(super) fn handle_verify(args: Vec<String>) -> Result<(), String> {
+            let path = args.first().ok_or_else(|| {
+                "usage: aletheia audit-verify <artifact> [--public-key HEX]".to_string()
+            })?;
+            let bytes = std::fs::read(path).map_err(|e| format!("failed to read artifact: {e}"))?;
+
+            let expected = match arg_value(&args, "--public-key") {
+                Some(hex) => Some(
+                    AuditPublicKey::from_hex(&hex)
+                        .map_err(|e| format!("invalid --public-key: {e}"))?,
+                ),
+                None => None,
+            };
+
+            match verify_json_bytes(&bytes, expected.as_ref()) {
+                Ok(report) => {
+                    println!("{}", report.summary());
+                    println!("  entity summary: {}", report.entity_summary);
+                    if !report.redacted_keys.is_empty() {
+                        println!("  redacted keys: {}", report.redacted_keys.join(", "));
+                    }
+                    if !report.trusted_key {
+                        println!(
+                            "  NOTE: no --public-key supplied; trust in the embedded key is \
+                         self-asserted. Supply the signer's known public key to establish trust."
+                        );
+                    }
+                    Ok(())
                 }
-                Some(keys)
+                Err(e) => Err(format!("VERIFICATION FAILED: {e}")),
             }
-            None => None,
-        };
+        }
 
-        match (kind, keys) {
-            ("node", None) => Ok(DesignationTarget::WholeNode(id)),
-            ("node", Some(keys)) => Ok(DesignationTarget::NodeProperties(id, keys)),
-            ("edge", None) => Ok(DesignationTarget::WholeEdge(id)),
-            ("edge", Some(keys)) => Ok(DesignationTarget::EdgeProperties(id, keys)),
-            (other, _) => Err(format!(
-                "invalid --target '{spec}': unknown entity kind '{other}' (expected node|edge)"
-            )),
+        /// `aletheia audit-render <artifact>` — render a human-readable chronology.
+        pub(super) fn handle_render(args: Vec<String>) -> Result<(), String> {
+            let path = args
+                .first()
+                .ok_or_else(|| "usage: aletheia audit-render <artifact>".to_string())?;
+            let bytes = std::fs::read(path).map_err(|e| format!("failed to read artifact: {e}"))?;
+            let export = aletheiadb::audit::AuditExport::from_json_bytes(&bytes)
+                .map_err(|e| format!("failed to parse artifact: {e}"))?;
+            print!("{}", export.render_chronology());
+            Ok(())
+        }
+
+        fn usage_export() -> String {
+            "usage: aletheia audit-export <node|edge> <id> --key <key_file> --out <path> \
+         [--db-id ID] [--redact k1,k2]"
+                .to_string()
         }
     }
 
-    /// Render an [`ErasureAttestation`] as a single JSON line.
+    /// GDPR crypto-shred operator commands (Issue #3359).
     ///
-    /// Emits only non-sensitive fields (subject id, entity count, timestamp,
-    /// signature, signer public key) — never key material or plaintext.
-    pub(super) fn attestation_json(att: &ErasureAttestation) -> Result<String, String> {
-        let timestamp =
-            chrono::DateTime::<chrono::Utc>::from_timestamp_micros(att.timestamp_micros)
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_else(|| att.timestamp_micros.to_string());
-        let value = serde_json::json!({
-            "ok": true,
-            "subject_id": att.subject_id,
-            "entity_count": att.entity_count,
-            "timestamp_micros": att.timestamp_micros,
-            "timestamp": timestamp,
-            "signature": to_hex(&att.signature),
-            "signer_public_key": att.signer_public_key.to_hex(),
-        });
-        serde_json::to_string(&value).map_err(|e| format!("failed to render JSON output: {e}"))
-    }
+    /// `designate-subject` groups entities and/or specific property keys under an
+    /// erasure subject; `erase-subject` irreversibly destroys the subject's key
+    /// material and prints a signed [`ErasureAttestation`]. Both run in the CLI's
+    /// local-admin context (no RBAC — the same trust level as `backup` / `keys
+    /// rotate`) and open the database via [`open_db`], honouring `ALETHEIADB_CONFIG`
+    /// / `ALETHEIADB_DATA_DIR`. Designation requires encryption configured (via an
+    /// `ALETHEIADB_CONFIG` TOML enabling a key provider); an unconfigured database
+    /// surfaces a clean error and a non-zero exit.
+    ///
+    /// **Security:** command output carries only the subject id, an entity count, a
+    /// timestamp, and the attestation signature / signer public key — never key
+    /// material or plaintext property content.
+    #[cfg(feature = "audit-export")]
+    mod crypto_shred_cli {
+        use super::open_db;
+        use aletheiadb::db::{CryptoShredError, DesignationTarget, ErasureAttestation};
 
-    /// Map a [`CryptoShredError`] into a clean CLI error string carrying its
-    /// stable #3234 code. The error `Display` never includes key bytes or
-    /// plaintext, so this is safe to print.
-    fn cli_error(e: CryptoShredError) -> String {
-        format!("{} [{}]", e, e.code())
-    }
-
-    /// Dependency-free lowercase hex encoding for the raw signature bytes.
-    fn to_hex(bytes: &[u8]) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut out = String::with_capacity(bytes.len() * 2);
-        for &b in bytes {
-            out.push(HEX[(b >> 4) as usize] as char);
-            out.push(HEX[(b & 0x0f) as usize] as char);
+        /// Collect every value of a repeatable `--flag value` option, in order.
+        ///
+        /// A local, feature-independent equivalent of the `import`-gated
+        /// `arg_values` helper (the crypto-shred verbs are gated on `audit-export`,
+        /// not `import`, so they cannot rely on it).
+        fn repeated_values(args: &[String], flag: &str) -> Vec<String> {
+            let mut out = Vec::new();
+            let mut iter = args.iter();
+            while let Some(token) = iter.next() {
+                if token == flag
+                    && let Some(value) = iter.next()
+                {
+                    out.push(value.clone());
+                }
+            }
+            out
         }
-        out
-    }
 
-    fn usage_designate() -> String {
-        "usage: aletheia designate-subject <subject_id> --target <kind>:<id>[:key1,key2] \
+        /// `aletheia designate-subject <subject_id> --target <kind>:<id>[:key1,key2] ...`
+        ///
+        /// Designate one or more targets under `subject_id`. `--target` is
+        /// repeatable; at least one is required.
+        pub(super) fn handle_designate_subject(args: Vec<String>) -> Result<(), String> {
+            let subject_id = positional_subject_id(&args, "designate-subject")?;
+            let specs = repeated_values(&args, "--target");
+            if specs.is_empty() {
+                return Err(usage_designate());
+            }
+            let targets = specs
+                .iter()
+                .map(|spec| parse_target(spec))
+                .collect::<Result<Vec<_>, String>>()?;
+            let count = targets.len();
+
+            let db = open_db()?;
+            db.designate_subject(subject_id.clone(), targets)
+                .map_err(cli_error)?;
+
+            let value = serde_json::json!({
+                "ok": true,
+                "subject_id": subject_id,
+                "targets_designated": count,
+            });
+            let rendered = serde_json::to_string(&value)
+                .map_err(|e| format!("failed to render JSON output: {e}"))?;
+            println!("{rendered}");
+            Ok(())
+        }
+
+        /// `aletheia erase-subject <subject_id>` — irreversibly erase and print the
+        /// signed attestation as JSON.
+        pub(super) fn handle_erase_subject(args: Vec<String>) -> Result<(), String> {
+            let subject_id = positional_subject_id(&args, "erase-subject")?;
+            let db = open_db()?;
+            let attestation = db.erase_subject(subject_id).map_err(cli_error)?;
+            println!("{}", attestation_json(&attestation)?);
+            Ok(())
+        }
+
+        /// Extract the leading positional `<subject_id>` argument, rejecting a
+        /// missing value or a leading flag.
+        fn positional_subject_id(args: &[String], verb: &str) -> Result<String, String> {
+            match args.first() {
+                Some(id) if !id.starts_with("--") => Ok(id.clone()),
+                _ if verb == "designate-subject" => Err(usage_designate()),
+                _ => Err("usage: aletheia erase-subject <subject_id>".to_string()),
+            }
+        }
+
+        /// Parse one `--target` value into a [`DesignationTarget`].
+        ///
+        /// Grammar: `<kind>:<id>` seals the whole entity; `<kind>:<id>:key1,key2`
+        /// seals only the listed property keys. `kind` is `node` or `edge`; `id` is
+        /// a `u64`; keys are a non-empty comma-separated list.
+        pub(super) fn parse_target(spec: &str) -> Result<DesignationTarget, String> {
+            // Split into at most three fields: kind, id, and the (optional) key list.
+            // The key list itself may not contain ':' so a 2-way splitn after the id
+            // is exact.
+            let mut parts = spec.splitn(3, ':');
+            let kind = parts.next().unwrap_or("");
+            let id_str = parts
+                .next()
+                .ok_or_else(|| format!("invalid --target '{spec}': expected <kind>:<id>[:keys]"))?;
+            let keys_str = parts.next();
+
+            let id: u64 = id_str.parse().map_err(|_| {
+                format!("invalid --target '{spec}': entity id '{id_str}' is not a valid integer")
+            })?;
+
+            let keys = match keys_str {
+                Some(raw) => {
+                    let keys: Vec<String> = raw
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .collect();
+                    if keys.is_empty() {
+                        return Err(format!(
+                            "invalid --target '{spec}': property key list must not be empty"
+                        ));
+                    }
+                    Some(keys)
+                }
+                None => None,
+            };
+
+            match (kind, keys) {
+                ("node", None) => Ok(DesignationTarget::WholeNode(id)),
+                ("node", Some(keys)) => Ok(DesignationTarget::NodeProperties(id, keys)),
+                ("edge", None) => Ok(DesignationTarget::WholeEdge(id)),
+                ("edge", Some(keys)) => Ok(DesignationTarget::EdgeProperties(id, keys)),
+                (other, _) => Err(format!(
+                    "invalid --target '{spec}': unknown entity kind '{other}' (expected node|edge)"
+                )),
+            }
+        }
+
+        /// Render an [`ErasureAttestation`] as a single JSON line.
+        ///
+        /// Emits only non-sensitive fields (subject id, entity count, timestamp,
+        /// signature, signer public key) — never key material or plaintext.
+        pub(super) fn attestation_json(att: &ErasureAttestation) -> Result<String, String> {
+            let timestamp =
+                chrono::DateTime::<chrono::Utc>::from_timestamp_micros(att.timestamp_micros)
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_else(|| att.timestamp_micros.to_string());
+            let value = serde_json::json!({
+                "ok": true,
+                "subject_id": att.subject_id,
+                "entity_count": att.entity_count,
+                "timestamp_micros": att.timestamp_micros,
+                "timestamp": timestamp,
+                "signature": to_hex(&att.signature),
+                "signer_public_key": att.signer_public_key.to_hex(),
+            });
+            serde_json::to_string(&value).map_err(|e| format!("failed to render JSON output: {e}"))
+        }
+
+        /// Map a [`CryptoShredError`] into a clean CLI error string carrying its
+        /// stable #3234 code. The error `Display` never includes key bytes or
+        /// plaintext, so this is safe to print.
+        fn cli_error(e: CryptoShredError) -> String {
+            format!("{} [{}]", e, e.code())
+        }
+
+        /// Dependency-free lowercase hex encoding for the raw signature bytes.
+        fn to_hex(bytes: &[u8]) -> String {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut out = String::with_capacity(bytes.len() * 2);
+            for &b in bytes {
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0x0f) as usize] as char);
+            }
+            out
+        }
+
+        fn usage_designate() -> String {
+            "usage: aletheia designate-subject <subject_id> --target <kind>:<id>[:key1,key2] \
          [--target ...]  (kind = node|edge)"
-            .to_string()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn run_demo_seeds_and_runs_all_showcase_queries() {
-        let db = AletheiaDB::new().expect("ephemeral demo database should open");
-        // The guided sequence must complete without error against the seed.
-        run_demo(&db).expect("run_demo should succeed end-to-end");
-
-        // Seeding must have produced a realistic graph, and the temporal
-        // narrative must hold: Alice's latest title differs from her founding
-        // title (this is the AS OF differentiator the demo showcases).
-        assert!(db.node_count() >= 4, "expected the core cast plus filler");
-        assert!(
-            db.edge_count() >= 4,
-            "expected WORKS_AT/KNOWS relationships"
-        );
+                .to_string()
+        }
     }
 
-    #[test]
-    fn handle_demo_runs_to_completion() {
-        // The one-shot demo needs no arguments and must exit Ok.
-        handle_demo(vec![]).expect("aletheia demo should run to completion");
-    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
 
-    #[test]
-    fn demo_props_builds_expected_map() {
-        let map = demo_props(&[("name", "Alice"), ("title", "Engineer")]);
-        // Round-trip the inserted values, not just non-emptiness.
-        assert_eq!(
-            map.get("name").map(demo_display_value).as_deref(),
-            Some("Alice"),
-            "name should round-trip"
-        );
-        assert_eq!(
-            map.get("title").map(demo_display_value).as_deref(),
-            Some("Engineer"),
-            "title should round-trip"
-        );
-    }
+        #[test]
+        fn run_demo_seeds_and_runs_all_showcase_queries() {
+            let db = AletheiaDB::new().expect("ephemeral demo database should open");
+            // The guided sequence must complete without error against the seed.
+            run_demo(&db).expect("run_demo should succeed end-to-end");
 
-    #[test]
-    fn handle_backup_missing_arg_returns_usage_error() {
-        let err = handle_backup(vec![]).unwrap_err();
-        assert!(err.contains("usage:"), "unexpected error: {err}");
-    }
+            // Seeding must have produced a realistic graph, and the temporal
+            // narrative must hold: Alice's latest title differs from her founding
+            // title (this is the AS OF differentiator the demo showcases).
+            assert!(db.node_count() >= 4, "expected the core cast plus filler");
+            assert!(
+                db.edge_count() >= 4,
+                "expected WORKS_AT/KNOWS relationships"
+            );
+        }
 
-    #[test]
-    fn handle_restore_missing_arg_returns_usage_error() {
-        let err = handle_restore(vec![]).unwrap_err();
-        assert!(err.contains("usage:"), "unexpected error: {err}");
-    }
+        #[test]
+        fn handle_demo_runs_to_completion() {
+            // The one-shot demo needs no arguments and must exit Ok.
+            handle_demo(vec![]).expect("aletheia demo should run to completion");
+        }
 
-    #[test]
-    fn parse_pitr_target_rejects_both_flags() {
-        let err = parse_pitr_target(&Some("100".to_string()), &Some("5".to_string())).unwrap_err();
-        assert!(
-            err.contains("mutually exclusive"),
-            "unexpected error: {err}"
-        );
-    }
+        #[test]
+        fn demo_props_builds_expected_map() {
+            let map = demo_props(&[("name", "Alice"), ("title", "Engineer")]);
+            // Round-trip the inserted values, not just non-emptiness.
+            assert_eq!(
+                map.get("name").map(demo_display_value).as_deref(),
+                Some("Alice"),
+                "name should round-trip"
+            );
+            assert_eq!(
+                map.get("title").map(demo_display_value).as_deref(),
+                Some("Engineer"),
+                "title should round-trip"
+            );
+        }
 
-    #[test]
-    fn parse_pitr_target_resolves_each_flag() {
-        assert!(matches!(
-            parse_pitr_target(&None, &Some("42".to_string())).unwrap(),
-            Some(PitrTarget::Lsn(42))
-        ));
-        assert!(matches!(
-            parse_pitr_target(&Some("1000".to_string()), &None).unwrap(),
-            Some(PitrTarget::AsOf(_))
-        ));
-        assert!(parse_pitr_target(&None, &None).unwrap().is_none());
-    }
+        #[test]
+        fn handle_backup_missing_arg_returns_usage_error() {
+            let err = handle_backup(vec![]).unwrap_err();
+            assert!(err.contains("usage:"), "unexpected error: {err}");
+        }
 
-    #[test]
-    fn parse_cli_timestamp_accepts_rfc3339_and_micros() {
-        assert!(parse_cli_timestamp("2024-01-15T10:00:00Z").is_ok());
-        assert!(parse_cli_timestamp("1705312800000000").is_ok());
-        assert!(parse_cli_timestamp("not-a-time").is_err());
-    }
+        #[test]
+        fn handle_restore_missing_arg_returns_usage_error() {
+            let err = handle_restore(vec![]).unwrap_err();
+            assert!(err.contains("usage:"), "unexpected error: {err}");
+        }
 
-    // ── GDPR crypto-shred CLI (Issue #3359) ──────────────────────────────
+        #[test]
+        fn parse_pitr_target_rejects_both_flags() {
+            let err =
+                parse_pitr_target(&Some("100".to_string()), &Some("5".to_string())).unwrap_err();
+            assert!(
+                err.contains("mutually exclusive"),
+                "unexpected error: {err}"
+            );
+        }
 
-    #[cfg(feature = "audit-export")]
-    #[test]
-    fn parse_target_accepts_all_four_shapes() {
-        use super::crypto_shred_cli::parse_target;
-        use aletheiadb::db::DesignationTarget;
+        #[test]
+        fn parse_pitr_target_resolves_each_flag() {
+            assert!(matches!(
+                parse_pitr_target(&None, &Some("42".to_string())).unwrap(),
+                Some(PitrTarget::Lsn(42))
+            ));
+            assert!(matches!(
+                parse_pitr_target(&Some("1000".to_string()), &None).unwrap(),
+                Some(PitrTarget::AsOf(_))
+            ));
+            assert!(parse_pitr_target(&None, &None).unwrap().is_none());
+        }
 
-        assert_eq!(
-            parse_target("node:100").unwrap(),
-            DesignationTarget::WholeNode(100)
-        );
-        assert_eq!(
-            parse_target("edge:200").unwrap(),
-            DesignationTarget::WholeEdge(200)
-        );
-        assert_eq!(
-            parse_target("node:101:ssn,email").unwrap(),
-            DesignationTarget::NodeProperties(101, vec!["ssn".to_string(), "email".to_string()])
-        );
-        assert_eq!(
-            parse_target("edge:200:since").unwrap(),
-            DesignationTarget::EdgeProperties(200, vec!["since".to_string()])
-        );
-    }
+        #[test]
+        fn parse_cli_timestamp_accepts_rfc3339_and_micros() {
+            assert!(parse_cli_timestamp("2024-01-15T10:00:00Z").is_ok());
+            assert!(parse_cli_timestamp("1705312800000000").is_ok());
+            assert!(parse_cli_timestamp("not-a-time").is_err());
+        }
 
-    #[cfg(feature = "audit-export")]
-    #[test]
-    fn parse_target_rejects_malformed_specs() {
-        use super::crypto_shred_cli::parse_target;
+        // ── GDPR crypto-shred CLI (Issue #3359) ──────────────────────────────
 
-        // Unknown kind.
-        assert!(parse_target("person:1").is_err());
-        // Non-integer id.
-        assert!(parse_target("node:abc").is_err());
-        // Missing id.
-        assert!(parse_target("node").is_err());
-        // Empty key list after the id.
-        assert!(parse_target("node:1:").is_err());
-        // Whitespace-only key list.
-        assert!(parse_target("node:1: , ").is_err());
-    }
+        #[cfg(feature = "audit-export")]
+        #[test]
+        fn parse_target_accepts_all_four_shapes() {
+            use super::crypto_shred_cli::parse_target;
+            use aletheiadb::db::DesignationTarget;
 
-    #[cfg(feature = "audit-export")]
-    #[test]
-    fn handle_designate_subject_without_target_returns_usage() {
-        // The --target requirement is enforced before any database is opened.
-        let err = super::crypto_shred_cli::handle_designate_subject(vec!["subject-1".to_string()])
+            assert_eq!(
+                parse_target("node:100").unwrap(),
+                DesignationTarget::WholeNode(100)
+            );
+            assert_eq!(
+                parse_target("edge:200").unwrap(),
+                DesignationTarget::WholeEdge(200)
+            );
+            assert_eq!(
+                parse_target("node:101:ssn,email").unwrap(),
+                DesignationTarget::NodeProperties(
+                    101,
+                    vec!["ssn".to_string(), "email".to_string()]
+                )
+            );
+            assert_eq!(
+                parse_target("edge:200:since").unwrap(),
+                DesignationTarget::EdgeProperties(200, vec!["since".to_string()])
+            );
+        }
+
+        #[cfg(feature = "audit-export")]
+        #[test]
+        fn parse_target_rejects_malformed_specs() {
+            use super::crypto_shred_cli::parse_target;
+
+            // Unknown kind.
+            assert!(parse_target("person:1").is_err());
+            // Non-integer id.
+            assert!(parse_target("node:abc").is_err());
+            // Missing id.
+            assert!(parse_target("node").is_err());
+            // Empty key list after the id.
+            assert!(parse_target("node:1:").is_err());
+            // Whitespace-only key list.
+            assert!(parse_target("node:1: , ").is_err());
+        }
+
+        #[cfg(feature = "audit-export")]
+        #[test]
+        fn handle_designate_subject_without_target_returns_usage() {
+            // The --target requirement is enforced before any database is opened.
+            let err =
+                super::crypto_shred_cli::handle_designate_subject(vec!["subject-1".to_string()])
+                    .unwrap_err();
+            assert!(err.contains("usage:"), "unexpected error: {err}");
+        }
+
+        #[cfg(feature = "audit-export")]
+        #[test]
+        fn handle_erase_subject_missing_arg_returns_usage() {
+            let err = super::crypto_shred_cli::handle_erase_subject(vec![]).unwrap_err();
+            assert!(err.contains("usage:"), "unexpected error: {err}");
+        }
+
+        #[cfg(feature = "audit-export")]
+        #[test]
+        fn designate_then_erase_on_encrypted_db_yields_verifiable_attestation() {
+            use super::crypto_shred_cli::attestation_json;
+            use aletheiadb::db::DesignationTarget;
+            use aletheiadb::encryption::{EncryptionConfig, FileKeyProvider};
+            use aletheiadb::{AletheiaDB, AletheiaDBConfig, PersistenceConfig, WalConfigBuilder};
+
+            // A plaintext sentinel that must never appear in the attestation output.
+            const SENTINEL: &str = "SENTINEL_ssn_1234567890_MUST_NOT_LEAK";
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let key_file = root.join("mek.key");
+            FileKeyProvider::generate_key_file(&key_file).unwrap();
+            let config = AletheiaDBConfig::builder()
+                .wal(WalConfigBuilder::new().wal_dir(root.join("wal")).build())
+                .persistence(PersistenceConfig {
+                    enabled: true,
+                    data_dir: root.join("data"),
+                    load_on_startup: true,
+                    ..Default::default()
+                })
+                .encryption(EncryptionConfig::file_based(&key_file))
+                .build();
+            let db = AletheiaDB::with_unified_config(config).unwrap();
+
+            // Create a node carrying the sentinel property, designate it, then erase.
+            let node_id = db
+                .create_node(
+                    "Person",
+                    aletheiadb::PropertyMapBuilder::new()
+                        .insert("ssn", SENTINEL)
+                        .build(),
+                )
+                .unwrap();
+            db.designate_subject(
+                "subject-cli-1",
+                vec![DesignationTarget::WholeNode(node_id.as_u64())],
+            )
+            .unwrap();
+
+            let attestation = db.erase_subject("subject-cli-1").unwrap();
+            // The attestation must self-verify (signature over its canonical root).
+            assert!(attestation.verify(), "attestation must self-verify");
+
+            let rendered = attestation_json(&attestation).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+            assert_eq!(parsed["ok"], serde_json::json!(true));
+            assert_eq!(parsed["subject_id"], serde_json::json!("subject-cli-1"));
+            assert_eq!(parsed["entity_count"], serde_json::json!(1));
+            // Signature is a 64-byte Ed25519 sig -> 128 lowercase hex chars.
+            let sig = parsed["signature"].as_str().unwrap();
+            assert_eq!(sig.len(), 128, "signature must be 64-byte hex");
+            assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
+            assert!(parsed["signer_public_key"].as_str().is_some());
+            assert!(parsed["timestamp"].as_str().is_some());
+
+            // Security: the attestation output must never carry plaintext content.
+            assert!(
+                !rendered.contains(SENTINEL),
+                "attestation output must not leak plaintext property content"
+            );
+        }
+
+        #[cfg(feature = "audit-export")]
+        #[test]
+        fn erase_undesignated_subject_is_a_clean_failed_precondition() {
+            use aletheiadb::AletheiaDB;
+
+            // An ephemeral database (no designation) — erasing an unknown subject is
+            // a clean, non-panicking error that the CLI surfaces as `error: ...`
+            // with a non-zero exit. (This is also the shape seen when encryption is
+            // not configured: a clean Err, never a panic.)
+            let db = AletheiaDB::new().unwrap();
+            let err = db.erase_subject("never-designated").unwrap_err();
+            assert_eq!(err.code(), "FAILED_PRECONDITION");
+        }
+
+        #[test]
+        fn handle_restore_pitr_without_wal_archive_errors() {
+            // A PITR target flag without --wal-archive is a usage error.
+            let err = handle_restore(vec![
+                "base.albk".to_string(),
+                "--lsn".to_string(),
+                "5".to_string(),
+            ])
             .unwrap_err();
-        assert!(err.contains("usage:"), "unexpected error: {err}");
-    }
-
-    #[cfg(feature = "audit-export")]
-    #[test]
-    fn handle_erase_subject_missing_arg_returns_usage() {
-        let err = super::crypto_shred_cli::handle_erase_subject(vec![]).unwrap_err();
-        assert!(err.contains("usage:"), "unexpected error: {err}");
-    }
-
-    #[cfg(feature = "audit-export")]
-    #[test]
-    fn designate_then_erase_on_encrypted_db_yields_verifiable_attestation() {
-        use super::crypto_shred_cli::attestation_json;
-        use aletheiadb::db::DesignationTarget;
-        use aletheiadb::encryption::{EncryptionConfig, FileKeyProvider};
-        use aletheiadb::{AletheiaDB, AletheiaDBConfig, PersistenceConfig, WalConfigBuilder};
-
-        // A plaintext sentinel that must never appear in the attestation output.
-        const SENTINEL: &str = "SENTINEL_ssn_1234567890_MUST_NOT_LEAK";
-
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let key_file = root.join("mek.key");
-        FileKeyProvider::generate_key_file(&key_file).unwrap();
-        let config = AletheiaDBConfig::builder()
-            .wal(WalConfigBuilder::new().wal_dir(root.join("wal")).build())
-            .persistence(PersistenceConfig {
-                enabled: true,
-                data_dir: root.join("data"),
-                load_on_startup: true,
-                ..Default::default()
-            })
-            .encryption(EncryptionConfig::file_based(&key_file))
-            .build();
-        let db = AletheiaDB::with_unified_config(config).unwrap();
-
-        // Create a node carrying the sentinel property, designate it, then erase.
-        let node_id = db
-            .create_node(
-                "Person",
-                aletheiadb::PropertyMapBuilder::new()
-                    .insert("ssn", SENTINEL)
-                    .build(),
-            )
-            .unwrap();
-        db.designate_subject(
-            "subject-cli-1",
-            vec![DesignationTarget::WholeNode(node_id.as_u64())],
-        )
-        .unwrap();
-
-        let attestation = db.erase_subject("subject-cli-1").unwrap();
-        // The attestation must self-verify (signature over its canonical root).
-        assert!(attestation.verify(), "attestation must self-verify");
-
-        let rendered = attestation_json(&attestation).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
-        assert_eq!(parsed["ok"], serde_json::json!(true));
-        assert_eq!(parsed["subject_id"], serde_json::json!("subject-cli-1"));
-        assert_eq!(parsed["entity_count"], serde_json::json!(1));
-        // Signature is a 64-byte Ed25519 sig -> 128 lowercase hex chars.
-        let sig = parsed["signature"].as_str().unwrap();
-        assert_eq!(sig.len(), 128, "signature must be 64-byte hex");
-        assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!(parsed["signer_public_key"].as_str().is_some());
-        assert!(parsed["timestamp"].as_str().is_some());
-
-        // Security: the attestation output must never carry plaintext content.
-        assert!(
-            !rendered.contains(SENTINEL),
-            "attestation output must not leak plaintext property content"
-        );
-    }
-
-    #[cfg(feature = "audit-export")]
-    #[test]
-    fn erase_undesignated_subject_is_a_clean_failed_precondition() {
-        use aletheiadb::AletheiaDB;
-
-        // An ephemeral database (no designation) — erasing an unknown subject is
-        // a clean, non-panicking error that the CLI surfaces as `error: ...`
-        // with a non-zero exit. (This is also the shape seen when encryption is
-        // not configured: a clean Err, never a panic.)
-        let db = AletheiaDB::new().unwrap();
-        let err = db.erase_subject("never-designated").unwrap_err();
-        assert_eq!(err.code(), "FAILED_PRECONDITION");
-    }
-
-    #[test]
-    fn handle_restore_pitr_without_wal_archive_errors() {
-        // A PITR target flag without --wal-archive is a usage error.
-        let err = handle_restore(vec![
-            "base.albk".to_string(),
-            "--lsn".to_string(),
-            "5".to_string(),
-        ])
-        .unwrap_err();
-        assert!(err.contains("--wal-archive"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn handle_restore_missing_data_dir_env_returns_error() {
-        // ALETHEIADB_DATA_DIR is not set in the test environment.
-        // If it somehow is set, this test exercises a different (later) error path,
-        // but it still returns Err, so the assertion holds.
-        let result = handle_restore(vec!["nonexistent.albk".to_string()]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn restore_success_json_escapes_backslash_paths() {
-        // kills: reverting handle_restore to raw string interpolation of the data
-        // dir path, which emits invalid JSON for Windows backslash paths (`\U`/`\R`
-        // are illegal JSON escapes) — the exact failure CI caught on windows-latest.
-        // pins: restore output is serde-serialized so it parses AND the data_dir
-        // string round-trips byte-for-byte on every platform.
-        let win_path = Path::new(r"C:\Users\RUNNER~1\Temp\.tmpX");
-        let out = restore_success_json(win_path).expect("serialization must succeed");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&out).expect("restore output must be valid JSON");
-        assert_eq!(parsed["ok"], serde_json::json!(true));
-        assert_eq!(
-            parsed["data_dir"],
-            serde_json::json!(win_path.display().to_string()),
-            "data_dir must round-trip exactly through JSON escaping"
-        );
-    }
-
-    // ========================================================================
-    // Issue #3351 — `aletheia verify` helper unit tests.
-    // ========================================================================
-
-    fn sample_verification(passed: bool) -> ChainVerification {
-        ChainVerification {
-            passed,
-            head_seq: 7,
-            head_digest_hex: "abcd".to_string(),
-            earliest_broken_seq: if passed { None } else { Some(3) },
-            reason: if passed {
-                None
-            } else {
-                Some("recomputed chain digest differs from sealed digest".to_string())
-            },
-            transactions_checked: 7,
+            assert!(err.contains("--wal-archive"), "unexpected error: {err}");
         }
-    }
 
-    #[test]
-    fn parse_entity_arg_accepts_node_and_edge() {
-        let (kind, id) = parse_entity_arg("node:42").unwrap();
-        assert!(matches!(kind, EntityKind::Node));
-        assert_eq!(id, 42);
-        let (kind, id) = parse_entity_arg("EDGE:7").unwrap();
-        assert!(matches!(kind, EntityKind::Edge));
-        assert_eq!(id, 7);
-    }
-
-    #[test]
-    fn parse_entity_arg_rejects_missing_colon() {
-        let err = parse_entity_arg("node42").unwrap_err();
-        assert!(err.contains("expected"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn parse_entity_arg_rejects_unknown_kind() {
-        let err = parse_entity_arg("vertex:1").unwrap_err();
-        assert!(err.contains("expected 'node' or 'edge'"), "got: {err}");
-    }
-
-    #[test]
-    fn parse_entity_arg_rejects_non_numeric_id() {
-        let err = parse_entity_arg("node:abc").unwrap_err();
-        assert!(err.contains("invalid --entity id"), "got: {err}");
-    }
-
-    #[test]
-    fn render_verification_human_pass_reports_status_and_head() {
-        let out = render_verification(&sample_verification(true), "full", false).unwrap();
-        assert!(out.contains("PASS"), "got: {out}");
-        assert!(out.contains("scope: full"), "got: {out}");
-        assert!(out.contains("head seq:             7"), "got: {out}");
-        // A clean pass must NOT print a broken seq / reason line.
-        assert!(!out.contains("earliest broken seq"), "got: {out}");
-    }
-
-    #[test]
-    fn render_verification_human_fail_reports_broken_seq_and_reason() {
-        let out = render_verification(&sample_verification(false), "entity", false).unwrap();
-        assert!(out.contains("FAIL"), "got: {out}");
-        assert!(out.contains("earliest broken seq:  3"), "got: {out}");
-        assert!(out.contains("differs from sealed digest"), "got: {out}");
-    }
-
-    #[test]
-    fn render_verification_json_is_machine_readable() {
-        let out = render_verification(&sample_verification(false), "anchor", true).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
-        assert_eq!(value["scope"], serde_json::json!("anchor"));
-        assert_eq!(value["passed"], serde_json::json!(false));
-        assert_eq!(value["earliest_broken_seq"], serde_json::json!(3));
-        assert_eq!(value["head_seq"], serde_json::json!(7));
-    }
-
-    #[test]
-    fn finish_verification_returns_err_on_failure() {
-        // Failure must map to a non-zero exit (Err), success to Ok.
-        assert!(finish_verification(&sample_verification(false), "full", true).is_err());
-        assert!(finish_verification(&sample_verification(true), "full", true).is_ok());
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn chain_head_round_trips_through_file() {
-        let head = ChainHead::genesis(5, 1234);
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("head.json");
-        let path_str = path.to_str().unwrap();
-        write_chain_head(&head, path_str).unwrap();
-        let loaded = read_chain_head(path_str).unwrap();
-        assert_eq!(head, loaded);
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn read_chain_head_rejects_garbage() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.json");
-        fs::write(&path, b"not a chain head").unwrap();
-        let err = read_chain_head(path.to_str().unwrap()).unwrap_err();
-        assert!(
-            err.contains("not a valid exported chain head"),
-            "got: {err}"
-        );
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn render_head_export_human_and_json() {
-        let head = ChainHead::genesis(9, 42);
-        let human = render_head_export(&head, "/tmp/x.json", false).unwrap();
-        assert!(human.contains("Exported chain head anchor to /tmp/x.json"));
-        assert!(human.contains("seq:    0"));
-        let json = render_head_export(&head, "/tmp/x.json", true).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["ok"], serde_json::json!(true));
-        assert_eq!(value["seq"], serde_json::json!(0));
-    }
-
-    #[test]
-    fn parse_direction_defaults_to_outgoing() {
-        let dir = parse_direction(&[]).unwrap();
-        assert_eq!(dir, "outgoing");
-    }
-
-    #[test]
-    fn parse_direction_accepts_incoming() {
-        let dir = parse_direction(&["--direction".to_string(), "incoming".to_string()]).unwrap();
-        assert_eq!(dir, "incoming");
-    }
-
-    #[test]
-    fn parse_direction_accepts_both() {
-        let dir = parse_direction(&["--direction".to_string(), "both".to_string()]).unwrap();
-        assert_eq!(dir, "both");
-    }
-
-    #[test]
-    fn parse_direction_rejects_invalid() {
-        let err =
-            parse_direction(&["--direction".to_string(), "sideways".to_string()]).unwrap_err();
-        assert!(err.contains("invalid direction"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn parse_node_id_rejects_non_numeric() {
-        let err = parse_node_id("abc").unwrap_err();
-        assert!(err.contains("invalid node id"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn parse_edge_id_rejects_non_numeric() {
-        let err = parse_edge_id("xyz").unwrap_err();
-        assert!(err.contains("invalid edge id"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn json_to_property_map_parses_mixed_types() {
-        let map = json_to_property_map(r#"{"name":"Alice","age":30,"active":true}"#).unwrap();
-        assert!(!map.is_empty());
-    }
-
-    #[test]
-    fn json_to_property_map_rejects_non_object() {
-        let err = json_to_property_map(r#"[1,2,3]"#).unwrap_err();
-        assert!(err.contains("must be an object"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn json_to_property_map_rejects_invalid_json() {
-        let err = json_to_property_map("not json").unwrap_err();
-        assert!(err.contains("invalid JSON"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn arg_value_finds_flag() {
-        let args = vec!["--port".to_string(), "1234".to_string()];
-        assert_eq!(arg_value(&args, "--port"), Some("1234".to_string()));
-    }
-
-    #[test]
-    fn arg_value_returns_none_when_absent() {
-        let args = vec!["--host".to_string(), "localhost".to_string()];
-        assert_eq!(arg_value(&args, "--port"), None);
-    }
-
-    // ========================================================================
-    // Issue #3480 — mutation-kill unit tests (Layer 1).
-    //
-    // These cover pure-helper RETURN VALUES and BOUNDARIES not exercised by the
-    // 16 tests above, so return-value-stub and condition-flip mutants are killed.
-    // ========================================================================
-
-    // --- parse_direction: explicit "outgoing" branch (default is separately tested) ---
-
-    #[test]
-    fn parse_direction_accepts_explicit_outgoing() {
-        // kills: match-arm / return-value stubs collapsing explicit "outgoing"
-        // into the error path (the default path already returns "outgoing").
-        let dir = parse_direction(&["--direction".to_string(), "outgoing".to_string()]).unwrap();
-        assert_eq!(dir, "outgoing");
-    }
-
-    // --- parse_node_id / parse_edge_id: happy paths + overflow boundary ---
-
-    #[test]
-    fn parse_node_id_accepts_valid_numeric() {
-        // kills: return-value stubs that ignore the parsed id.
-        let id = parse_node_id("42").unwrap();
-        assert_eq!(id.as_u64(), 42);
-    }
-
-    #[test]
-    fn parse_node_id_accepts_zero() {
-        // kills: off-by-one / boundary flips rejecting the lowest valid id.
-        let id = parse_node_id("0").unwrap();
-        assert_eq!(id.as_u64(), 0);
-    }
-
-    #[test]
-    fn parse_node_id_rejects_out_of_range() {
-        // kills: flips that skip MAX_VALID_ID validation (u64::MAX - 1000 guard).
-        let err = parse_node_id(&u64::MAX.to_string()).unwrap_err();
-        assert!(err.contains("invalid node id"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn parse_edge_id_accepts_valid_numeric() {
-        // kills: return-value stubs that ignore the parsed id.
-        let id = parse_edge_id("7").unwrap();
-        assert_eq!(id.as_u64(), 7);
-    }
-
-    #[test]
-    fn parse_edge_id_rejects_out_of_range() {
-        // kills: flips that skip EdgeId::new range validation.
-        let err = parse_edge_id(&u64::MAX.to_string()).unwrap_err();
-        assert!(err.contains("invalid edge id"), "unexpected error: {err}");
-    }
-
-    // --- json_to_property_value: exact variant per JSON kind + nested-object rejection ---
-
-    #[test]
-    fn json_to_property_value_null() {
-        // kills: match-arm swaps mapping Null to a different variant.
-        let v = json_to_property_value(&serde_json::Value::Null).unwrap();
-        assert!(matches!(v, PropertyValue::Null), "got {v:?}");
-    }
-
-    #[test]
-    fn json_to_property_value_bool_true() {
-        // kills: `*v` -> literal-true/false stubs on the Bool arm.
-        let v = json_to_property_value(&serde_json::json!(true)).unwrap();
-        assert!(matches!(v, PropertyValue::Bool(true)), "got {v:?}");
-    }
-
-    #[test]
-    fn json_to_property_value_bool_false() {
-        // kills: Bool arm stubbed to a constant true.
-        let v = json_to_property_value(&serde_json::json!(false)).unwrap();
-        assert!(matches!(v, PropertyValue::Bool(false)), "got {v:?}");
-    }
-
-    #[test]
-    fn json_to_property_value_integer_maps_to_int() {
-        // kills: swapping the Int/Float branch order or ignoring the value.
-        let v = json_to_property_value(&serde_json::json!(30)).unwrap();
-        assert!(matches!(v, PropertyValue::Int(30)), "got {v:?}");
-    }
-
-    #[test]
-    fn json_to_property_value_negative_integer_maps_to_int() {
-        // kills: as_i64/as_f64 ordering flips (negatives must stay Int).
-        let v = json_to_property_value(&serde_json::json!(-5)).unwrap();
-        assert!(matches!(v, PropertyValue::Int(-5)), "got {v:?}");
-    }
-
-    #[test]
-    fn json_to_property_value_float_maps_to_float() {
-        // kills: dropping the as_f64 fallback branch.
-        let v = json_to_property_value(&serde_json::json!(1.5)).unwrap();
-        match v {
-            PropertyValue::Float(f) => assert!((f - 1.5).abs() < f64::EPSILON, "got {f}"),
-            other => panic!("expected Float, got {other:?}"),
+        #[test]
+        fn handle_restore_missing_data_dir_env_returns_error() {
+            // ALETHEIADB_DATA_DIR is not set in the test environment.
+            // If it somehow is set, this test exercises a different (later) error path,
+            // but it still returns Err, so the assertion holds.
+            let result = handle_restore(vec!["nonexistent.albk".to_string()]);
+            assert!(result.is_err());
         }
-    }
 
-    #[test]
-    fn json_to_property_value_string() {
-        // kills: String arm stubbed to empty/constant.
-        let v = json_to_property_value(&serde_json::json!("hello")).unwrap();
-        match v {
-            PropertyValue::String(ref s) => assert_eq!(s.to_string(), "hello"),
-            other => panic!("expected String, got {other:?}"),
+        #[test]
+        fn restore_success_json_escapes_backslash_paths() {
+            // kills: reverting handle_restore to raw string interpolation of the data
+            // dir path, which emits invalid JSON for Windows backslash paths (`\U`/`\R`
+            // are illegal JSON escapes) — the exact failure CI caught on windows-latest.
+            // pins: restore output is serde-serialized so it parses AND the data_dir
+            // string round-trips byte-for-byte on every platform.
+            let win_path = Path::new(r"C:\Users\RUNNER~1\Temp\.tmpX");
+            let out = restore_success_json(win_path).expect("serialization must succeed");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&out).expect("restore output must be valid JSON");
+            assert_eq!(parsed["ok"], serde_json::json!(true));
+            assert_eq!(
+                parsed["data_dir"],
+                serde_json::json!(win_path.display().to_string()),
+                "data_dir must round-trip exactly through JSON escaping"
+            );
         }
-    }
 
-    #[test]
-    fn json_to_property_value_array_preserves_elements() {
-        // kills: Array arm stubbed to empty, or element conversion dropped.
-        let v = json_to_property_value(&serde_json::json!([1, "two", true])).unwrap();
-        match v {
-            PropertyValue::Array(ref items) => {
-                assert_eq!(items.len(), 3, "array length must be preserved");
-                assert!(
-                    matches!(items[0], PropertyValue::Int(1)),
-                    "got {:?}",
-                    items[0]
-                );
-                assert!(
-                    matches!(&items[1], PropertyValue::String(s) if s.to_string() == "two"),
-                    "got {:?}",
-                    items[1]
-                );
-                assert!(
-                    matches!(items[2], PropertyValue::Bool(true)),
-                    "got {:?}",
-                    items[2]
-                );
+        // ========================================================================
+        // Issue #3351 — `aletheia verify` helper unit tests.
+        // ========================================================================
+
+        fn sample_verification(passed: bool) -> ChainVerification {
+            ChainVerification {
+                passed,
+                head_seq: 7,
+                head_digest_hex: "abcd".to_string(),
+                earliest_broken_seq: if passed { None } else { Some(3) },
+                reason: if passed {
+                    None
+                } else {
+                    Some("recomputed chain digest differs from sealed digest".to_string())
+                },
+                transactions_checked: 7,
             }
-            other => panic!("expected Array, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn json_to_property_value_rejects_nested_object() {
-        // kills: removing the Object rejection arm (would silently accept/drop
-        // nested objects instead of erroring).
-        let err = json_to_property_value(&serde_json::json!({"a": 1})).unwrap_err();
-        assert!(
-            err.contains("nested objects are not supported"),
-            "unexpected error: {err}"
-        );
-    }
+        #[test]
+        fn parse_entity_arg_accepts_node_and_edge() {
+            let (kind, id) = parse_entity_arg("node:42").unwrap();
+            assert!(matches!(kind, EntityKind::Node));
+            assert_eq!(id, 42);
+            let (kind, id) = parse_entity_arg("EDGE:7").unwrap();
+            assert!(matches!(kind, EntityKind::Edge));
+            assert_eq!(id, 7);
+        }
 
-    // --- json_to_property_map: value fidelity via round-trip ---
+        #[test]
+        fn parse_entity_arg_rejects_missing_colon() {
+            let err = parse_entity_arg("node42").unwrap_err();
+            assert!(err.contains("expected"), "unexpected error: {err}");
+        }
 
-    #[test]
-    #[serial_test::serial]
-    fn json_to_property_map_roundtrips_values() {
-        // kills: key/value drops in json_to_property_map (interns keys, so serial).
-        let map = json_to_property_map(r#"{"name":"Alice","age":30,"active":true}"#).unwrap();
-        let json = property_map_to_json(&map);
-        let obj = json.as_object().expect("expected JSON object");
-        assert_eq!(obj.get("name"), Some(&serde_json::json!("Alice")));
-        assert_eq!(obj.get("age"), Some(&serde_json::json!(30)));
-        assert_eq!(obj.get("active"), Some(&serde_json::json!(true)));
-    }
+        #[test]
+        fn parse_entity_arg_rejects_unknown_kind() {
+            let err = parse_entity_arg("vertex:1").unwrap_err();
+            assert!(err.contains("expected 'node' or 'edge'"), "got: {err}");
+        }
 
-    #[test]
-    fn json_to_property_map_rejects_nested_object_value() {
-        // kills: dropping the propagated nested-object rejection from a map value.
-        let err = json_to_property_map(r#"{"outer":{"inner":1}}"#).unwrap_err();
-        assert!(
-            err.contains("nested objects are not supported"),
-            "unexpected error: {err}"
-        );
-    }
+        #[test]
+        fn parse_entity_arg_rejects_non_numeric_id() {
+            let err = parse_entity_arg("node:abc").unwrap_err();
+            assert!(err.contains("invalid --entity id"), "got: {err}");
+        }
 
-    // --- property_value_to_json: scalar + Vector + SparseVector shapes ---
+        #[test]
+        fn render_verification_human_pass_reports_status_and_head() {
+            let out = render_verification(&sample_verification(true), "full", false).unwrap();
+            assert!(out.contains("PASS"), "got: {out}");
+            assert!(out.contains("scope: full"), "got: {out}");
+            assert!(out.contains("head seq:             7"), "got: {out}");
+            // A clean pass must NOT print a broken seq / reason line.
+            assert!(!out.contains("earliest broken seq"), "got: {out}");
+        }
 
-    #[test]
-    fn property_value_to_json_scalars() {
-        // kills: match-arm swaps on the scalar branches.
-        assert_eq!(
-            property_value_to_json(&PropertyValue::Null),
-            serde_json::Value::Null
-        );
-        assert_eq!(
-            property_value_to_json(&PropertyValue::Bool(true)),
-            serde_json::json!(true)
-        );
-        assert_eq!(
-            property_value_to_json(&PropertyValue::Int(-9)),
-            serde_json::json!(-9)
-        );
-        assert_eq!(
-            property_value_to_json(&PropertyValue::string("x")),
-            serde_json::json!("x")
-        );
-        match property_value_to_json(&PropertyValue::Float(2.5)) {
-            serde_json::Value::Number(n) => {
-                assert!((n.as_f64().unwrap() - 2.5).abs() < f64::EPSILON)
+        #[test]
+        fn render_verification_human_fail_reports_broken_seq_and_reason() {
+            let out = render_verification(&sample_verification(false), "entity", false).unwrap();
+            assert!(out.contains("FAIL"), "got: {out}");
+            assert!(out.contains("earliest broken seq:  3"), "got: {out}");
+            assert!(out.contains("differs from sealed digest"), "got: {out}");
+        }
+
+        #[test]
+        fn render_verification_json_is_machine_readable() {
+            let out = render_verification(&sample_verification(false), "anchor", true).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+            assert_eq!(value["scope"], serde_json::json!("anchor"));
+            assert_eq!(value["passed"], serde_json::json!(false));
+            assert_eq!(value["earliest_broken_seq"], serde_json::json!(3));
+            assert_eq!(value["head_seq"], serde_json::json!(7));
+        }
+
+        #[test]
+        fn finish_verification_returns_err_on_failure() {
+            // Failure must map to a non-zero exit (Err), success to Ok.
+            assert!(finish_verification(&sample_verification(false), "full", true).is_err());
+            assert!(finish_verification(&sample_verification(true), "full", true).is_ok());
+        }
+
+        #[cfg(feature = "serde")]
+        #[test]
+        fn chain_head_round_trips_through_file() {
+            let head = ChainHead::genesis(5, 1234);
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("head.json");
+            let path_str = path.to_str().unwrap();
+            write_chain_head(&head, path_str).unwrap();
+            let loaded = read_chain_head(path_str).unwrap();
+            assert_eq!(head, loaded);
+        }
+
+        #[cfg(feature = "serde")]
+        #[test]
+        fn read_chain_head_rejects_garbage() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("bad.json");
+            fs::write(&path, b"not a chain head").unwrap();
+            let err = read_chain_head(path.to_str().unwrap()).unwrap_err();
+            assert!(
+                err.contains("not a valid exported chain head"),
+                "got: {err}"
+            );
+        }
+
+        #[cfg(feature = "serde")]
+        #[test]
+        fn render_head_export_human_and_json() {
+            let head = ChainHead::genesis(9, 42);
+            let human = render_head_export(&head, "/tmp/x.json", false).unwrap();
+            assert!(human.contains("Exported chain head anchor to /tmp/x.json"));
+            assert!(human.contains("seq:    0"));
+            let json = render_head_export(&head, "/tmp/x.json", true).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["ok"], serde_json::json!(true));
+            assert_eq!(value["seq"], serde_json::json!(0));
+        }
+
+        #[test]
+        fn parse_direction_defaults_to_outgoing() {
+            let dir = parse_direction(&[]).unwrap();
+            assert_eq!(dir, "outgoing");
+        }
+
+        #[test]
+        fn parse_direction_accepts_incoming() {
+            let dir =
+                parse_direction(&["--direction".to_string(), "incoming".to_string()]).unwrap();
+            assert_eq!(dir, "incoming");
+        }
+
+        #[test]
+        fn parse_direction_accepts_both() {
+            let dir = parse_direction(&["--direction".to_string(), "both".to_string()]).unwrap();
+            assert_eq!(dir, "both");
+        }
+
+        #[test]
+        fn parse_direction_rejects_invalid() {
+            let err =
+                parse_direction(&["--direction".to_string(), "sideways".to_string()]).unwrap_err();
+            assert!(err.contains("invalid direction"), "unexpected error: {err}");
+        }
+
+        #[test]
+        fn parse_node_id_rejects_non_numeric() {
+            let err = parse_node_id("abc").unwrap_err();
+            assert!(err.contains("invalid node id"), "unexpected error: {err}");
+        }
+
+        #[test]
+        fn parse_edge_id_rejects_non_numeric() {
+            let err = parse_edge_id("xyz").unwrap_err();
+            assert!(err.contains("invalid edge id"), "unexpected error: {err}");
+        }
+
+        #[test]
+        fn json_to_property_map_parses_mixed_types() {
+            let map = json_to_property_map(r#"{"name":"Alice","age":30,"active":true}"#).unwrap();
+            assert!(!map.is_empty());
+        }
+
+        #[test]
+        fn json_to_property_map_rejects_non_object() {
+            let err = json_to_property_map(r#"[1,2,3]"#).unwrap_err();
+            assert!(err.contains("must be an object"), "unexpected error: {err}");
+        }
+
+        #[test]
+        fn json_to_property_map_rejects_invalid_json() {
+            let err = json_to_property_map("not json").unwrap_err();
+            assert!(err.contains("invalid JSON"), "unexpected error: {err}");
+        }
+
+        #[test]
+        fn arg_value_finds_flag() {
+            let args = vec!["--port".to_string(), "1234".to_string()];
+            assert_eq!(arg_value(&args, "--port"), Some("1234".to_string()));
+        }
+
+        #[test]
+        fn arg_value_returns_none_when_absent() {
+            let args = vec!["--host".to_string(), "localhost".to_string()];
+            assert_eq!(arg_value(&args, "--port"), None);
+        }
+
+        // ========================================================================
+        // Issue #3480 — mutation-kill unit tests (Layer 1).
+        //
+        // These cover pure-helper RETURN VALUES and BOUNDARIES not exercised by the
+        // 16 tests above, so return-value-stub and condition-flip mutants are killed.
+        // ========================================================================
+
+        // --- parse_direction: explicit "outgoing" branch (default is separately tested) ---
+
+        #[test]
+        fn parse_direction_accepts_explicit_outgoing() {
+            // kills: match-arm / return-value stubs collapsing explicit "outgoing"
+            // into the error path (the default path already returns "outgoing").
+            let dir =
+                parse_direction(&["--direction".to_string(), "outgoing".to_string()]).unwrap();
+            assert_eq!(dir, "outgoing");
+        }
+
+        // --- parse_node_id / parse_edge_id: happy paths + overflow boundary ---
+
+        #[test]
+        fn parse_node_id_accepts_valid_numeric() {
+            // kills: return-value stubs that ignore the parsed id.
+            let id = parse_node_id("42").unwrap();
+            assert_eq!(id.as_u64(), 42);
+        }
+
+        #[test]
+        fn parse_node_id_accepts_zero() {
+            // kills: off-by-one / boundary flips rejecting the lowest valid id.
+            let id = parse_node_id("0").unwrap();
+            assert_eq!(id.as_u64(), 0);
+        }
+
+        #[test]
+        fn parse_node_id_rejects_out_of_range() {
+            // kills: flips that skip MAX_VALID_ID validation (u64::MAX - 1000 guard).
+            let err = parse_node_id(&u64::MAX.to_string()).unwrap_err();
+            assert!(err.contains("invalid node id"), "unexpected error: {err}");
+        }
+
+        #[test]
+        fn parse_edge_id_accepts_valid_numeric() {
+            // kills: return-value stubs that ignore the parsed id.
+            let id = parse_edge_id("7").unwrap();
+            assert_eq!(id.as_u64(), 7);
+        }
+
+        #[test]
+        fn parse_edge_id_rejects_out_of_range() {
+            // kills: flips that skip EdgeId::new range validation.
+            let err = parse_edge_id(&u64::MAX.to_string()).unwrap_err();
+            assert!(err.contains("invalid edge id"), "unexpected error: {err}");
+        }
+
+        // --- json_to_property_value: exact variant per JSON kind + nested-object rejection ---
+
+        #[test]
+        fn json_to_property_value_null() {
+            // kills: match-arm swaps mapping Null to a different variant.
+            let v = json_to_property_value(&serde_json::Value::Null).unwrap();
+            assert!(matches!(v, PropertyValue::Null), "got {v:?}");
+        }
+
+        #[test]
+        fn json_to_property_value_bool_true() {
+            // kills: `*v` -> literal-true/false stubs on the Bool arm.
+            let v = json_to_property_value(&serde_json::json!(true)).unwrap();
+            assert!(matches!(v, PropertyValue::Bool(true)), "got {v:?}");
+        }
+
+        #[test]
+        fn json_to_property_value_bool_false() {
+            // kills: Bool arm stubbed to a constant true.
+            let v = json_to_property_value(&serde_json::json!(false)).unwrap();
+            assert!(matches!(v, PropertyValue::Bool(false)), "got {v:?}");
+        }
+
+        #[test]
+        fn json_to_property_value_integer_maps_to_int() {
+            // kills: swapping the Int/Float branch order or ignoring the value.
+            let v = json_to_property_value(&serde_json::json!(30)).unwrap();
+            assert!(matches!(v, PropertyValue::Int(30)), "got {v:?}");
+        }
+
+        #[test]
+        fn json_to_property_value_negative_integer_maps_to_int() {
+            // kills: as_i64/as_f64 ordering flips (negatives must stay Int).
+            let v = json_to_property_value(&serde_json::json!(-5)).unwrap();
+            assert!(matches!(v, PropertyValue::Int(-5)), "got {v:?}");
+        }
+
+        #[test]
+        fn json_to_property_value_float_maps_to_float() {
+            // kills: dropping the as_f64 fallback branch.
+            let v = json_to_property_value(&serde_json::json!(1.5)).unwrap();
+            match v {
+                PropertyValue::Float(f) => assert!((f - 1.5).abs() < f64::EPSILON, "got {f}"),
+                other => panic!("expected Float, got {other:?}"),
             }
-            other => panic!("expected number, got {other:?}"),
         }
-        assert_eq!(
-            property_value_to_json(&PropertyValue::bytes([1u8, 2, 3])),
-            serde_json::json!([1, 2, 3])
-        );
-        assert_eq!(
-            property_value_to_json(&PropertyValue::array(vec![
-                PropertyValue::Int(1),
-                PropertyValue::Int(2),
-            ])),
-            serde_json::json!([1, 2])
-        );
-    }
 
-    #[test]
-    fn property_value_to_json_dense_vector_is_flat_array() {
-        // kills: Vector arm stubbed to null/empty; must render a flat float array.
-        let json = property_value_to_json(&PropertyValue::vector([0.5f32, 1.5, 2.5]));
-        let arr = json.as_array().expect("vector must render as JSON array");
-        assert_eq!(arr.len(), 3);
-        assert!((arr[0].as_f64().unwrap() - 0.5).abs() < 1e-6);
-        assert!((arr[2].as_f64().unwrap() - 2.5).abs() < 1e-6);
-    }
+        #[test]
+        fn json_to_property_value_string() {
+            // kills: String arm stubbed to empty/constant.
+            let v = json_to_property_value(&serde_json::json!("hello")).unwrap();
+            match v {
+                PropertyValue::String(ref s) => assert_eq!(s.to_string(), "hello"),
+                other => panic!("expected String, got {other:?}"),
+            }
+        }
 
-    #[test]
-    fn property_value_to_json_sparse_vector_shape() {
-        // kills: SparseVector arm field drops (indices/values/dimensions).
-        use aletheiadb::core::vector::SparseVec;
-        let sparse = SparseVec::new(vec![1u32, 4], vec![0.5f32, -0.25], 8).unwrap();
-        let json = property_value_to_json(&PropertyValue::sparse_vector(sparse));
-        let obj = json
-            .as_object()
-            .expect("sparse vector must render as object");
-        assert_eq!(obj.get("indices"), Some(&serde_json::json!([1, 4])));
-        assert_eq!(obj.get("dimensions"), Some(&serde_json::json!(8)));
-        let values = obj
-            .get("values")
-            .and_then(|v| v.as_array())
-            .expect("values array");
-        assert_eq!(values.len(), 2);
-        assert!((values[0].as_f64().unwrap() - 0.5).abs() < 1e-6);
-    }
+        #[test]
+        fn json_to_property_value_array_preserves_elements() {
+            // kills: Array arm stubbed to empty, or element conversion dropped.
+            let v = json_to_property_value(&serde_json::json!([1, "two", true])).unwrap();
+            match v {
+                PropertyValue::Array(ref items) => {
+                    assert_eq!(items.len(), 3, "array length must be preserved");
+                    assert!(
+                        matches!(items[0], PropertyValue::Int(1)),
+                        "got {:?}",
+                        items[0]
+                    );
+                    assert!(
+                        matches!(&items[1], PropertyValue::String(s) if s.to_string() == "two"),
+                        "got {:?}",
+                        items[1]
+                    );
+                    assert!(
+                        matches!(items[2], PropertyValue::Bool(true)),
+                        "got {:?}",
+                        items[2]
+                    );
+                }
+                other => panic!("expected Array, got {other:?}"),
+            }
+        }
 
-    // --- property_map_to_json: key/value round-trip ---
+        #[test]
+        fn json_to_property_value_rejects_nested_object() {
+            // kills: removing the Object rejection arm (would silently accept/drop
+            // nested objects instead of erroring).
+            let err = json_to_property_value(&serde_json::json!({"a": 1})).unwrap_err();
+            assert!(
+                err.contains("nested objects are not supported"),
+                "unexpected error: {err}"
+            );
+        }
 
-    #[test]
-    #[serial_test::serial]
-    fn property_map_to_json_roundtrips_keys_and_values() {
-        // kills: key resolution / value drops (touches GLOBAL_INTERNER, so serial).
-        let map = PropertyMapBuilder::new()
-            .insert("k1", "v1")
-            .insert("k2", 7i64)
-            .build();
-        let json = property_map_to_json(&map);
-        let obj = json.as_object().expect("expected JSON object");
-        assert_eq!(obj.len(), 2);
-        assert_eq!(obj.get("k1"), Some(&serde_json::json!("v1")));
-        assert_eq!(obj.get("k2"), Some(&serde_json::json!(7)));
-    }
+        // --- json_to_property_map: value fidelity via round-trip ---
 
-    // --- node_to_json / edge_to_json: field fidelity (kills field-drop stubs) ---
+        #[test]
+        #[serial_test::serial]
+        fn json_to_property_map_roundtrips_values() {
+            // kills: key/value drops in json_to_property_map (interns keys, so serial).
+            let map = json_to_property_map(r#"{"name":"Alice","age":30,"active":true}"#).unwrap();
+            let json = property_map_to_json(&map);
+            let obj = json.as_object().expect("expected JSON object");
+            assert_eq!(obj.get("name"), Some(&serde_json::json!("Alice")));
+            assert_eq!(obj.get("age"), Some(&serde_json::json!(30)));
+            assert_eq!(obj.get("active"), Some(&serde_json::json!(true)));
+        }
 
-    #[test]
-    #[serial_test::serial]
-    fn node_to_json_contains_id_label_and_properties() {
-        // kills: dropping/mislabeling the id, label, or properties fields.
-        let db = AletheiaDB::new().unwrap();
-        let id = db
-            .create_node(
-                "Person",
-                PropertyMapBuilder::new().insert("name", "Alice").build(),
-            )
+        #[test]
+        fn json_to_property_map_rejects_nested_object_value() {
+            // kills: dropping the propagated nested-object rejection from a map value.
+            let err = json_to_property_map(r#"{"outer":{"inner":1}}"#).unwrap_err();
+            assert!(
+                err.contains("nested objects are not supported"),
+                "unexpected error: {err}"
+            );
+        }
+
+        // --- property_value_to_json: scalar + Vector + SparseVector shapes ---
+
+        #[test]
+        fn property_value_to_json_scalars() {
+            // kills: match-arm swaps on the scalar branches.
+            assert_eq!(
+                property_value_to_json(&PropertyValue::Null),
+                serde_json::Value::Null
+            );
+            assert_eq!(
+                property_value_to_json(&PropertyValue::Bool(true)),
+                serde_json::json!(true)
+            );
+            assert_eq!(
+                property_value_to_json(&PropertyValue::Int(-9)),
+                serde_json::json!(-9)
+            );
+            assert_eq!(
+                property_value_to_json(&PropertyValue::string("x")),
+                serde_json::json!("x")
+            );
+            match property_value_to_json(&PropertyValue::Float(2.5)) {
+                serde_json::Value::Number(n) => {
+                    assert!((n.as_f64().unwrap() - 2.5).abs() < f64::EPSILON)
+                }
+                other => panic!("expected number, got {other:?}"),
+            }
+            assert_eq!(
+                property_value_to_json(&PropertyValue::bytes([1u8, 2, 3])),
+                serde_json::json!([1, 2, 3])
+            );
+            assert_eq!(
+                property_value_to_json(&PropertyValue::array(vec![
+                    PropertyValue::Int(1),
+                    PropertyValue::Int(2),
+                ])),
+                serde_json::json!([1, 2])
+            );
+        }
+
+        #[test]
+        fn property_value_to_json_dense_vector_is_flat_array() {
+            // kills: Vector arm stubbed to null/empty; must render a flat float array.
+            let json = property_value_to_json(&PropertyValue::vector([0.5f32, 1.5, 2.5]));
+            let arr = json.as_array().expect("vector must render as JSON array");
+            assert_eq!(arr.len(), 3);
+            assert!((arr[0].as_f64().unwrap() - 0.5).abs() < 1e-6);
+            assert!((arr[2].as_f64().unwrap() - 2.5).abs() < 1e-6);
+        }
+
+        #[test]
+        fn property_value_to_json_sparse_vector_shape() {
+            // kills: SparseVector arm field drops (indices/values/dimensions).
+            use aletheiadb::core::vector::SparseVec;
+            let sparse = SparseVec::new(vec![1u32, 4], vec![0.5f32, -0.25], 8).unwrap();
+            let json = property_value_to_json(&PropertyValue::sparse_vector(sparse));
+            let obj = json
+                .as_object()
+                .expect("sparse vector must render as object");
+            assert_eq!(obj.get("indices"), Some(&serde_json::json!([1, 4])));
+            assert_eq!(obj.get("dimensions"), Some(&serde_json::json!(8)));
+            let values = obj
+                .get("values")
+                .and_then(|v| v.as_array())
+                .expect("values array");
+            assert_eq!(values.len(), 2);
+            assert!((values[0].as_f64().unwrap() - 0.5).abs() < 1e-6);
+        }
+
+        // --- property_map_to_json: key/value round-trip ---
+
+        #[test]
+        #[serial_test::serial]
+        fn property_map_to_json_roundtrips_keys_and_values() {
+            // kills: key resolution / value drops (touches GLOBAL_INTERNER, so serial).
+            let map = PropertyMapBuilder::new()
+                .insert("k1", "v1")
+                .insert("k2", 7i64)
+                .build();
+            let json = property_map_to_json(&map);
+            let obj = json.as_object().expect("expected JSON object");
+            assert_eq!(obj.len(), 2);
+            assert_eq!(obj.get("k1"), Some(&serde_json::json!("v1")));
+            assert_eq!(obj.get("k2"), Some(&serde_json::json!(7)));
+        }
+
+        // --- node_to_json / edge_to_json: field fidelity (kills field-drop stubs) ---
+
+        #[test]
+        #[serial_test::serial]
+        fn node_to_json_contains_id_label_and_properties() {
+            // kills: dropping/mislabeling the id, label, or properties fields.
+            let db = AletheiaDB::new().unwrap();
+            let id = db
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Alice").build(),
+                )
+                .unwrap();
+            let node = db.get_node(id).unwrap();
+            let json = node_to_json(&node);
+            assert_eq!(json.get("id"), Some(&serde_json::json!(id.as_u64())));
+            assert_eq!(json.get("label"), Some(&serde_json::json!("Person")));
+            assert_eq!(
+                json.get("properties").and_then(|p| p.get("name")),
+                Some(&serde_json::json!("Alice"))
+            );
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn edge_to_json_contains_endpoints_label_and_properties() {
+            // kills: swapping/dropping source, target, id, label, or properties.
+            let db = AletheiaDB::new().unwrap();
+            let src = db.create_node("Person", PropertyMap::new()).unwrap();
+            let dst = db.create_node("Person", PropertyMap::new()).unwrap();
+            let edge_id = db
+                .create_edge(
+                    src,
+                    dst,
+                    "KNOWS",
+                    PropertyMapBuilder::new().insert("since", 2020i64).build(),
+                )
+                .unwrap();
+            let edge = db.get_edge(edge_id).unwrap();
+            let json = edge_to_json(&edge);
+            assert_eq!(json.get("id"), Some(&serde_json::json!(edge_id.as_u64())));
+            assert_eq!(json.get("label"), Some(&serde_json::json!("KNOWS")));
+            assert_eq!(json.get("source"), Some(&serde_json::json!(src.as_u64())));
+            assert_eq!(json.get("target"), Some(&serde_json::json!(dst.as_u64())));
+            assert_eq!(
+                json.get("properties").and_then(|p| p.get("since")),
+                Some(&serde_json::json!(2020))
+            );
+        }
+
+        // --- resolve_label: resolves a known interned label back to its string ---
+
+        #[test]
+        #[serial_test::serial]
+        fn resolve_label_returns_interned_string() {
+            // kills: resolve_label stubbed to the "<unknown-label>" fallback.
+            let db = AletheiaDB::new().unwrap();
+            let id = db.create_node("Widget", PropertyMap::new()).unwrap();
+            let node = db.get_node(id).unwrap();
+            assert_eq!(resolve_label(node.label), "Widget");
+        }
+
+        // --- parse_optional_properties: empty vs populated ---
+
+        #[test]
+        fn parse_optional_properties_defaults_empty() {
+            // kills: returning a non-empty map when no --properties is supplied.
+            let map = parse_optional_properties(&[]).unwrap();
+            assert!(map.is_empty());
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn parse_optional_properties_parses_supplied_json() {
+            // kills: ignoring the --properties value (interns keys, so serial).
+            let map = parse_optional_properties(&[
+                "--properties".to_string(),
+                r#"{"name":"Bob"}"#.to_string(),
+            ])
             .unwrap();
-        let node = db.get_node(id).unwrap();
-        let json = node_to_json(&node);
-        assert_eq!(json.get("id"), Some(&serde_json::json!(id.as_u64())));
-        assert_eq!(json.get("label"), Some(&serde_json::json!("Person")));
-        assert_eq!(
-            json.get("properties").and_then(|p| p.get("name")),
-            Some(&serde_json::json!("Alice"))
-        );
+            assert!(!map.is_empty());
+            let json = property_map_to_json(&map);
+            assert_eq!(json.get("name"), Some(&serde_json::json!("Bob")));
+        }
+
+        #[test]
+        fn parse_optional_properties_propagates_parse_error() {
+            // kills: swallowing a malformed --properties payload.
+            let err =
+                parse_optional_properties(&["--properties".to_string(), "not json".to_string()])
+                    .unwrap_err();
+            assert!(err.contains("invalid JSON"), "unexpected error: {err}");
+        }
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn edge_to_json_contains_endpoints_label_and_properties() {
-        // kills: swapping/dropping source, target, id, label, or properties.
-        let db = AletheiaDB::new().unwrap();
-        let src = db.create_node("Person", PropertyMap::new()).unwrap();
-        let dst = db.create_node("Person", PropertyMap::new()).unwrap();
-        let edge_id = db
-            .create_edge(
-                src,
-                dst,
-                "KNOWS",
-                PropertyMapBuilder::new().insert("since", 2020i64).build(),
-            )
-            .unwrap();
-        let edge = db.get_edge(edge_id).unwrap();
-        let json = edge_to_json(&edge);
-        assert_eq!(json.get("id"), Some(&serde_json::json!(edge_id.as_u64())));
-        assert_eq!(json.get("label"), Some(&serde_json::json!("KNOWS")));
-        assert_eq!(json.get("source"), Some(&serde_json::json!(src.as_u64())));
-        assert_eq!(json.get("target"), Some(&serde_json::json!(dst.as_u64())));
-        assert_eq!(
-            json.get("properties").and_then(|p| p.get("since")),
-            Some(&serde_json::json!(2020))
-        );
-    }
+    /// CLI smoke tests for the Parquet import/export verbs (Issue #3364).
+    #[cfg(all(test, feature = "parquet"))]
+    mod parquet_cli_tests {
+        use super::parquet_io;
+        use tempfile::TempDir;
 
-    // --- resolve_label: resolves a known interned label back to its string ---
+        fn s(v: &str) -> String {
+            v.to_string()
+        }
 
-    #[test]
-    #[serial_test::serial]
-    fn resolve_label_returns_interned_string() {
-        // kills: resolve_label stubbed to the "<unknown-label>" fallback.
-        let db = AletheiaDB::new().unwrap();
-        let id = db.create_node("Widget", PropertyMap::new()).unwrap();
-        let node = db.get_node(id).unwrap();
-        assert_eq!(resolve_label(node.label), "Widget");
-    }
+        #[test]
+        fn import_missing_args_returns_usage_error() {
+            let err = parquet_io::handle_import(vec![]).unwrap_err();
+            assert!(err.contains("usage"), "got: {err}");
+        }
 
-    // --- parse_optional_properties: empty vs populated ---
+        #[test]
+        fn export_missing_args_returns_usage_error() {
+            let err = parquet_io::handle_export(vec![]).unwrap_err();
+            assert!(err.contains("usage"), "got: {err}");
+        }
 
-    #[test]
-    fn parse_optional_properties_defaults_empty() {
-        // kills: returning a non-empty map when no --properties is supplied.
-        let map = parse_optional_properties(&[]).unwrap();
-        assert!(map.is_empty());
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn parse_optional_properties_parses_supplied_json() {
-        // kills: ignoring the --properties value (interns keys, so serial).
-        let map = parse_optional_properties(&[
-            "--properties".to_string(),
-            r#"{"name":"Bob"}"#.to_string(),
-        ])
-        .unwrap();
-        assert!(!map.is_empty());
-        let json = property_map_to_json(&map);
-        assert_eq!(json.get("name"), Some(&serde_json::json!("Bob")));
-    }
-
-    #[test]
-    fn parse_optional_properties_propagates_parse_error() {
-        // kills: swallowing a malformed --properties payload.
-        let err = parse_optional_properties(&["--properties".to_string(), "not json".to_string()])
+        #[test]
+        fn import_requires_parquet_format() {
+            let err = parquet_io::handle_import(vec![
+                s("nodes.parquet"),
+                s("--label"),
+                s("Person"),
+                s("--key"),
+                s("id"),
+            ])
             .unwrap_err();
-        assert!(err.contains("invalid JSON"), "unexpected error: {err}");
-    }
-}
-
-/// CLI smoke tests for the Parquet import/export verbs (Issue #3364).
-#[cfg(all(test, feature = "parquet"))]
-mod parquet_cli_tests {
-    use super::parquet_io;
-    use tempfile::TempDir;
-
-    fn s(v: &str) -> String {
-        v.to_string()
-    }
-
-    #[test]
-    fn import_missing_args_returns_usage_error() {
-        let err = parquet_io::handle_import(vec![]).unwrap_err();
-        assert!(err.contains("usage"), "got: {err}");
-    }
-
-    #[test]
-    fn export_missing_args_returns_usage_error() {
-        let err = parquet_io::handle_export(vec![]).unwrap_err();
-        assert!(err.contains("usage"), "got: {err}");
-    }
-
-    #[test]
-    fn import_requires_parquet_format() {
-        let err = parquet_io::handle_import(vec![
-            s("nodes.parquet"),
-            s("--label"),
-            s("Person"),
-            s("--key"),
-            s("id"),
-        ])
-        .unwrap_err();
-        assert!(err.contains("--format"), "got: {err}");
-    }
-
-    #[test]
-    fn export_current_writes_both_files() {
-        let dir = TempDir::new().unwrap();
-        let prefix = dir.path().join("out").display().to_string();
-        parquet_io::handle_export(vec![prefix.clone(), s("--format"), s("parquet")])
-            .expect("export should succeed");
-        assert!(std::path::Path::new(&format!("{prefix}.nodes.parquet")).exists());
-        assert!(std::path::Path::new(&format!("{prefix}.edges.parquet")).exists());
-    }
-
-    #[test]
-    fn export_history_writes_both_files() {
-        let dir = TempDir::new().unwrap();
-        let prefix = dir.path().join("hist").display().to_string();
-        parquet_io::handle_export(vec![
-            prefix.clone(),
-            s("--format"),
-            s("parquet"),
-            s("--mode"),
-            s("history"),
-        ])
-        .expect("history export should succeed");
-        assert!(std::path::Path::new(&format!("{prefix}.node_history.parquet")).exists());
-        assert!(std::path::Path::new(&format!("{prefix}.edge_history.parquet")).exists());
-    }
-
-    /// A mixed node+edge import where a node `--property` is present must succeed:
-    /// node and edge property mappings are scoped independently (`--property` vs
-    /// `--edge-property`), so the node-only `name` column is not applied to edges
-    /// (which have no such column). Regression test for the guide's mixed example.
-    #[test]
-    fn import_mixed_nodes_and_edges_with_node_property_succeeds() {
-        use arrow::array::{ArrayRef, RecordBatch, StringArray};
-        use std::sync::Arc;
-
-        fn write_parquet(path: &std::path::Path, batch: &RecordBatch) {
-            let file = std::fs::File::create(path).unwrap();
-            let mut writer =
-                ::parquet::arrow::ArrowWriter::try_new(file, batch.schema(), None).unwrap();
-            writer.write(batch).unwrap();
-            writer.close().unwrap();
+            assert!(err.contains("--format"), "got: {err}");
         }
 
-        let dir = TempDir::new().unwrap();
-        let nodes_path = dir.path().join("nodes.parquet");
-        let edges_path = dir.path().join("edges.parquet");
+        #[test]
+        fn export_current_writes_both_files() {
+            let dir = TempDir::new().unwrap();
+            let prefix = dir.path().join("out").display().to_string();
+            parquet_io::handle_export(vec![prefix.clone(), s("--format"), s("parquet")])
+                .expect("export should succeed");
+            assert!(std::path::Path::new(&format!("{prefix}.nodes.parquet")).exists());
+            assert!(std::path::Path::new(&format!("{prefix}.edges.parquet")).exists());
+        }
 
-        // Node file has a `name` column (a node-only property).
-        let node_batch = RecordBatch::try_from_iter(vec![
-            (
-                "id",
-                Arc::new(StringArray::from(vec!["alice", "bob"])) as ArrayRef,
-            ),
-            (
-                "name",
-                Arc::new(StringArray::from(vec!["Alice", "Bob"])) as ArrayRef,
-            ),
-        ])
-        .unwrap();
-        write_parquet(&nodes_path, &node_batch);
+        #[test]
+        fn export_history_writes_both_files() {
+            let dir = TempDir::new().unwrap();
+            let prefix = dir.path().join("hist").display().to_string();
+            parquet_io::handle_export(vec![
+                prefix.clone(),
+                s("--format"),
+                s("parquet"),
+                s("--mode"),
+                s("history"),
+            ])
+            .expect("history export should succeed");
+            assert!(std::path::Path::new(&format!("{prefix}.node_history.parquet")).exists());
+            assert!(std::path::Path::new(&format!("{prefix}.edge_history.parquet")).exists());
+        }
 
-        // Edge file has NO `name` column; a shared node `--property name` would abort.
-        let edge_batch = RecordBatch::try_from_iter(vec![
-            (
-                "src",
-                Arc::new(StringArray::from(vec!["alice"])) as ArrayRef,
-            ),
-            ("dst", Arc::new(StringArray::from(vec!["bob"])) as ArrayRef),
-        ])
-        .unwrap();
-        write_parquet(&edges_path, &edge_batch);
+        /// A mixed node+edge import where a node `--property` is present must succeed:
+        /// node and edge property mappings are scoped independently (`--property` vs
+        /// `--edge-property`), so the node-only `name` column is not applied to edges
+        /// (which have no such column). Regression test for the guide's mixed example.
+        #[test]
+        fn import_mixed_nodes_and_edges_with_node_property_succeeds() {
+            use arrow::array::{ArrayRef, RecordBatch, StringArray};
+            use std::sync::Arc;
 
-        parquet_io::handle_import(vec![
-            s(nodes_path.to_str().unwrap()),
-            s("--format"),
-            s("parquet"),
-            s("--label"),
-            s("Person"),
-            s("--key"),
-            s("id"),
-            s("--property"),
-            s("name:string"),
-            s("--edges"),
-            s(edges_path.to_str().unwrap()),
-            s("--edge-label"),
-            s("KNOWS"),
-            s("--source-key"),
-            s("src"),
-            s("--target-key"),
-            s("dst"),
-        ])
-        .expect("mixed import with a node --property must succeed");
+            fn write_parquet(path: &std::path::Path, batch: &RecordBatch) {
+                let file = std::fs::File::create(path).unwrap();
+                let mut writer =
+                    ::parquet::arrow::ArrowWriter::try_new(file, batch.schema(), None).unwrap();
+                writer.write(batch).unwrap();
+                writer.close().unwrap();
+            }
+
+            let dir = TempDir::new().unwrap();
+            let nodes_path = dir.path().join("nodes.parquet");
+            let edges_path = dir.path().join("edges.parquet");
+
+            // Node file has a `name` column (a node-only property).
+            let node_batch = RecordBatch::try_from_iter(vec![
+                (
+                    "id",
+                    Arc::new(StringArray::from(vec!["alice", "bob"])) as ArrayRef,
+                ),
+                (
+                    "name",
+                    Arc::new(StringArray::from(vec!["Alice", "Bob"])) as ArrayRef,
+                ),
+            ])
+            .unwrap();
+            write_parquet(&nodes_path, &node_batch);
+
+            // Edge file has NO `name` column; a shared node `--property name` would abort.
+            let edge_batch = RecordBatch::try_from_iter(vec![
+                (
+                    "src",
+                    Arc::new(StringArray::from(vec!["alice"])) as ArrayRef,
+                ),
+                ("dst", Arc::new(StringArray::from(vec!["bob"])) as ArrayRef),
+            ])
+            .unwrap();
+            write_parquet(&edges_path, &edge_batch);
+
+            parquet_io::handle_import(vec![
+                s(nodes_path.to_str().unwrap()),
+                s("--format"),
+                s("parquet"),
+                s("--label"),
+                s("Person"),
+                s("--key"),
+                s("id"),
+                s("--property"),
+                s("name:string"),
+                s("--edges"),
+                s(edges_path.to_str().unwrap()),
+                s("--edge-label"),
+                s("KNOWS"),
+                s("--source-key"),
+                s("src"),
+                s("--target-key"),
+                s("dst"),
+            ])
+            .expect("mixed import with a node --property must succeed");
+        }
+
+        #[test]
+        fn export_rejects_unknown_mode() {
+            let dir = TempDir::new().unwrap();
+            let prefix = dir.path().join("out").display().to_string();
+            let err = parquet_io::handle_export(vec![
+                prefix,
+                s("--format"),
+                s("parquet"),
+                s("--mode"),
+                s("bogus"),
+            ])
+            .unwrap_err();
+            assert!(err.contains("mode"), "got: {err}");
+        }
     }
 
-    #[test]
-    fn export_rejects_unknown_mode() {
-        let dir = TempDir::new().unwrap();
-        let prefix = dir.path().join("out").display().to_string();
-        let err = parquet_io::handle_export(vec![
-            prefix,
-            s("--format"),
-            s("parquet"),
-            s("--mode"),
-            s("bogus"),
-        ])
-        .unwrap_err();
-        assert!(err.contains("mode"), "got: {err}");
-    }
-}
+    /// CLI smoke tests for the APOC Cypher-script dump import verb (Issue #3356,
+    /// AC1 — the CLI half). Exercises the `import` dispatch end-to-end: argument
+    /// parsing, `.cypher`/`--format` routing to [`handle_import_cypher`], opening
+    /// the database, running the import, and rendering the fidelity report.
+    #[cfg(all(test, feature = "import"))]
+    mod cypher_cli_tests {
+        use std::io::Write;
+        use tempfile::TempDir;
 
-/// CLI smoke tests for the APOC Cypher-script dump import verb (Issue #3356,
-/// AC1 — the CLI half). Exercises the `import` dispatch end-to-end: argument
-/// parsing, `.cypher`/`--format` routing to [`handle_import_cypher`], opening
-/// the database, running the import, and rendering the fidelity report.
-#[cfg(all(test, feature = "import"))]
-mod cypher_cli_tests {
-    use std::io::Write;
-    use tempfile::TempDir;
+        fn s(v: &str) -> String {
+            v.to_string()
+        }
 
-    fn s(v: &str) -> String {
-        v.to_string()
-    }
-
-    const DUMP: &str = "\
+        const DUMP: &str = "\
 :begin
 CREATE (:`Person`:`UNIQUE IMPORT LABEL` {`name`:\"Alice\", `UNIQUE IMPORT ID`:0});
 CREATE (:`Person`:`UNIQUE IMPORT LABEL` {`name`:\"Bob\", `UNIQUE IMPORT ID`:1});
@@ -4332,134 +4381,137 @@ MATCH (a:`UNIQUE IMPORT LABEL`{`UNIQUE IMPORT ID`:0}), (b:`UNIQUE IMPORT LABEL`{
 :commit
 ";
 
-    fn write_dump(dir: &TempDir, name: &str) -> String {
-        let path = dir.path().join(name);
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(DUMP.as_bytes()).unwrap();
-        path.display().to_string()
+        fn write_dump(dir: &TempDir, name: &str) -> String {
+            let path = dir.path().join(name);
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(DUMP.as_bytes()).unwrap();
+            path.display().to_string()
+        }
+
+        /// A `.cypher` input routes through the dedicated importer end-to-end and
+        /// the `--report` file captures the fidelity report.
+        #[test]
+        fn import_cypher_file_end_to_end_writes_report() {
+            let dir = TempDir::new().unwrap();
+            let dump = write_dump(&dir, "graph.cypher");
+            let report = dir.path().join("report.json").display().to_string();
+            super::handle_import(vec![s("--nodes"), dump, s("--report"), report.clone()])
+                .expect("cypher import via CLI dispatch should succeed");
+            let json = std::fs::read_to_string(&report).expect("report file written");
+            let v: serde_json::Value = serde_json::from_str(&json).expect("valid report JSON");
+            assert_eq!(v["nodes_imported"], 2);
+            assert_eq!(v["relationships_imported"], 1);
+            assert_eq!(v["zero_loss"], true);
+        }
+
+        /// `--format neo4j-cypher` routes to the cypher handler even when the file
+        /// does not carry a `.cypher` extension.
+        #[test]
+        fn import_format_neo4j_cypher_routes_to_handler() {
+            let dir = TempDir::new().unwrap();
+            let dump = write_dump(&dir, "graph.txt");
+            super::handle_import(vec![s("--format"), s("neo4j-cypher"), s("--nodes"), dump])
+                .expect("--format neo4j-cypher should import");
+        }
+
+        /// Two dump files is a usage error: one apoc dump holds both nodes and
+        /// relationships. (Fails during argument validation, before opening a db.)
+        #[test]
+        fn import_cypher_rejects_multiple_dump_files() {
+            let dir = TempDir::new().unwrap();
+            let a = write_dump(&dir, "a.cypher");
+            let b = write_dump(&dir, "b.cypher");
+            let err = super::handle_import(vec![s("--nodes"), a, s("--nodes"), b]).unwrap_err();
+            assert!(err.contains("single dump file"), "got: {err}");
+        }
     }
 
-    /// A `.cypher` input routes through the dedicated importer end-to-end and
-    /// the `--report` file captures the fidelity report.
-    #[test]
-    fn import_cypher_file_end_to_end_writes_report() {
-        let dir = TempDir::new().unwrap();
-        let dump = write_dump(&dir, "graph.cypher");
-        let report = dir.path().join("report.json").display().to_string();
-        super::handle_import(vec![s("--nodes"), dump, s("--report"), report.clone()])
-            .expect("cypher import via CLI dispatch should succeed");
-        let json = std::fs::read_to_string(&report).expect("report file written");
-        let v: serde_json::Value = serde_json::from_str(&json).expect("valid report JSON");
-        assert_eq!(v["nodes_imported"], 2);
-        assert_eq!(v["relationships_imported"], 1);
-        assert_eq!(v["zero_loss"], true);
-    }
+    #[cfg(test)]
+    mod completions_tests {
+        use super::build_cli;
+        use clap::ValueEnum as _;
 
-    /// `--format neo4j-cypher` routes to the cypher handler even when the file
-    /// does not carry a `.cypher` extension.
-    #[test]
-    fn import_format_neo4j_cypher_routes_to_handler() {
-        let dir = TempDir::new().unwrap();
-        let dump = write_dump(&dir, "graph.txt");
-        super::handle_import(vec![s("--format"), s("neo4j-cypher"), s("--nodes"), dump])
-            .expect("--format neo4j-cypher should import");
-    }
+        // The ungated top-level command set the real dispatcher (`run()`) routes,
+        // plus the new `completions` verb. This is the drift guard: if a command is
+        // added/removed from the hand-rolled `run()` match without updating the
+        // clap mirror, this list and the mirror drift apart and the exact
+        // set-equality assertion below fails.
+        //
+        // MUST be edited in lockstep with the ungated arms of run()'s match and
+        // build_cli()'s ungated subcommands.
+        const EXPECTED_UNGATED: &[&str] = &[
+            "demo",
+            "node",
+            "edge",
+            "traverse",
+            "daemon",
+            "backup",
+            "restore",
+            "verify",
+            "keys",
+            "encryption",
+            "import",
+            "completions",
+        ];
 
-    /// Two dump files is a usage error: one apoc dump holds both nodes and
-    /// relationships. (Fails during argument validation, before opening a db.)
-    #[test]
-    fn import_cypher_rejects_multiple_dump_files() {
-        let dir = TempDir::new().unwrap();
-        let a = write_dump(&dir, "a.cypher");
-        let b = write_dump(&dir, "b.cypher");
-        let err = super::handle_import(vec![s("--nodes"), a, s("--nodes"), b]).unwrap_err();
-        assert!(err.contains("single dump file"), "got: {err}");
-    }
-}
+        // Verbs that appear in the clap mirror only under a feature flag; they are
+        // excluded from the ungated set-equality check so the guard holds under any
+        // feature configuration.
+        const FEATURE_GATED_VERBS: &[&str] = &[
+            "export",
+            "audit-keygen",
+            "audit-export",
+            "audit-verify",
+            "audit-render",
+            "designate-subject",
+            "erase-subject",
+        ];
 
-#[cfg(test)]
-mod completions_tests {
-    use super::build_cli;
-    use clap::ValueEnum as _;
+        /// `clap_complete::generate` yields non-empty output for every shell,
+        /// exercised purely (no process spawn).
+        #[test]
+        fn generates_completions_for_every_shell() {
+            for shell in clap_complete::Shell::value_variants() {
+                let mut buf: Vec<u8> = Vec::new();
+                clap_complete::generate(*shell, &mut build_cli(), "aletheia", &mut buf);
+                assert!(
+                    !buf.is_empty(),
+                    "completion script for {shell:?} must be non-empty"
+                );
+                let text = String::from_utf8_lossy(&buf);
+                assert!(
+                    text.contains("aletheia"),
+                    "completion script for {shell:?} must reference the binary name"
+                );
+            }
+        }
 
-    // The ungated top-level command set the real dispatcher (`run()`) routes,
-    // plus the new `completions` verb. This is the drift guard: if a command is
-    // added/removed from the hand-rolled `run()` match without updating the
-    // clap mirror, this list and the mirror drift apart and the exact
-    // set-equality assertion below fails.
-    //
-    // MUST be edited in lockstep with the ungated arms of run()'s match and
-    // build_cli()'s ungated subcommands.
-    const EXPECTED_UNGATED: &[&str] = &[
-        "demo",
-        "node",
-        "edge",
-        "traverse",
-        "daemon",
-        "backup",
-        "restore",
-        "verify",
-        "keys",
-        "encryption",
-        "import",
-        "completions",
-    ];
+        /// DRIFT GUARD: the clap mirror's ungated subcommand set must EXACTLY equal
+        /// the real dispatcher's ungated command surface — no missing, no extra.
+        /// clap's auto-injected `help` verb and the feature-gated verbs are excluded
+        /// so the comparison is over exactly the ungated surface.
+        #[test]
+        fn mirror_covers_ungated_dispatch_surface() {
+            use std::collections::BTreeSet;
 
-    // Verbs that appear in the clap mirror only under a feature flag; they are
-    // excluded from the ungated set-equality check so the guard holds under any
-    // feature configuration.
-    const FEATURE_GATED_VERBS: &[&str] = &[
-        "export",
-        "audit-keygen",
-        "audit-export",
-        "audit-verify",
-        "audit-render",
-        "designate-subject",
-        "erase-subject",
-    ];
+            let cli = build_cli();
+            let actual: BTreeSet<&str> = cli
+                .get_subcommands()
+                .map(|c| c.get_name())
+                .filter(|name| *name != "help")
+                .filter(|name| !FEATURE_GATED_VERBS.contains(name))
+                .collect();
+            let expected: BTreeSet<&str> = EXPECTED_UNGATED.iter().copied().collect();
 
-    /// `clap_complete::generate` yields non-empty output for every shell,
-    /// exercised purely (no process spawn).
-    #[test]
-    fn generates_completions_for_every_shell() {
-        for shell in clap_complete::Shell::value_variants() {
-            let mut buf: Vec<u8> = Vec::new();
-            clap_complete::generate(*shell, &mut build_cli(), "aletheia", &mut buf);
+            let missing: Vec<&&str> = expected.difference(&actual).collect();
+            let extra: Vec<&&str> = actual.difference(&expected).collect();
             assert!(
-                !buf.is_empty(),
-                "completion script for {shell:?} must be non-empty"
-            );
-            let text = String::from_utf8_lossy(&buf);
-            assert!(
-                text.contains("aletheia"),
-                "completion script for {shell:?} must reference the binary name"
+                missing.is_empty() && extra.is_empty(),
+                "clap mirror ungated subcommand set drifted from EXPECTED_UNGATED: \
+             missing from mirror={missing:?}, extra in mirror={extra:?}"
             );
         }
     }
 
-    /// DRIFT GUARD: the clap mirror's ungated subcommand set must EXACTLY equal
-    /// the real dispatcher's ungated command surface — no missing, no extra.
-    /// clap's auto-injected `help` verb and the feature-gated verbs are excluded
-    /// so the comparison is over exactly the ungated surface.
-    #[test]
-    fn mirror_covers_ungated_dispatch_surface() {
-        use std::collections::BTreeSet;
-
-        let cli = build_cli();
-        let actual: BTreeSet<&str> = cli
-            .get_subcommands()
-            .map(|c| c.get_name())
-            .filter(|name| *name != "help")
-            .filter(|name| !FEATURE_GATED_VERBS.contains(name))
-            .collect();
-        let expected: BTreeSet<&str> = EXPECTED_UNGATED.iter().copied().collect();
-
-        let missing: Vec<&&str> = expected.difference(&actual).collect();
-        let extra: Vec<&&str> = actual.difference(&expected).collect();
-        assert!(
-            missing.is_empty() && extra.is_empty(),
-            "clap mirror ungated subcommand set drifted from EXPECTED_UNGATED: \
-             missing from mirror={missing:?}, extra in mirror={extra:?}"
-        );
-    }
+    // End of `native_cli` module (wasm32-gated).
 }

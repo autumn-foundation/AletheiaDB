@@ -114,6 +114,7 @@ use crate::storage::wal::{LSN, WalEntry, WalOperation};
 /// # Ok(())
 /// # }
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn replay_wal_into_storage(
     wal: &ConcurrentWalSystem,
     current: &CurrentStorage,
@@ -131,6 +132,7 @@ pub(crate) fn replay_wal_into_storage(
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn replay_wal_into_storage_with_constraints(
     wal: &ConcurrentWalSystem,
     current: &CurrentStorage,

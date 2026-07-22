@@ -42,9 +42,20 @@ pub mod constraint_builder;
 /// reuses the audit Ed25519 signing key, so the module needs `crate::audit`.
 #[cfg(feature = "audit-export")]
 pub mod crypto_shred;
+/// Crash-safe durable file write primitive (temp → fsync → rename → dir fsync).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod durable_write;
 /// Encrypted → plaintext migration engine — `encryption disable` (Issue #3616 PR4).
+///
+/// Disk/encryption migration engine (redb cold tier + index re-encryption);
+/// absent on the wasm32 ephemeral profile.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod encryption_disable;
 /// Plaintext → encrypted-at-rest migration engine — `encryption enable` (Issue #3616 PR3).
+///
+/// Disk/encryption migration engine (redb cold tier + index persistence worker);
+/// absent on the wasm32 ephemeral profile.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod encryption_enable;
 /// Durable encryption-state authority — `{data_dir}/encryption.state` (Issue #3616).
 pub(crate) mod encryption_state;
@@ -72,6 +83,12 @@ pub mod pitr;
 /// Query builder and executor hooks.
 pub mod query;
 /// Index-layer key rotation orchestration (Issue #488).
+///
+/// Disk/encryption key-rotation engine (redb cold tier + index re-encryption);
+/// absent on the wasm32 ephemeral profile. The shared crash-safe file-write
+/// primitive lives in [`durable_write`], which is likewise a native-only
+/// durability concern.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod rotation;
 /// Graph schema discovery (labels, edge types, property keys).
 pub mod schema;
@@ -253,6 +270,9 @@ pub struct AletheiaDB {
     /// Persistence mutation tracking
     pub(crate) persistence_tracker: Option<Arc<PersistenceTracker>>,
     /// Background persistence thread health flag - set to true if thread panics or stops
+    // Read only by the native-only background-persistence / encryption engines; on the
+    // wasm32 ephemeral profile it is constructed but never read.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) persistence_thread_stopped: Arc<std::sync::atomic::AtomicBool>,
     /// Background persistence thread handle (if enabled) - used to join thread on shutdown
     pub(crate) persistence_thread_handle: Option<std::thread::JoinHandle<()>>,
@@ -261,6 +281,8 @@ pub struct AletheiaDB {
     /// Encryption configuration used at startup (retained for key rotation,
     /// Issue #488: re-sourcing the current MEK to guard against rotating to the
     /// same key). `None` when encryption is disabled.
+    // Read only by the native-only key-rotation / encryption-enable-disable engines.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) encryption_config: Option<crate::encryption::config::EncryptionConfig>,
     /// The AEAD algorithm from `config.encryption.algorithm`, retained REGARDLESS
     /// of whether encryption is currently enabled (Issue #3616 PR3). A plaintext
@@ -271,6 +293,8 @@ pub struct AletheiaDB {
     /// identical cipher. On the interrupted-enable resume path this also keeps the
     /// wrap passes in lockstep with the ciphers `open()` built from the same config
     /// algorithm.
+    // Read only by the native-only encryption-enable/disable engines.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) configured_encryption_algorithm: crate::encryption::factory::Algorithm,
     /// Uniqueness constraint registry (declarations + reservation index) plus
     /// property-type / required-key schema constraints (Issue #3378).

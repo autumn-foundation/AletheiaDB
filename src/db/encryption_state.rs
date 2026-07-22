@@ -70,11 +70,13 @@ use crate::encryption::factory::Algorithm;
 /// falls back to the config algorithm). An unknown version fails closed (never
 /// guessed). A build compiled WITHOUT `serde` emits `version=2` and still refuses
 /// secret-backed sources, preserving prior behavior.
+#[cfg(not(target_arch = "wasm32"))]
 const ENCRYPTION_STATE_VERSION: u32 = if cfg!(feature = "serde") { 3 } else { 2 };
 
 /// Serialize a concrete AEAD [`Algorithm`] to its stable on-disk token. `Auto` is
 /// resolved to its concrete form first so the pinned value is never ambiguous
 /// (the whole point of pinning is cross-host portability).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn algorithm_token(algorithm: Algorithm) -> &'static str {
     match algorithm.resolve() {
         Algorithm::Aes256Gcm => "aes256gcm",
@@ -139,6 +141,7 @@ impl EncryptionState {
     /// The producer is the `encryption enable` migration engine
     /// (`crate::db::encryption_enable`), which flips this authority durably as the
     /// binding step BEFORE clearing the migration ledger.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn enabled_with_algorithm(
         key_source: KeyProviderConfig,
         algorithm: Algorithm,
@@ -319,6 +322,7 @@ pub(crate) fn read_encryption_state_at(path: &Path) -> Result<Option<EncryptionS
 /// authority to `enabled` as the binding step before clearing the ledger, and
 /// `resume_pending_enable` performs the same flip when finishing an interrupted
 /// enable.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn write_encryption_state_durable(
     data_dir: &Path,
     state: &EncryptionState,
@@ -355,7 +359,7 @@ pub(crate) fn write_encryption_state_durable(
 
     std::fs::create_dir_all(data_dir)
         .map_err(|e| StorageError::io_error(format!("Failed to create data dir: {e}")))?;
-    crate::db::rotation::write_durable(&encryption_state_path(data_dir), body.as_bytes())
+    crate::db::durable_write::write_durable(&encryption_state_path(data_dir), body.as_bytes())
 }
 
 /// Serialize the enabled authority's key SOURCE line(s).
@@ -377,7 +381,7 @@ fn serialize_key_source(source: &KeyProviderConfig) -> Result<String> {
 /// Non-serde fallback (`version=2`): the two-string File/Env form. Secret-backed
 /// sources are refused (they cannot round-trip without serde), preserving the
 /// prior behavior exactly.
-#[cfg(not(feature = "serde"))]
+#[cfg(all(not(feature = "serde"), not(target_arch = "wasm32")))]
 fn serialize_key_source(source: &KeyProviderConfig) -> Result<String> {
     let (kind, value) = match source {
         KeyProviderConfig::File { path } => ("file", path.to_string_lossy().into_owned()),

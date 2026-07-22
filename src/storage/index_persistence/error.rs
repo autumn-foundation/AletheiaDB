@@ -110,6 +110,7 @@ impl IndexPersistenceError {
     /// Every other variant is wrapped as a `PersistenceError(String)` carrying
     /// `context` (a transient I/O failure, a not-yet-supported property kind),
     /// exactly as before, so those stay on the normal retry cadence.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn into_persist_storage_error(
         self,
         context: &str,
