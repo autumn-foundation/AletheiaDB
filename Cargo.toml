@@ -920,3 +920,11 @@ name = "property_index"
 harness = false
 path = "benches/property_index.rs"
 required-features = []
+
+# Per-query resource limits (Issue #3368, AC6): fast-path overhead of the
+# engine-lane resource guard on under-limit queries (guard enabled-default vs
+# disabled, head-to-head on identical queries).
+[[bench]]
+name = "query_resource_limits"
+harness = false
+path = "benches/query_resource_limits.rs"

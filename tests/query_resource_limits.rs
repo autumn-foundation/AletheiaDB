@@ -2,7 +2,7 @@
 //!
 //! Covers `QueryBuilder::with_timeout`/`with_max_rows`/`with_memory_budget`,
 //! the `AletheiaDBConfig::query_limits` operator ceiling, and the
-//! `database_stats().resource_limits` observability surface.
+//! `AletheiaDB::query_limit_counters()` observability surface.
 
 use std::time::Duration;
 
@@ -174,21 +174,21 @@ fn default_db_is_unaffected_and_reports_zero_resource_limit_stats() {
         .expect("plain query on a default db must succeed");
     assert_eq!(rows.len(), 5);
 
-    let stats = db.stats();
-    assert_eq!(stats.resource_limits.timeout_terminations, 0);
-    assert_eq!(stats.resource_limits.memory_terminations, 0);
-    assert_eq!(stats.resource_limits.row_cap_terminations, 0);
-    assert_eq!(stats.resource_limits.override_rejections, 0);
+    let counters = db.query_limit_counters();
+    assert_eq!(counters.wall_clock_timeout, 0);
+    assert_eq!(counters.memory_bytes, 0);
+    assert_eq!(counters.result_rows, 0);
+    assert_eq!(counters.override_rejected, 0);
 }
 
-// ---- 5. stats().resource_limits.row_cap_terminations increments ----
+// ---- 5. query_limit_counters().result_rows increments ----
 
 #[test]
 fn row_cap_termination_increments_database_stats() {
     let db = AletheiaDB::new().expect("db");
     let hub = seed_star(&db, 10);
 
-    let before = db.stats().resource_limits.row_cap_terminations;
+    let before = db.query_limit_counters().result_rows;
 
     let results = db
         .query()
@@ -204,7 +204,7 @@ fn row_cap_termination_increments_database_stats() {
         }
     }
 
-    let after = db.stats().resource_limits.row_cap_terminations;
+    let after = db.query_limit_counters().result_rows;
     assert_eq!(after, before + 1);
 }
 

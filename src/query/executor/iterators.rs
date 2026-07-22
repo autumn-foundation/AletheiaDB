@@ -3343,24 +3343,38 @@ impl ResultIterator for ProvenanceFilterIterator {
     }
 }
 
-/// How often the wall-clock deadline is polled, in rows.
+/// Row count below which the wall-clock deadline is polled on *every* row, and
+/// at/above which it is polled once per [`DEADLINE_CHECK_STRIDE`] rows.
 ///
-/// `Instant::now()` is a ~15-25ns vDSO call; paying it on *every* row would
-/// tax a large benign scan (the AC6 "fast queries are not taxed" concern) once
-/// the generous default 30s deadline is in play. Instead the deadline is polled
-/// at row-index multiples of this stride (always including index 0, so an
-/// already-past deadline still short-circuits *before* the first pull). The
-/// cost of the clock read is therefore amortized `1/STRIDE` across a scan.
+/// This hybrid exists to reconcile two requirements that a single fixed stride
+/// cannot:
 ///
-/// The tradeoff is termination precision: cancellation is a row-boundary event,
-/// so an over-limit query can overshoot its deadline by up to the time needed to
-/// produce `STRIDE` more rows. For the pathological class this issue targets
-/// (deep traversals / cross products that emit *many fast rows*) that overshoot
-/// is tens of microseconds — far inside the ≤10% grace bound even for a 100ms
-/// timeout. A query whose *individual rows* each take longer than the grace
-/// budget (e.g. a single deep temporal reconstruction) can overshoot by one
-/// such row regardless of stride; that is the inherent floor of cooperative,
-/// row-granular cancellation and is documented as such.
+/// - **Correctness for slow, low-row-count queries** (e.g. a handful of deep
+///   temporal reconstructions, each taking many milliseconds). A pure stride
+///   would only re-poll the clock every `STRIDE` rows, so a query that produces
+///   *fewer than* `STRIDE` rows would be checked only at row 0 and then run to
+///   completion no matter how long it took — the deadline would never fire.
+///   Polling every row for the first `PRECISE_DEADLINE_ROWS` rows guarantees
+///   such a query is cut at the first row boundary past its deadline.
+/// - **Cheapness for large benign scans** (the AC6 "fast queries are not taxed"
+///   concern). `Instant::now()` is a ~15-25ns vDSO call; paying it on every one
+///   of a million rows would be a measurable throughput tax. Beyond
+///   `PRECISE_DEADLINE_ROWS` the query is, by definition, a *many-row* scan, so
+///   the clock read is amortized to `1/STRIDE`.
+const PRECISE_DEADLINE_ROWS: usize = 4096;
+
+/// Stride (in rows) at which the wall-clock deadline is polled once a scan has
+/// produced more than [`PRECISE_DEADLINE_ROWS`] rows. See that constant for the
+/// precision/overhead rationale.
+///
+/// Row index 0 always polls (so an already-past deadline short-circuits *before*
+/// the first pull). The residual precision tradeoff — cancellation is a
+/// row-boundary event, so a *many-fast-rows* scan can overshoot its deadline by
+/// up to the time to produce `STRIDE` more rows (tens of microseconds; far
+/// inside the ≤10% grace bound even for a 100ms timeout) — applies only in the
+/// amortized regime. A query whose *individual rows* each exceed the grace
+/// budget can overshoot by one such row regardless of stride: the inherent floor
+/// of cooperative, row-granular cancellation.
 const DEADLINE_CHECK_STRIDE: usize = 64;
 
 /// Cooperative-cancellation wrapper enforcing per-query resource limits
@@ -3452,13 +3466,15 @@ impl ResultIterator for ResourceGuardIterator {
         }
 
         // 1. Wall-clock timeout: checked BEFORE pulling from `inner`, so a
-        // query that has already exhausted its budget never does another
-        // unit of work. The clock read is amortized to one poll every
-        // `DEADLINE_CHECK_STRIDE` rows (index 0 always polls, so an already-past
-        // deadline short-circuits before the first pull). See the stride
-        // constant's docs for the precision/overhead tradeoff.
+        // query that has already exhausted its budget never does another unit of
+        // work. The clock is polled on every row for the first
+        // `PRECISE_DEADLINE_ROWS` rows (so a slow, low-row-count query is cut
+        // precisely) and once per `DEADLINE_CHECK_STRIDE` rows thereafter (so a
+        // large benign scan pays no per-row clock syscall). Row index 0 always
+        // polls. See the two constants' docs for the full rationale.
         if let Some(deadline) = self.deadline
-            && self.rows_emitted % DEADLINE_CHECK_STRIDE == 0
+            && (self.rows_emitted < PRECISE_DEADLINE_ROWS
+                || self.rows_emitted.is_multiple_of(DEADLINE_CHECK_STRIDE))
             && std::time::Instant::now() >= deadline
         {
             self.terminated = true;

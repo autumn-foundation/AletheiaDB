@@ -129,6 +129,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -153,6 +154,7 @@ use crate::core::{
 use crate::db::AletheiaDB;
 use crate::index::vector::{DistanceMetric, HnswConfig};
 use crate::query::executor::{EntityId as ResultEntityId, EntityResult};
+use crate::query::limits::QueryResourceLimits;
 
 use super::auth::{McpAuthConfig, SessionAuth};
 use super::batch::ApplyBatchRequest;
@@ -9868,6 +9870,44 @@ impl AletheiaMcpServer {
             Error::Query(QueryError::ExecutionError { message }) => {
                 self.query_error("runtime_error", &message, None, Some(language))
             }
+            // A per-query engine-lane resource limit was breached mid-drain
+            // (Issue #3368 cooperative enforcement): the executor's
+            // `ResourceGuardIterator` aborted the scan cooperatively rather
+            // than letting it run to completion. Surfaced with the same
+            // structured `details.{dimension, limit, consumed}` shape the
+            // MCP-surface timeout/byte-cap builders already use, so a caller
+            // branches on `details.dimension` identically regardless of
+            // which layer (MCP-surface or engine) caught the breach.
+            // `retriable` is threaded straight from the engine error: `true`
+            // only for the wall-clock dimension (a read-only re-run is
+            // safe), `false` for the memory-budget dimension (a re-run
+            // deterministically breaches again).
+            Error::Query(QueryError::ResourceExhausted {
+                dimension,
+                limit,
+                consumed,
+                retriable,
+            }) => {
+                let message = Error::Query(QueryError::ResourceExhausted {
+                    dimension,
+                    limit,
+                    consumed,
+                    retriable,
+                })
+                .to_string();
+                self.query_error_with_details(
+                    "runtime_error",
+                    McpErrorCode::ResourceExhausted,
+                    retriable,
+                    &message,
+                    Some(language),
+                    json!({
+                        "dimension": dimension,
+                        "limit": limit,
+                        "consumed": consumed,
+                    }),
+                )
+            }
             // Anything else keeps kind "runtime_error" (the tool's own
             // contract) but classifies code/retriable from the actual error,
             // so e.g. a timeout is UNAVAILABLE/retriable, not INTERNAL.
@@ -10356,6 +10396,60 @@ impl AletheiaMcpServer {
         )
     }
 
+    /// Derive the engine-lane [`QueryResourceLimits`] (Issue #3368 engine
+    /// core) that `execute_query_core` threads into the reconciled `_limited`
+    /// entry points, from the MCP surface's already-resolved `effective`
+    /// limits.
+    ///
+    /// **Deadline (cooperative timeout).** The caller-facing timeout is, and
+    /// remains, [`race_deadline`](Self::race_deadline)'s deterministic
+    /// `timeout_ms` race — every existing timeout test keeps observing exactly
+    /// that boundary. This method computes a SEPARATE, LATER deadline
+    /// (`engine_deadline_ms = timeout_ms + max(timeout_ms / 2, 100)`) handed to
+    /// the executor's [`ResourceGuardIterator`](crate::query::executor::ResourceGuardIterator)
+    /// so the DETACHED WORKER itself cooperatively self-cancels within a
+    /// bounded grace period after the caller has already timed out, instead of
+    /// running a (possibly pathological) query to completion on an abandoned
+    /// thread. This releases the worker's CPU and its in-flight slot promptly
+    /// (AC3 "releases its resources", AC8 neighbor protection) without
+    /// changing what the caller observes. `timeout_ms == 0` (unlimited) yields
+    /// `deadline: None`.
+    ///
+    /// **Memory.** `max_memory_bytes` is folded from the MCP-surface memory
+    /// budget (`effective.max_query_memory_bytes`, default-off / `0` =
+    /// unlimited under the default config — zero behavior change unless an
+    /// operator opts in), enforced by the SAME `ResourceGuardIterator` via its
+    /// real per-row [`estimate_row_bytes`](crate::query::limits::estimate_row_bytes)
+    /// accounting during the drain — a cooperative, mid-scan enforcement
+    /// distinct from (and additive to) the post-hoc serialized-response-size
+    /// proxy [`enforce_memory_budget`](Self::enforce_memory_budget) applies to
+    /// the wrapped read tools.
+    ///
+    /// **Rows.** Always `None` here: the `query` tool's existing
+    /// `take_n(row_limit + 1)` / `truncated: true` contract already owns row
+    /// truncation as a disclosed, successful response — turning that into an
+    /// engine-level error would be a behavior change, not an addition.
+    fn engine_query_limits(effective: EffectiveQueryLimits) -> QueryResourceLimits {
+        let deadline = if effective.timeout_ms > 0 {
+            let engine_deadline_ms = effective
+                .timeout_ms
+                .saturating_add(effective.timeout_ms.saturating_div(2).max(100));
+            Some(Instant::now() + Duration::from_millis(engine_deadline_ms))
+        } else {
+            None
+        };
+        let max_memory_bytes = if effective.max_query_memory_bytes > 0 {
+            Some(effective.max_query_memory_bytes)
+        } else {
+            None
+        };
+        QueryResourceLimits {
+            deadline,
+            max_rows: None,
+            max_memory_bytes,
+        }
+    }
+
     /// Execute the query, collect up to `row_limit` rows (disclosing truncation
     /// via `truncated`), serialize, and enforce the effective result-byte cap
     /// (Issue #3368).
@@ -10367,6 +10461,14 @@ impl AletheiaMcpServer {
     /// short-circuits to an error (which the budget shaper passes through
     /// untouched), while a within-cap response is then optionally shaped by the
     /// caller's own token budget with the #3353 disclosed ladder.
+    ///
+    /// The declarative execution itself now runs under the engine-lane
+    /// cooperative [`QueryResourceLimits`] derived by
+    /// [`engine_query_limits`](Self::engine_query_limits) (Issue #3368): a
+    /// breach surfaces as `Error::Query(QueryError::ResourceExhausted { .. })`,
+    /// mapped by [`map_query_error`](Self::map_query_error) into the same
+    /// structured `details.{dimension, limit, consumed}` envelope the
+    /// MCP-surface timeout/byte-cap builders already use.
     fn execute_query_core(
         &self,
         effective: EffectiveQueryLimits,
@@ -10376,6 +10478,7 @@ impl AletheiaMcpServer {
         scope: &Option<crate::core::namespace::NamespaceScope>,
     ) -> CallToolResult {
         let has_params = req.params.as_ref().is_some_and(|p| !p.is_empty());
+        let engine_limits = Self::engine_query_limits(effective);
 
         // Issue #3349: the query executes under the *reconciled* namespace read
         // scope. `scope` is the programmatic parameter `P` (`None` when omitted);
@@ -10395,19 +10498,25 @@ impl AletheiaMcpServer {
                         Some("aql"),
                     );
                 }
-                self.db.execute_aql_reconciled(&req.query, scope.clone())
+                self.db
+                    .execute_aql_reconciled_limited(&req.query, scope.clone(), engine_limits)
             }
             "cypher" => {
                 #[cfg(feature = "cypher")]
                 {
                     match self.json_to_cypher_params(req.params.as_ref()) {
                         Ok(params) if params.is_empty() => {
-                            self.db.execute_cypher_reconciled(&req.query, scope.clone())
+                            self.db.execute_cypher_reconciled_limited(
+                                &req.query,
+                                scope.clone(),
+                                engine_limits,
+                            )
                         }
-                        Ok(params) => self.db.execute_cypher_with_params_reconciled(
+                        Ok(params) => self.db.execute_cypher_with_params_reconciled_limited(
                             &req.query,
                             params,
                             scope.clone(),
+                            engine_limits,
                         ),
                         Err((parameter, reason)) => {
                             return self.query_error(
@@ -12912,6 +13021,74 @@ mod server_unit_tests {
         assert_eq!(error["retriable"], true, "got: {error}");
     }
 
+    /// A `QueryError::ResourceExhausted` for the memory dimension maps to a
+    /// non-retriable `RESOURCE_EXHAUSTED` `runtime_error` carrying
+    /// `details.{dimension, limit, consumed}` (Issue #3368 cooperative
+    /// enforcement).
+    #[test]
+    fn map_query_error_resource_exhausted_memory_yields_resource_exhausted_non_retriable() {
+        let server = make_server();
+        let payload = error_payload(
+            &server,
+            Error::Query(QueryError::ResourceExhausted {
+                dimension: "memory_bytes",
+                limit: 1024,
+                consumed: 2048,
+                retriable: false,
+            }),
+        );
+        assert_eq!(payload["kind"].as_str(), Some("runtime_error"), "{payload}");
+        assert_eq!(
+            payload["code"].as_str(),
+            Some("RESOURCE_EXHAUSTED"),
+            "{payload}"
+        );
+        assert_eq!(payload["retriable"].as_bool(), Some(false), "{payload}");
+        assert_eq!(
+            payload["details"]["dimension"].as_str(),
+            Some("memory_bytes"),
+            "{payload}"
+        );
+        assert_eq!(
+            payload["details"]["limit"].as_u64(),
+            Some(1024),
+            "{payload}"
+        );
+        assert_eq!(
+            payload["details"]["consumed"].as_u64(),
+            Some(2048),
+            "{payload}"
+        );
+    }
+
+    /// The wall-clock-timeout dimension of the same engine error is retriable
+    /// (a read-only re-run is safe), unlike the memory dimension above (Issue
+    /// #3368).
+    #[test]
+    fn map_query_error_resource_exhausted_timeout_yields_retriable() {
+        let server = make_server();
+        let payload = error_payload(
+            &server,
+            Error::Query(QueryError::ResourceExhausted {
+                dimension: "wall_clock_timeout",
+                limit: 500,
+                consumed: 501,
+                retriable: true,
+            }),
+        );
+        assert_eq!(
+            payload["code"].as_str(),
+            Some("RESOURCE_EXHAUSTED"),
+            "{payload}"
+        );
+        assert_eq!(payload["retriable"].as_bool(), Some(true), "{payload}");
+        assert_eq!(
+            payload["details"]["dimension"].as_str(),
+            Some("wall_clock_timeout"),
+            "{payload}"
+        );
+    }
+
     #[test]
     fn query_row_to_json_node_id_variant() {
         let server = make_server();
@@ -13674,6 +13851,87 @@ mod server_unit_tests {
             wrapped, bare,
             "the disabled-limits fast path must not alter the response"
         );
+    }
+
+    // =====================================================================
+    // `query` tool: cooperative engine-lane enforcement (Issue #3368 residue)
+    //
+    // Unlike the wrapped read tools above (post-hoc, response-size-based
+    // `enforce_memory_budget`), the `query` tool threads its effective limits
+    // straight into the executor's `ResourceGuardIterator` via the `_limited`
+    // reconciled entry points, so a breach is caught mid-drain with real
+    // per-row accounting and surfaces through `map_query_error`'s
+    // `ResourceExhausted` arm (query-tool `kind`/`language` envelope, unlike
+    // the neutral read-tool envelope).
+    // =====================================================================
+
+    /// A tiny operator-configured `default_max_query_memory_bytes` trips the
+    /// engine-lane guard on the very first row of an otherwise-ordinary AQL
+    /// `query` tool call, surfacing as a non-retriable `RESOURCE_EXHAUSTED`
+    /// error whose `details.dimension == "memory_bytes"`. Uses the inline
+    /// (`timeout_ms: 0`) path so only the memory dimension is under test.
+    #[test]
+    fn query_tool_engine_memory_budget_fails_closed() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let _root = seed_star(&db, 5);
+        let server = AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig {
+            default_timeout_ms: 0,             // inline path (no timeout race)
+            default_max_response_bytes: 0,     // no byte cap to interfere
+            max_response_bytes: 0,             // no ceiling to interfere
+            default_max_query_memory_bytes: 1, // tiny budget -> trips on row 1
+            max_query_memory_bytes: 0,         // no ceiling to interfere
+            ..super::QueryLimitsConfig::default()
+        });
+
+        let result = server.handle_query(serde_json::json!({
+            "language": "aql",
+            "query": "MATCH (n:Leaf) RETURN n",
+        }));
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "expected an engine-lane memory-budget error"
+        );
+        let val = parse(result);
+        let err = &val["error"];
+        assert_eq!(err["kind"].as_str(), Some("runtime_error"), "{val}");
+        assert_eq!(err["code"].as_str(), Some("RESOURCE_EXHAUSTED"), "{val}");
+        assert_eq!(err["retriable"].as_bool(), Some(false), "{val}");
+        assert_eq!(
+            err["details"]["dimension"].as_str(),
+            Some("memory_bytes"),
+            "{val}"
+        );
+        assert_eq!(err["details"]["limit"].as_u64(), Some(1), "{val}");
+        assert!(
+            err["details"]["consumed"].as_u64().unwrap_or(0) > 1,
+            "consumed must exceed the 1-byte cap: {val}"
+        );
+        assert_eq!(err["language"].as_str(), Some("aql"), "{val}");
+    }
+
+    /// Default config leaves the engine-lane memory budget off (`0` =
+    /// unlimited): an ordinary `query` tool call over the same seeded graph
+    /// succeeds and returns real rows, with zero behavior change from before
+    /// this feature landed.
+    #[test]
+    fn query_tool_default_config_memory_budget_off_returns_normal_results() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let _root = seed_star(&db, 5);
+        let server = AletheiaMcpServer::new(db); // default config
+
+        let result = server.handle_query(serde_json::json!({
+            "language": "aql",
+            "query": "MATCH (n:Leaf) RETURN n",
+        }));
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "default config must not engage the engine memory budget"
+        );
+        let val = parse(result);
+        assert_eq!(val["row_count"].as_u64(), Some(5), "{val}");
+        assert_eq!(val["truncated"].as_bool(), Some(false), "{val}");
     }
 
     // =====================================================================

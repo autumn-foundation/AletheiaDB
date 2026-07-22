@@ -7,6 +7,7 @@ use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::query::builder::state::Initial;
 use crate::query::executor::ExecutionConfig;
+use crate::query::limits::QueryResourceLimits;
 use crate::query::{Query, QueryBuilder, QueryExecutor, QueryPlanner, QueryResults};
 use std::sync::Arc;
 
@@ -107,6 +108,40 @@ impl AletheiaDB {
         self.execute_query(query)
     }
 
+    /// [`execute_aql_reconciled`](Self::execute_aql_reconciled), but executed
+    /// under already-resolved engine-lane resource `limits` (Issue #3368)
+    /// instead of the DB-config-resolved ones `execute_query` would compute.
+    ///
+    /// The MCP `query` tool uses this entry point (rather than the bare
+    /// `execute_aql_reconciled`) to thread its own effective
+    /// [`crate::mcp::limits::EffectiveQueryLimits`] — reinterpreted as engine
+    /// [`QueryResourceLimits`] — directly into the executor's cooperative
+    /// [`ResourceGuardIterator`](crate::query::executor::ResourceGuardIterator),
+    /// so the detached timeout-race worker self-cancels near its deadline
+    /// instead of running an unbounded query to completion.
+    ///
+    /// # Errors
+    ///
+    /// As [`execute_aql_reconciled`](Self::execute_aql_reconciled).
+    // Consumed by the MCP `query` tool (feature `mcp-server`) and unit tests;
+    // dead in a bare default-feature non-test lib build.
+    #[allow(dead_code)]
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub(crate) fn execute_aql_reconciled_limited(
+        &self,
+        query_string: &str,
+        programmatic: Option<crate::core::namespace::NamespaceScope>,
+        limits: QueryResourceLimits,
+    ) -> Result<QueryResults> {
+        let mut query = crate::query::parse_query(query_string)?;
+        let in_query = query.scope.take();
+        query.scope = Some(crate::core::namespace::reconcile_namespace_scope(
+            programmatic,
+            in_query,
+        )?);
+        self.execute_query_with_resolved_limits(query, limits)
+    }
+
     /// Create a new query builder for constructing hybrid queries.
     ///
     /// This is the entry point for the fluent query API that enables
@@ -181,6 +216,50 @@ impl AletheiaDB {
     /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn execute_query(&self, query: Query) -> Result<QueryResults> {
+        // Resolve the per-query engine-lane resource limits (Issue #3368
+        // public API) from the database's configured `EngineQueryLimitsConfig`
+        // and the query's own per-call override (if any), BEFORE planning: an
+        // over-ceiling override must never do any work, not even planning.
+        let resolved_limits = match self.query_limits.effective(query.limits.as_ref()) {
+            Ok(limits) => limits,
+            Err(e) => {
+                self.limit_counters.record_override_rejected();
+                return Err(QueryError::InvalidParameter {
+                    parameter: "limits".into(),
+                    reason: format!(
+                        "limit override for '{}' ({}) exceeds the maximum allowed ({})",
+                        e.dimension.as_str(),
+                        e.requested,
+                        e.ceiling
+                    ),
+                }
+                .into());
+            }
+        };
+        self.execute_query_with_resolved_limits(query, resolved_limits)
+    }
+
+    /// Plan and execute a query under already-resolved engine-lane resource
+    /// limits (Issue #3368), skipping [`execute_query`](Self::execute_query)'s
+    /// own DB-config-override resolution step.
+    ///
+    /// [`execute_query`] resolves `limits` from `self.query_limits` folded
+    /// with the query's own per-call override, then delegates here. Callers
+    /// that have already resolved their own effective limits from a different
+    /// source of truth — e.g. the MCP `query` tool's
+    /// [`crate::mcp::limits::QueryLimitsConfig`], via
+    /// [`execute_aql_reconciled_limited`](Self::execute_aql_reconciled_limited)
+    /// and its Cypher siblings — call this directly instead, so the two
+    /// resolution paths never fight over which one wins.
+    ///
+    /// Performs the same namespace-scope lift/validate + planning + executor
+    /// construction as `execute_query`, parameterized on `limits` instead of
+    /// resolving it internally.
+    pub(crate) fn execute_query_with_resolved_limits(
+        &self,
+        query: Query,
+        limits: QueryResourceLimits,
+    ) -> Result<QueryResults> {
         let result = (|| {
             #[cfg(feature = "observability")]
             let _span =
@@ -201,28 +280,6 @@ impl AletheiaDB {
                 self.validate_scope(scope)?;
             }
 
-            // Resolve the per-query engine-lane resource limits (Issue #3368
-            // public API) from the database's configured
-            // `EngineQueryLimitsConfig` and the query's own per-call override
-            // (if any), BEFORE planning: an over-ceiling override must never
-            // do any work, not even planning.
-            let resolved_limits = match self.query_limits.effective(query.limits.as_ref()) {
-                Ok(limits) => limits,
-                Err(e) => {
-                    self.limit_counters.record_override_rejected();
-                    return Err(QueryError::InvalidParameter {
-                        parameter: "limits".into(),
-                        reason: format!(
-                            "limit override for '{}' ({}) exceeds the maximum allowed ({})",
-                            e.dimension.as_str(),
-                            e.requested,
-                            e.ceiling
-                        ),
-                    }
-                    .into());
-                }
-            };
-
             // Use cached statistics for cost-based optimization
             // Statistics are shared across all queries for this database instance
             let planner = QueryPlanner::new(Arc::clone(&self.stats), Arc::clone(&self.current));
@@ -233,7 +290,7 @@ impl AletheiaDB {
                 Arc::clone(&self.current),
                 Arc::clone(&self.historical),
                 ExecutionConfig {
-                    limits: resolved_limits,
+                    limits,
                     counters: Some(Arc::clone(&self.limit_counters)),
                     ..ExecutionConfig::default()
                 },
@@ -558,8 +615,20 @@ impl AletheiaDB {
     /// Execute a Cypher string reconciling a *programmatic* namespace scope with
     /// the statement's own in-query `USE / IN NAMESPACE` clause (Issue #3349).
     ///
-    /// The MCP / HTTP `query` tool entry point: `Some(scope)` when the
-    /// `namespace` request parameter is present, `None` when omitted. See
+    /// Historically the MCP / HTTP `query` tool's entry point (`Some(scope)`
+    /// when the `namespace` request parameter is present, `None` when
+    /// omitted); the MCP `query` tool now calls
+    /// [`execute_cypher_reconciled_limited`](Self::execute_cypher_reconciled_limited)
+    /// instead (Issue #3368), so this DB-config-resolved-limits sibling is
+    /// kept `#[allow(dead_code)]` for API parity with
+    /// [`execute_aql_reconciled`](Self::execute_aql_reconciled) (still reached
+    /// via [`execute_aql_scoped`](Self::execute_aql_scoped) — Cypher's
+    /// scoped/`EXPLAIN`/`PROFILE` entry points bypass this string-level
+    /// wrapper and call
+    /// [`execute_cypher_execution_reconciled`](Self::execute_cypher_execution_reconciled)
+    /// directly on an already-planned [`crate::cypher::CypherExecution`]) and
+    /// as a stable direct-Rust-API surface for a future caller that wants
+    /// DB-config resolution rather than caller-supplied limits. See
     /// [`execute_aql_reconciled`](Self::execute_aql_reconciled) for the
     /// reconciliation contract.
     ///
@@ -567,6 +636,7 @@ impl AletheiaDB {
     ///
     /// As [`execute_cypher_scoped`](Self::execute_cypher_scoped).
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    #[allow(dead_code)]
     pub(crate) fn execute_cypher_reconciled(
         &self,
         query_string: &str,
@@ -580,12 +650,14 @@ impl AletheiaDB {
 
     /// Parameterized counterpart to
     /// [`execute_cypher_reconciled`](Self::execute_cypher_reconciled)
-    /// (Issue #3349).
+    /// (Issue #3349). See that method's doc for why this is
+    /// `#[allow(dead_code)]` since Issue #3368.
     ///
     /// # Errors
     ///
     /// As [`execute_cypher_scoped`](Self::execute_cypher_scoped).
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    #[allow(dead_code)]
     pub(crate) fn execute_cypher_with_params_reconciled(
         &self,
         query_string: &str,
@@ -595,6 +667,59 @@ impl AletheiaDB {
         self.execute_cypher_execution_reconciled(
             crate::cypher::plan_cypher_with_params(query_string, params)?,
             programmatic,
+        )
+    }
+
+    /// [`execute_cypher_reconciled`](Self::execute_cypher_reconciled), but
+    /// executed under already-resolved engine-lane resource `limits` (Issue
+    /// #3368). See
+    /// [`execute_aql_reconciled_limited`](Self::execute_aql_reconciled_limited)
+    /// for the rationale; this is its Cypher counterpart.
+    ///
+    /// `limits` is applied to the single-`Query` execution shape only (the
+    /// `EXPLAIN`/`PROFILE`/multi-variable/mutation shapes do not run through
+    /// [`execute_query`](Self::execute_query) at all, so there is nothing to
+    /// thread limits into for those — unchanged from
+    /// [`execute_cypher_reconciled`](Self::execute_cypher_reconciled)).
+    ///
+    /// # Errors
+    ///
+    /// As [`execute_cypher_scoped`](Self::execute_cypher_scoped).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    #[allow(dead_code)] // consumed by the MCP query tool (mcp-server) + tests
+    pub(crate) fn execute_cypher_reconciled_limited(
+        &self,
+        query_string: &str,
+        programmatic: Option<crate::core::namespace::NamespaceScope>,
+        limits: QueryResourceLimits,
+    ) -> Result<QueryResults> {
+        self.execute_cypher_execution_reconciled_limited(
+            crate::cypher::plan_cypher(query_string)?,
+            programmatic,
+            limits,
+        )
+    }
+
+    /// Parameterized counterpart to
+    /// [`execute_cypher_reconciled_limited`](Self::execute_cypher_reconciled_limited)
+    /// (Issue #3368 / #3349).
+    ///
+    /// # Errors
+    ///
+    /// As [`execute_cypher_scoped`](Self::execute_cypher_scoped).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    #[allow(dead_code)] // consumed by the MCP query tool (mcp-server) + tests
+    pub(crate) fn execute_cypher_with_params_reconciled_limited(
+        &self,
+        query_string: &str,
+        params: std::collections::HashMap<String, crate::cypher::CypherParameterValue>,
+        programmatic: Option<crate::core::namespace::NamespaceScope>,
+        limits: QueryResourceLimits,
+    ) -> Result<QueryResults> {
+        self.execute_cypher_execution_reconciled_limited(
+            crate::cypher::plan_cypher_with_params(query_string, params)?,
+            programmatic,
+            limits,
         )
     }
 
@@ -654,6 +779,66 @@ impl AletheiaDB {
         execution: crate::cypher::CypherExecution,
         programmatic: Option<crate::core::namespace::NamespaceScope>,
     ) -> Result<QueryResults> {
+        self.execute_cypher_execution_reconciled_inner(execution, programmatic, None)
+    }
+
+    /// [`execute_cypher_execution_reconciled`](Self::execute_cypher_execution_reconciled),
+    /// but the `CypherExecution::Query` arm runs under already-resolved
+    /// engine-lane resource `limits` (Issue #3368) via
+    /// [`execute_query_with_resolved_limits`](Self::execute_query_with_resolved_limits)
+    /// instead of `execute_query`. The other arms (`EXPLAIN`/`PROFILE`/
+    /// multi-variable/mutation) never went through `execute_query`, so they
+    /// are unaffected — unchanged from the non-limited sibling.
+    fn execute_cypher_execution_reconciled_limited(
+        &self,
+        execution: crate::cypher::CypherExecution,
+        programmatic: Option<crate::core::namespace::NamespaceScope>,
+        limits: QueryResourceLimits,
+    ) -> Result<QueryResults> {
+        self.execute_cypher_execution_reconciled_inner(execution, programmatic, Some(limits))
+    }
+
+    /// Shared implementation for
+    /// [`execute_cypher_execution_reconciled`](Self::execute_cypher_execution_reconciled)
+    /// and
+    /// [`execute_cypher_execution_reconciled_limited`](Self::execute_cypher_execution_reconciled_limited).
+    ///
+    /// First the in-query clause `C` is extracted (already lowered for the
+    /// single-`Query`/EXPLAIN/PROFILE arms; lowered on demand for the
+    /// multi-variable evaluator) and folded with the programmatic scope `P` via
+    /// [`reconcile_namespace_scope`](crate::core::namespace::reconcile_namespace_scope):
+    /// omitted+none ⇒ fail-closed `default`-only; omitted+clause ⇒ the clause;
+    /// explicit ⇒ a hard ceiling that must be semantically identical to any
+    /// clause, else [`NamespaceError::ScopeConflict`](crate::core::namespace::NamespaceError::ScopeConflict)
+    /// (`INVALID_ARGUMENT`). This is the SAME decision the AQL path takes, so the
+    /// two surfaces cannot diverge.
+    ///
+    /// The single-entity `Query` pipeline then runs through
+    /// [`Self::execute_query`] (or, when `limits` is supplied,
+    /// [`Self::execute_query_with_resolved_limits`]), which validates the
+    /// effective scope and applies the source-leaf filter + traversal boundary
+    /// via the standard executor. `EXPLAIN` and `PROFILE` thread the effective
+    /// scope explicitly (they build their own planner / executor rather than
+    /// going through `execute_query`): both first
+    /// [`validate_scope`](Self::validate_scope) it (unknown ns ⇒ `NOT_FOUND`,
+    /// empty list ⇒ `INVALID_ARGUMENT`), and `PROFILE` additionally executes
+    /// the plan under
+    /// [`with_namespace_scope`](crate::query::executor::QueryExecutor::with_namespace_scope)
+    /// so its per-operator row counts / timing reflect the **scoped** query, not
+    /// unscoped data. `EXPLAIN` only plans (no execution) so validation is
+    /// sufficient — no execution means no cross-namespace leak. A standalone
+    /// `UNWIND` (`Rows`) yields scalar rows with no graph entities, so the scope
+    /// only needs validating — there is nothing to filter. The
+    /// multi-variable-binding evaluator and mutation paths do not thread scope in
+    /// v1: under a **restricting** effective scope they return a structured
+    /// `UnsupportedFeature` (never silently unscoped); under `All` (the no-op
+    /// selector) they run unchanged.
+    fn execute_cypher_execution_reconciled_inner(
+        &self,
+        execution: crate::cypher::CypherExecution,
+        programmatic: Option<crate::core::namespace::NamespaceScope>,
+        limits: Option<QueryResourceLimits>,
+    ) -> Result<QueryResults> {
         use crate::core::namespace::{NamespaceScope, reconcile_namespace_scope};
         use crate::cypher::CypherExecution;
 
@@ -687,7 +872,10 @@ impl AletheiaDB {
         match execution {
             CypherExecution::Query(mut query) => {
                 query.scope = Some(scope);
-                self.execute_query(query)
+                match limits {
+                    Some(limits) => self.execute_query_with_resolved_limits(query, limits),
+                    None => self.execute_query(query),
+                }
             }
             CypherExecution::Explain(query) => self.explain_cypher_query(query, scope),
             CypherExecution::Profile(query) => self.profile_cypher_query(query, scope),
@@ -991,6 +1179,50 @@ mod tests_aql {
         assert!(
             db.execute_aql("USE 'agent:a' MATCH (n:Person) RETURN n")
                 .is_err()
+        );
+    }
+
+    // ========================================================================
+    // `_limited` reconciled entry points (Issue #3368) -- prove the MCP-facing
+    // engine path (`execute_aql_reconciled_limited`) actually enforces a
+    // caller-supplied `QueryResourceLimits`, independent of the database's own
+    // `EngineQueryLimitsConfig`/`execute_query` override-resolution path.
+    // ========================================================================
+
+    #[test]
+    fn execute_aql_reconciled_limited_enforces_a_past_deadline() {
+        use crate::core::error::{Error, QueryError};
+        use crate::query::limits::QueryResourceLimits;
+        use std::time::{Duration, Instant};
+
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("TestLabel", PropertyMap::new()).unwrap();
+
+        let past_deadline = QueryResourceLimits {
+            deadline: Some(Instant::now() - Duration::from_millis(1)),
+            max_rows: None,
+            max_memory_bytes: None,
+        };
+
+        let results = db
+            .execute_aql_reconciled_limited("MATCH (n:TestLabel) RETURN n", None, past_deadline)
+            .expect("planning/scope-lift must succeed; the guard fires on drain");
+
+        let mut saw_resource_exhausted = false;
+        for row in results {
+            match row {
+                Ok(_) => {}
+                Err(Error::Query(QueryError::ResourceExhausted { dimension, .. })) => {
+                    assert_eq!(dimension, "wall_clock_timeout");
+                    saw_resource_exhausted = true;
+                    break;
+                }
+                Err(other) => panic!("expected ResourceExhausted, got {other:?}"),
+            }
+        }
+        assert!(
+            saw_resource_exhausted,
+            "a past deadline must trip the engine-lane guard on drain"
         );
     }
 }
