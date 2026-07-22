@@ -136,8 +136,11 @@ Per-dimension, process-lifetime counters are exposed via
 `AletheiaDB::query_limit_counters()` → `{ wall_clock_timeout, result_rows,
 memory_bytes, override_rejected }` (relaxed atomic reads, no locks — safe to poll
 frequently). They are deliberately **not** folded into the storage-tier
-`DatabaseStats` (which stays a pure storage snapshot); the MCP `database_stats`
-tool surfaces the equivalent counts in its additive `resource_limits` block.
+`DatabaseStats` (which stays a pure storage snapshot the MCP thin-aggregator
+contract asserts); instead the MCP `database_stats` tool surfaces them in the
+`engine` sub-object of its additive `resource_limits` block — kept distinct from
+that block's top-level MCP-surface counters (read-tool byte cap, etc.) so the two
+enforcement families are never conflated or double-counted.
 
 ## Performance: what the guard costs, and what it does not
 
@@ -161,7 +164,7 @@ query is executed under a fully-unlimited (`disabled()`) config: no
 
 | Aspect | Rust engine | MCP `query` tool | HTTP `/query` |
 |--------|:-----------:|:----------------:|:-------------:|
-| Wall-clock timeout (cooperative) | ✅ | ✅ (worker self-cancels; race is the caller-facing reporter) | outer `tokio::timeout` (response-deadline; cooperative via the shared engine when routed through it) |
+| Wall-clock timeout (cooperative) | ✅ | ✅ (worker self-cancels; race is the caller-facing reporter) | outer `tokio::timeout` bounds the response; the engine guard backstops the abandoned worker at the operator **default** limit (per-call not yet threaded — follow-up) |
 | Result-row cap | ✅ (builder) | ✅ (truncation contract) | ✅ |
 | Memory budget | ✅ (default/override/ceiling) | ✅ (default-off, from MCP config) | ⏳ follow-up (output byte cap is the current proxy) |
 | Default / override / ceiling | ✅ | override on `query` tool | ✅ |

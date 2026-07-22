@@ -333,9 +333,8 @@ pub fn estimate_row_bytes(row: &QueryRow) -> usize {
         match entity {
             EntityResult::Node(n) => ENTITY_OVERHEAD + n.properties.serialized_size(),
             EntityResult::Edge(e) => ENTITY_OVERHEAD + e.properties.serialized_size(),
-            EntityResult::NodeId(_) | EntityResult::EdgeId(_) => {
-                std::mem::size_of::<crate::core::NodeId>()
-            }
+            EntityResult::NodeId(_) => std::mem::size_of::<crate::core::NodeId>(),
+            EntityResult::EdgeId(_) => std::mem::size_of::<crate::core::EdgeId>(),
             EntityResult::Null => 0,
         }
     }

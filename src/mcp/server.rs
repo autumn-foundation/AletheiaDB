@@ -9094,6 +9094,13 @@ impl AletheiaMcpServer {
                 // `has_more`), so there is deliberately no row counter.
                 if let Some(obj) = value.as_object_mut() {
                     let snap = self.limit_counters.snapshot();
+                    // Engine-lane counters (Issue #3368 engine lane): terminations
+                    // from the executor's cooperative `ResourceGuardIterator`
+                    // (the `query` tool's memory budget + cooperative timeout, and
+                    // every Rust-API `db.query()....with_*` caller). A distinct
+                    // family from the MCP-surface atoms above, nested under
+                    // `engine` so the two are never conflated or double-counted.
+                    let engine = self.db.query_limit_counters();
                     obj.insert(
                         "resource_limits".to_string(),
                         json!({
@@ -9101,6 +9108,12 @@ impl AletheiaMcpServer {
                             "byte_cap_terminations": snap.result_bytes,
                             "memory_terminations": snap.memory_bytes,
                             "override_rejections": snap.override_rejected,
+                            "engine": {
+                                "timeout_terminations": engine.wall_clock_timeout,
+                                "row_cap_terminations": engine.result_rows,
+                                "memory_terminations": engine.memory_bytes,
+                                "override_rejections": engine.override_rejected,
+                            },
                         }),
                     );
                 }
