@@ -228,7 +228,31 @@ sequential tests observe the *same* `ValidationFailed`, now raised pre-WAL).
 - Backward compatible: old segments replay identically; this is a **live
   commit-path** change only.
 
-## 8. Follow-ups / residue
+## 8. Acceptance criteria & evidence
+
+| # | Criterion | Evidence |
+|---|---|---|
+| 1 | Failing test proving a fenced/CAS-rejected write survives crash recovery today | `rejected_fenced_claim_leaves_no_phantom_frame_after_replay` — RED on trunk (`fence=5` resurfaced), GREEN after fix; `rejected_orphaning_delete_...` (RED: deleted node replayed) |
+| 2 | Rejected transaction appends no WAL frame | Guards run under `current_timestamp` before `log_operations_to_wal` (`mod.rs`); recovery adversarial review Q1/Q4 CONFIRMED no post-append precondition-rejection early-return |
+| 3 | No on-disk WAL format change; recovery untouched | `git show --name-only` excludes `recovery.rs`/`segment_reader.rs`/`serialization.rs`; recovery review Q3 CONFIRMED |
+| 4 | Lock order preserved, no deadlock | Concurrency review: no path acquires `historical` before `current_timestamp`; `wal` never appended under `historical`; every `current_timestamp` acquirer (persist/snapshot/read-tx/backup/checkpoint) verified |
+| 5 | Committed frames replay byte-identically | `committed_fenced_claim_survives_replay` (fence=4, owner survive); 11 `wal_tx_framing` + 82 `recovery` + `cas_recovery` green |
+| 6 | Interruption-point coverage | `wal_abort_framing.rs` forces full WAL replay (delete `indexes/`); torn-`CommitTx` / uncommitted-prefix cases covered by `wal_tx_framing.rs` |
+| 7 | Multi-angle adversarial review (concurrency + recovery mandatory) | Two independent reviews — both found NO correctness/deadlock bug; 3 doc-accuracy findings applied |
+
+**Gate results:** `fmt --check` clean; clippy `-D warnings` on CI set
+(`config-toml,mcp-server,sharding-rpc,simulation`) clean, `--no-default-features`
+clean; `cargo check --no-default-features --tests` clean; suites green —
+`wal_abort_framing` (3), `wal_tx_framing` (11), `recovery` (82), `cas_lease` (19),
+`dbos_phase3e_fence` (6), `lost_write_persist_race` (2, reworked), `#3416`
+write-skew (3), plus `regression_wal_replay`/`wal_recovery_integration`/
+`wal_group_commit_recovery`/`wal_torn_tail_replay`/`lsn_recovery_regression`/`pitr`/
+`backup_restore`/`workflow_journal`/`release_workflow`/`index_persistence_recovery`.
+No `unsafe` touched (Miri N/A). `--all-features` clippy: the pre-existing
+`collapsible_if` in `src/cypher/tests.rs` (unrelated, identical on trunk) is the
+only expected finding.
+
+## 9. Follow-ups / residue
 
 - Update the stale #3413 caveats now that the runtime rejection is crash-durable:
   `claim_with_lease_fenced` rustdoc (`src/db/ops.rs`), `cas.rs` module docs, the

@@ -549,9 +549,10 @@ impl WriteTransaction {
         // is assigned) so its sequence totally orders commits by commit timestamp; consumed on
         // the success path by `EmitTicket::submit`. Declared in the OUTER scope so that if the
         // commit aborts/`?`-returns after reservation but before submit (a WAL failure, or the
-        // Issue #3416 commit-time write-skew re-check in `apply_changes`), dropping this
-        // `Option` releases an empty slot for the reserved seq — the sequencer never stalls on
-        // a reserved-but-never-submitted sequence.
+        // Issue #3416/#3577 commit-time precondition guards — now run before the WAL append,
+        // Issue #3413 — or a storage error during apply), dropping this `Option` releases an
+        // empty slot for the reserved seq — the sequencer never stalls on a
+        // reserved-but-never-submitted sequence.
         let mut emit_ticket: Option<crate::core::changefeed_subscription::EmitTicket> = None;
 
         // Acquire commit timestamp and perform mode-aware WAL flush.
@@ -814,11 +815,15 @@ impl WriteTransaction {
         // Always-compiled one-shot interleaving seam for the lost-write persist
         // race regression tests (which live in `tests/`). This fires at the
         // durable-but-not-yet-applied point — WAL fsynced, in-flight LSN
-        // registered, `current_timestamp` still held — so an integration test can
-        // park exactly one commit here while it drives a racing `persist_indexes()`
-        // (which needs only `historical.read()`, not `current_timestamp`, so the
-        // park cannot self-deadlock). In production the seam is a single relaxed
-        // atomic load (unarmed), so it is effectively zero-cost.
+        // registered, `current_timestamp` STILL held (Issue #3413). A racing
+        // `persist_indexes()` briefly needs `current_timestamp` too (`db/admin.rs`,
+        // to read the frontier + in-flight set consistently), so it SERIALIZES
+        // behind a commit parked here rather than observing a durable-but-unapplied
+        // write — the invariant the reworked tests pin. The tests therefore park
+        // the commit on a SEPARATE thread and release it via a channel, so persist
+        // blocks then proceeds (no self-deadlock); a persist driven on the SAME
+        // thread as a parked commit WOULD hang, by design. In production the seam is
+        // a single relaxed atomic load (unarmed), so it is effectively zero-cost.
         race_seam::run_pre_apply_once();
 
         let historical_guard = apply::apply_changes(self, commit_timestamp, &closing_version_ids)?;

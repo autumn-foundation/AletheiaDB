@@ -728,11 +728,12 @@ pub(crate) fn apply_changes<'a>(
 ///
 /// # Locking
 ///
-/// Called while `historical.write()` (order class 3) is held. It reads the
-/// adjacency indexes (`outgoing`/`incoming`, classes 6/7) and current-storage
-/// edge map -- all LATER than `historical` in the documented lock order -- and
-/// never calls back into `historical`/`wal`/`current_timestamp`, so no
-/// lock-order inversion is introduced.
+/// Called while only `current_timestamp` (order class 1) is held, before the WAL
+/// append (Issue #3413). It reads the adjacency indexes (`outgoing`/`incoming`,
+/// classes 6/7) and current-storage edge map -- all LATER than `current_timestamp`
+/// in the documented lock order -- and never calls back into
+/// `historical`/`wal`/`current_timestamp`, so no lock-order inversion is
+/// introduced.
 ///
 /// # Cost
 ///
@@ -848,9 +849,10 @@ pub(super) fn detect_delete_orphan_write_skew(tx: &WriteTransaction) -> Result<(
 ///
 /// # Locking
 ///
-/// Called while `historical.write()` (order class 3) is held; reads only the
-/// current-storage node map (a leaf) and this tx's buffer, never calling back
-/// into `historical`/`wal`/`current_timestamp`. No lock-order inversion.
+/// Called while only `current_timestamp` (order class 1) is held, before the WAL
+/// append (Issue #3413); reads only the current-storage node map (a leaf) and
+/// this tx's buffer, never calling back into `historical`/`wal`/`current_timestamp`.
+/// No lock-order inversion.
 ///
 /// # Cost
 ///
