@@ -2321,6 +2321,42 @@ impl HistoricalStorage {
         self.temporal_indexes = Some(indexes);
     }
 
+    /// Temporarily detach the wired temporal indexes, returning whatever was
+    /// set (if anything), so a caller can run a multi-version replay pass
+    /// with the intra-replay "close previous version" hooks reduced to
+    /// no-ops, then reattach (`set_temporal_indexes`) and follow up with
+    /// [`rebuild_temporal_index_from_versions`](Self::rebuild_temporal_index_from_versions).
+    ///
+    /// # Why this exists (Issue #3355, Slice D)
+    ///
+    /// `add_node_version_with_interval`/[`close_node_version_transaction_time`](Self::close_node_version_transaction_time)
+    /// (and their edge equivalents) only ever *update* an existing temporal-index
+    /// entry (closing the previous version's interval) -- they never *insert* the
+    /// entry for the version just being created; only a full
+    /// [`rebuild_temporal_index_from_versions`](Self::rebuild_temporal_index_from_versions)
+    /// pass populates new entries. Startup replay (`db/config.rs`) and PITR
+    /// (`db/pitr.rs::finish_pitr_replay`) are both safe by construction: they
+    /// replay into a `HistoricalStorage` whose temporal indexes are not yet
+    /// wired (`None`) at all, so every intra-replay close call is already a
+    /// no-op, and the single rebuild call at the end is what populates the
+    /// index. A **live, already-wired** `HistoricalStorage` -- the replica
+    /// applier's case (`storage::replication::apply::apply_replica_batch`),
+    /// which replays into a database that has been serving temporal reads
+    /// since it was constructed -- has no such luxury: without detaching
+    /// first, a replayed batch containing two-or-more versions of the SAME
+    /// entity (e.g. a create immediately followed by an update, batched
+    /// together by a single fetch) hits a "version not found in metadata"
+    /// inconsistency, because the second version's *predecessor* was created
+    /// moments earlier in this same still-in-progress replay pass and has not
+    /// been indexed yet (indexing only happens at the end, via the rebuild).
+    /// Detaching first reproduces the startup/PITR no-op behavior on a live
+    /// store, deferring all indexing to the rebuild that already follows.
+    pub(crate) fn take_temporal_indexes(
+        &mut self,
+    ) -> Option<Arc<crate::index::temporal::TemporalIndexes>> {
+        self.temporal_indexes.take()
+    }
+
     /// Set the temporal adjacency index for this storage.
     ///
     /// When the temporal adjacency index is set, it will be automatically updated

@@ -117,15 +117,31 @@ pub(crate) fn apply_replica_batch(
     let initial_version_id = handles.version_id_gen.current();
     {
         let mut hist = handles.historical.write();
-        let (_final_lsn, max_node_id, max_edge_id, next_version_id) =
-            crate::storage::recovery::replay_entries_into_storage_with_constraints(
-                &handles.wal,
-                truncated,
-                &handles.current,
-                &mut hist,
-                initial_version_id,
-                Some(&handles.constraint_registry),
-            )?;
+        // Detach the live temporal indexes before replaying, so the
+        // "close previous version" hooks `replay_entries_into_storage_with_constraints`
+        // triggers are no-ops during this pass -- exactly like startup replay
+        // and PITR's `finish_pitr_replay`, which both replay into a
+        // `HistoricalStorage` whose temporal indexes are not wired yet.
+        // Without this, a batch containing 2+ versions of the SAME entity
+        // (e.g. a create immediately followed by its own update, landing in
+        // one fetch) hits a temporal-index inconsistency: the predecessor
+        // version was created moments earlier in this very replay pass and
+        // has not been indexed yet (indexing only happens via the rebuild
+        // below). See `HistoricalStorage::take_temporal_indexes` for the
+        // full rationale (Issue #3355, Slice D chaos test).
+        let saved_indexes = hist.take_temporal_indexes();
+        let replay_result = crate::storage::recovery::replay_entries_into_storage_with_constraints(
+            &handles.wal,
+            truncated,
+            &handles.current,
+            &mut hist,
+            initial_version_id,
+            Some(&handles.constraint_registry),
+        );
+        if let Some(indexes) = saved_indexes {
+            hist.set_temporal_indexes(indexes);
+        }
+        let (_final_lsn, max_node_id, max_edge_id, next_version_id) = replay_result?;
         drop(hist);
 
         if let Some(m) = max_node_id {
