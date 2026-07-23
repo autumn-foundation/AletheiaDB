@@ -844,6 +844,34 @@ impl FlushCoordinator {
             .min()
     }
 
+    /// Best-known maximum LSN actually written to disk (Issue #3355
+    /// replication observability): the max of every sealed segment's
+    /// recorded `max_lsn` and the currently-active segment's in-progress
+    /// high-water mark (`current_segment_max_lsn`, updated after each flush
+    /// writes/fsyncs a batch — see [`Self::flush`]).
+    ///
+    /// This is an approximation for telemetry (`entries_behind`/lag
+    /// reporting), not a durability guarantee: under a non-synchronous
+    /// durability mode the active segment's tracked max can be updated
+    /// slightly ahead of an fsync. Callers needing the durability-guaranteed
+    /// view should rely on [`Self::read_from`] instead, which only ever
+    /// returns entries actually decodable from segment files.
+    pub fn get_max_flushed_lsn(&self) -> Option<LSN> {
+        let current_max = self.current_segment_max_lsn.load(Ordering::Relaxed);
+        let mut best = if current_max > 0 {
+            Some(LSN(current_max))
+        } else {
+            None
+        };
+        for (_, meta) in self.list_segments_with_metadata() {
+            best = Some(match best {
+                Some(b) if b.0 >= meta.max_lsn.0 => b,
+                _ => meta.max_lsn,
+            });
+        }
+        best
+    }
+
     /// Flush a batch of entries to disk.
     ///
     /// Entries should already be sorted by LSN.

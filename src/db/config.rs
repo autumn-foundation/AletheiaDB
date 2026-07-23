@@ -1128,6 +1128,10 @@ impl AletheiaDB {
                 // timeout/row/memory ceilings for a durable deployment.
                 query_limits: config.query_limits.clone(),
                 limit_counters: Arc::new(crate::query::limits::LimitCounters::default()),
+                #[cfg(not(target_arch = "wasm32"))]
+                replication: Arc::new(std::sync::Mutex::new(None)),
+                #[cfg(not(target_arch = "wasm32"))]
+                startup_manifest_lsn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 _tempdir: None,
             };
 
@@ -1206,6 +1210,18 @@ impl AletheiaDB {
                     if manifest_floor > db.wal.current_lsn() {
                         db.wal.set_next_lsn(manifest_floor);
                     }
+                }
+
+                // Issue #3355 (Slice B): record the loaded manifest LSN as the
+                // replication resume coordinate. `start_replication` reads
+                // this to resume streaming from exactly where a replica's
+                // last persisted snapshot left off (see
+                // `crate::db::replication::ReplicaStorageHandles`/
+                // `AletheiaDB::start_replication`).
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(lsn) = loaded_lsn {
+                    db.startup_manifest_lsn
+                        .store(lsn, std::sync::atomic::Ordering::Relaxed);
                 }
 
                 // Initialize tracker LSNs from the loaded manifest
@@ -1798,6 +1814,10 @@ impl AletheiaDB {
                 // any query small enough to appear in a test suite).
                 query_limits: crate::query::limits::EngineQueryLimitsConfig::default(),
                 limit_counters: Arc::new(crate::query::limits::LimitCounters::default()),
+                #[cfg(not(target_arch = "wasm32"))]
+                replication: Arc::new(std::sync::Mutex::new(None)),
+                #[cfg(not(target_arch = "wasm32"))]
+                startup_manifest_lsn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 _tempdir: None,
             };
             seed_startup_current_timestamp(&db)?;

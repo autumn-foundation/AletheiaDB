@@ -507,12 +507,22 @@ impl AletheiaDB {
         };
 
         // Replication role (Issue #3355): an O(1) atomic read. `replica` is
-        // the Slice B seam -- populated once the replication engine's shared
-        // progress handle exists; a Slice A-only build always reports `None`
-        // here, including on a replica-role node.
+        // populated from the replication engine's shared progress handle
+        // (Slice B) when this node is currently a replica; always `None` on a
+        // primary (including a promoted-back-to-primary former replica) and,
+        // on the wasm32 ephemeral profile (no replication engine there),
+        // always `None`.
+        #[cfg(not(target_arch = "wasm32"))]
+        let replica_progress = if self.is_replica() {
+            self.replication_progress()
+        } else {
+            None
+        };
+        #[cfg(target_arch = "wasm32")]
+        let replica_progress = None;
         let replication = ReplicationStats {
             role: self.node_role().to_string(),
-            replica: None,
+            replica: replica_progress,
         };
 
         DatabaseStats {

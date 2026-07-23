@@ -793,6 +793,25 @@ impl ConcurrentWalSystem {
         self.wal.total_appends()
     }
 
+    /// The minimum LSN still present on disk across all WAL segments (Issue
+    /// #3355): `None` when no segment carries metadata (a fresh/empty WAL
+    /// dir), in which case every LSN is still "available" (nothing has been
+    /// truncated away yet).
+    ///
+    /// Used by the replication feed to detect when a requested resume LSN
+    /// has fallen behind retention/truncation (`truncate_to_lsn`) and must
+    /// report `ResyncRequired` instead of silently skipping a gap.
+    pub(crate) fn min_available_lsn(&self) -> Option<LSN> {
+        self.coordinator.get_min_lsn()
+    }
+
+    /// Best-known maximum LSN actually written to disk (Issue #3355): see
+    /// [`FlushCoordinator::get_max_flushed_lsn`]. Used by the replication
+    /// feed to report `primary_flushed_lsn` for lag observability.
+    pub(crate) fn max_flushed_lsn(&self) -> Option<LSN> {
+        self.coordinator.get_max_flushed_lsn()
+    }
+
     /// Get total entries flushed to disk.
     pub fn total_flushed(&self) -> u64 {
         self.coordinator.total_entries_flushed()

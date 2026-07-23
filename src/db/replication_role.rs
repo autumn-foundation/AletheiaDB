@@ -18,6 +18,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::core::error::{Error, StorageError};
 use crate::core::error::{Result, TransactionError};
 use crate::db::AletheiaDB;
 
@@ -68,6 +70,19 @@ impl NodeRole {
             NodeRole::Replica => ROLE_REPLICA,
         }
     }
+}
+
+/// Outcome of [`AletheiaDB::promote_to_primary`] (Issue #3355, Slice B).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PromotionReport {
+    /// Whether a running replication applier was stopped as part of this
+    /// promotion. `false` when the node was already `Primary`, or was a
+    /// `Replica` on which `start_replication`/`bootstrap_replica` was never
+    /// called (nothing to stop).
+    pub applier_stopped: bool,
+    /// The replica's last fully-applied primary LSN at the moment of
+    /// promotion, when an applier was running. `None` otherwise.
+    pub last_applied_lsn: Option<u64>,
 }
 
 impl std::fmt::Display for NodeRole {
@@ -139,24 +154,71 @@ impl AletheiaDB {
 
     /// Promote this node back to a writable primary.
     ///
-    /// Slice A scope: flips the role atomic back to `Primary`, so writes are
-    /// accepted again from the next call onward. Idempotent — promoting an
-    /// already-primary node is `Ok(())` and a no-op.
+    /// If a replication applier is running (started via
+    /// [`start_replication`](AletheiaDB::start_replication) /
+    /// [`bootstrap_replica`](AletheiaDB::bootstrap_replica)), this:
     ///
-    /// # Seam for Slice B
+    /// 1. Stops and joins the applier thread (no more replicated writes can
+    ///    land after this point).
+    /// 2. Seeds the local WAL's next LSN to `applied_lsn + 1` (never
+    ///    backwards) so a newly-accepted write's LSN can never collide with
+    ///    history this node already applied as a replica.
+    /// 3. Persists indexes at the promotion point, if index persistence is
+    ///    configured, so a subsequent restart resumes from here rather than
+    ///    needing to re-replicate from the (now former) primary.
+    /// 4. Flips the role atomic to `Primary`.
     ///
-    /// The full promotion procedure -- stopping the replica applier thread,
-    /// seeding the local WAL's next LSN to `applied_lsn + 1` (so newly
-    /// accepted writes can never collide with history this node already
-    /// applied as a replica), and persisting indexes at the promotion point
-    /// -- lands with the replication engine (Issue #3355 Slice B), which
-    /// hooks into this method. The `&self -> Result<()>` signature already
-    /// anticipates that: a failure partway through that fuller procedure
-    /// (e.g. the applier not stopping within its shutdown timeout) can be
-    /// reported without a breaking API change.
-    pub fn promote_to_primary(&self) -> Result<()> {
+    /// On a node with no running applier (already `Primary`, or a `Replica`
+    /// on which replication was never started), only step 4 runs. Idempotent
+    /// — promoting an already-primary node is `Ok(_)` and a no-op.
+    pub fn promote_to_primary(&self) -> Result<PromotionReport> {
+        let mut report = PromotionReport::default();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let applier = self
+                .replication
+                .lock()
+                .map_err(|_| {
+                    Error::Storage(StorageError::LockPoisoned {
+                        resource: "replication".to_string(),
+                    })
+                })?
+                .take();
+
+            if let Some(applier) = applier {
+                let applied_lsn = applier.progress.last_applied_lsn();
+                report.applier_stopped = true;
+                report.last_applied_lsn = Some(applied_lsn);
+
+                // Stops + joins the background thread.
+                drop(applier);
+
+                // LSN continuity (mirrors the Issue #3420 recovery-seeding
+                // contract): only ever move the allocator forward.
+                let next = crate::storage::wal::LSN(applied_lsn.saturating_add(1));
+                if next > self.wal.current_lsn() {
+                    self.wal.set_next_lsn(next);
+                }
+
+                if let (Some(manager), Some(tracker)) =
+                    (&self.persistence_manager, &self.persistence_tracker)
+                {
+                    let _ =
+                        crate::storage::index_persistence::operations::persist_all_indexes_at_lsn(
+                            &self.current,
+                            &self.historical,
+                            &self.temporal_indexes,
+                            manager,
+                            tracker,
+                            applied_lsn,
+                        );
+                }
+            }
+        }
+
         self.role.store(NodeRole::Primary.to_u8(), Ordering::SeqCst);
-        Ok(())
+        Ok(report)
     }
 }
 
