@@ -627,6 +627,12 @@ fn handle_connection(
     token_hash: [u8; 32],
     shutdown: &AtomicBool,
 ) {
+    // The listener is non-blocking (so the accept loop can poll shutdown).
+    // On BSD/macOS an accepted socket INHERITS the listener's non-blocking
+    // flag (Linux always returns blocking sockets), which would make every
+    // read race the client's bytes and fail with WouldBlock. Force blocking
+    // mode so the read/write timeouts below govern instead.
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(SERVER_IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(SERVER_IO_TIMEOUT));
     let _ = stream.set_nodelay(true);

@@ -1536,12 +1536,14 @@ mod tests {
         //   GET /status              -> metrics
         //   POST /query              -> per-operation (query_access_class)
         //   POST/GET /admin/keys and POST /admin/keys/revoke -> admin
+        //   POST /admin/promote      -> admin (replica promotion, #3355)
         let classified = [
             ("GET", "/status"),
             ("POST", "/query"),
             ("POST", "/admin/keys"),
             ("GET", "/admin/keys"),
             ("POST", "/admin/keys/revoke"),
+            ("POST", "/admin/promote"),
         ];
         let routes = all_routes();
         assert_eq!(
