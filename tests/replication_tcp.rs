@@ -135,6 +135,7 @@ fn delete_segment(wal_dir: &Path, id: u64) {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial]
 fn wrong_token_never_reaches_streaming_correct_token_streams() {
     let (_dir, primary, _wal_dir) = build_durable_primary();
     let primary = Arc::new(primary);
@@ -192,6 +193,7 @@ fn wrong_token_never_reaches_streaming_correct_token_streams() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial]
 fn tcp_streaming_parity_over_mixed_transaction_workload() {
     let (_dir, primary, _wal_dir) = build_durable_primary();
     let primary = Arc::new(primary);
@@ -255,6 +257,7 @@ fn tcp_streaming_parity_over_mixed_transaction_workload() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial]
 fn snapshot_bootstrap_over_tcp_then_continued_streaming() {
     let (_dir, primary, _wal_dir) = build_durable_primary();
     let primary = Arc::new(primary);
@@ -296,6 +299,7 @@ fn snapshot_bootstrap_over_tcp_then_continued_streaming() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial]
 fn reconnect_after_server_restart_resumes_without_resync() {
     let (_dir, primary, _wal_dir) = build_durable_primary();
     let primary = Arc::new(primary);
@@ -410,6 +414,7 @@ fn reconnect_after_server_restart_resumes_without_resync() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial]
 fn resync_required_is_surfaced_correctly_over_tcp() {
     let (_dir, primary, wal_dir) = build_durable_primary_small_segments();
     let primary = Arc::new(primary);
@@ -473,6 +478,7 @@ fn resync_required_is_surfaced_correctly_over_tcp() {
 
 #[test]
 #[cfg(feature = "config-toml")]
+#[serial]
 fn config_listen_addr_auto_starts_a_listening_server() {
     let dir = tempfile::tempdir().expect("tempdir");
     let toml = format!(
@@ -515,6 +521,7 @@ auth_token = "toml-token"
 }
 
 #[test]
+#[serial]
 fn config_primary_addr_auto_starts_replication_and_converges() {
     let (_dir, primary, _wal_dir) = build_durable_primary();
     let primary = Arc::new(primary);
@@ -545,7 +552,7 @@ fn config_primary_addr_auto_starts_replication_and_converges() {
 }
 
 #[test]
-#[serial(replication_auth_token_env)]
+#[serial]
 fn config_auth_token_env_resolves_token_for_listen_server() {
     let var = "ALETHEIADB_TEST_REPLICATION_TOKEN_3355C";
     // SAFETY: env var mutation is process-global; `#[serial]` prevents any
@@ -580,6 +587,7 @@ fn config_auth_token_env_resolves_token_for_listen_server() {
 }
 
 #[test]
+#[serial]
 fn config_missing_token_fails_startup_fast() {
     let config = AletheiaDBConfig::builder()
         .replication(
