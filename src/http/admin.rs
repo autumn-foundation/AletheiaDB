@@ -13,6 +13,7 @@ use crate::auth::{AccessClass, AuthError, Role};
 use crate::http::auth::AuthContext;
 use crate::http::error::AletheiaHttpError;
 use crate::http::handlers::ApiResponse;
+use crate::http::state::AppState;
 use autumn_web::Route;
 use autumn_web::prelude::{get, post, routes};
 use axum::Json;
@@ -40,9 +41,16 @@ pub struct RevokeKeyRequest {
 #[post("/admin/keys")]
 pub async fn create_key(
     auth: AuthContext,
+    state: AppState,
     Json(req): Json<CreateKeyRequest>,
 ) -> Result<Json<ApiResponse>, AletheiaHttpError> {
     auth.authorize(AccessClass::Admin)?;
+    // Read-only replica enforcement (Issue #3355, Slice A): key lifecycle
+    // mutates the server's local auth store, so it is a write-class admin
+    // operation and follows the same replica refusal as graph writes.
+    if state.db().is_replica() {
+        return Err(AletheiaHttpError::read_only_replica());
+    }
 
     let (principal, key) = auth
         .store()
@@ -93,9 +101,14 @@ pub async fn list_keys(auth: AuthContext) -> Result<Json<ApiResponse>, AletheiaH
 #[post("/admin/keys/revoke")]
 pub async fn revoke_key(
     auth: AuthContext,
+    state: AppState,
     Json(req): Json<RevokeKeyRequest>,
 ) -> Result<Json<ApiResponse>, AletheiaHttpError> {
     auth.authorize(AccessClass::Admin)?;
+    // Read-only replica enforcement (Issue #3355, Slice A): see `create_key`.
+    if state.db().is_replica() {
+        return Err(AletheiaHttpError::read_only_replica());
+    }
 
     let existed = auth
         .store()

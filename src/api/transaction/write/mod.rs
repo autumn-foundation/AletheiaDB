@@ -32,6 +32,7 @@ use crate::storage::historical::HistoricalStorage;
 use crate::storage::wal::DurabilityMode;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
 use parking_lot::RwLock;
+use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -115,6 +116,17 @@ pub struct WriteTransaction {
     /// created without a tracker (legacy / tests): such commits skip watermark
     /// registration and behave exactly as before.
     pub(crate) in_flight: Option<Arc<InFlightLsns>>,
+
+    /// The parent database's node-role cell (Issue #3355, Slice A), shared
+    /// (not owned) so a demotion racing this transaction's commit is caught.
+    /// `None` for transactions created without it (legacy / low-level
+    /// tests): such commits skip the recheck, matching pre-#3355 behavior.
+    /// The construction-time seam
+    /// (`AletheiaDB::write_transaction`/`write_transaction_with_options`)
+    /// already rejected before this transaction was built; this is the
+    /// defensive recheck at commit time, closing the gap where
+    /// `enter_replica_mode` runs after construction but before commit.
+    pub(crate) role: Option<Arc<AtomicU8>>,
 
     /// Compare-and-set preconditions buffered by `compare_and_set_*` /
     /// `claim_with_lease` (Issue #3577). Each carries the condition (expected
@@ -278,6 +290,7 @@ impl WriteTransaction {
             durability_mode,
             constraint_registry: None,
             in_flight: None,
+            role: None,
             cas_preconditions: Vec::new(),
             changefeed: None,
             #[cfg(feature = "audit-export")]
@@ -299,6 +312,14 @@ impl WriteTransaction {
     /// persistence to avoid lost writes across a crash.
     pub(crate) fn with_in_flight_tracker(mut self, tracker: Arc<InFlightLsns>) -> Self {
         self.in_flight = Some(tracker);
+        self
+    }
+
+    /// Attach the parent database's node-role cell (Issue #3355, Slice A,
+    /// called by the DB layer). Enables the commit-time promotion-race
+    /// recheck in `commit_with_timestamp_inner`.
+    pub(crate) fn with_role_cell(mut self, role: Arc<AtomicU8>) -> Self {
+        self.role = Some(role);
         self
     }
 
@@ -489,6 +510,17 @@ impl WriteTransaction {
                 expected: "Active".to_string(),
             }
             .into());
+        }
+
+        // Read-only replica promotion/demotion-race guard (Issue #3355, Slice
+        // A). `write_transaction`/`write_transaction_with_options` already
+        // rejected before this transaction was constructed; this closes the
+        // gap where `enter_replica_mode` runs after construction but before
+        // commit. `None` (a transaction built without the role cell attached
+        // -- legacy/low-level construction) skips the recheck, matching
+        // pre-#3355 behavior.
+        if let Some(role) = &self.role {
+            crate::db::replication_role::reject_if_replica(role)?;
         }
 
         // Transition to preparing state

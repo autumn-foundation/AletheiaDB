@@ -1047,6 +1047,7 @@ impl AletheiaDB {
 
             let mut db = AletheiaDB {
                 current: Arc::new(CurrentStorage::new()),
+                role: crate::db::replication_role::new_role_cell(),
                 historical: Arc::new(RwLock::new(HistoricalStorage::from_unified_config(
                     config.historical,
                 ))),
@@ -1733,6 +1734,7 @@ impl AletheiaDB {
 
             let db = AletheiaDB {
                 current: Arc::new(CurrentStorage::new()),
+                role: crate::db::replication_role::new_role_cell(),
                 historical: Arc::new(RwLock::new(HistoricalStorage::with_config(anchor_config))),
                 temporal_indexes: Arc::new(TemporalIndexes::new()),
                 wal,

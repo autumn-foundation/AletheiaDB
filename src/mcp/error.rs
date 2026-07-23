@@ -231,7 +231,8 @@ impl McpError {
             .and_then(|ce| ce.structured_details())
             .or_else(|| principal_quota_details(e))
             .or_else(|| namespace_details(e))
-            .or_else(|| capacity_exceeded_details(e));
+            .or_else(|| capacity_exceeded_details(e))
+            .or_else(|| read_only_replica_details(e));
         // A string-interner capacity exhaustion (configurable interner cap) gets
         // an actionable message naming the knob and the restart requirement, so a
         // caller/LLM can resolve it without parsing the raw Display text.
@@ -329,6 +330,24 @@ fn principal_quota_details(e: &Error) -> Option<serde_json::Value> {
             "principal": principal,
             "current": current,
             "limit": limit,
+        }))
+    } else {
+        None
+    }
+}
+
+/// Structured `details` for a read-only-replica write rejection (Issue
+/// #3355): `{node_role: "replica", reason: "read_only_replica"}`. Shared by
+/// the MCP and HTTP surfaces so both render byte-identical metadata under
+/// `error.details`. This is the leak-through path (a db error surfacing
+/// through a handler that classifies via [`McpError::from_db_error`] instead
+/// of the dedicated dispatch-seam check in `dispatch_tool`); it carries the
+/// same details either way. Returns `None` for every other error.
+fn read_only_replica_details(e: &Error) -> Option<serde_json::Value> {
+    if matches!(e, Error::Transaction(TransactionError::ReadOnlyReplica)) {
+        Some(serde_json::json!({
+            "node_role": "replica",
+            "reason": "read_only_replica",
         }))
     } else {
         None
@@ -550,6 +569,15 @@ fn classify_transaction_error(e: &TransactionError) -> (McpErrorCode, bool) {
         TransactionError::CommitFailed { .. }
         | TransactionError::RollbackFailed { .. }
         | TransactionError::LockPoisoned { .. } => (McpErrorCode::Internal, false),
+        // A write rejected because this node is a read-only replica (Issue
+        // #3355): retrying the identical call against this node can never
+        // succeed (the caller must redirect to the primary), so this is a
+        // non-retriable precondition failure like the CAS/fence classes
+        // above. The single MCP dispatch seam (`dispatch_tool`) classifies
+        // write/admin-class tools before a handler ever runs, so this arm is
+        // a defensive leak-through mapping rather than the primary
+        // enforcement point.
+        TransactionError::ReadOnlyReplica => (McpErrorCode::FailedPrecondition, false),
     }
 }
 

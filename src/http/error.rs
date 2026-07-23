@@ -192,6 +192,29 @@ pub enum AletheiaHttpError {
 }
 
 impl AletheiaHttpError {
+    /// A `FAILED_PRECONDITION` (412) error for a write-class request rejected
+    /// because the node is a read-only replica (Issue #3355). Non-retriable
+    /// (the identical request against this node can never succeed; the
+    /// caller must redirect to the primary). Carries the same
+    /// `{node_role: "replica", reason: "read_only_replica"}` details as the
+    /// MCP surface's equivalent error, so both surfaces render
+    /// byte-identical bodies.
+    #[must_use]
+    pub(crate) fn read_only_replica() -> Self {
+        Self::Structured {
+            code: "FAILED_PRECONDITION",
+            status: StatusCode::PRECONDITION_FAILED,
+            retriable: false,
+            message: "write rejected: this node is a read-only replica; writes must go to the \
+                      primary"
+                .to_string(),
+            details: Some(json!({
+                "node_role": "replica",
+                "reason": "read_only_replica",
+            })),
+        }
+    }
+
     /// Classify a db-layer [`Error`](crate::core::error::Error) surfaced from a
     /// write handler into the HTTP error envelope, using the same #3234 code
     /// vocabulary as the MCP surface (`src/mcp/error.rs`).
@@ -316,6 +339,13 @@ impl AletheiaHttpError {
                 TE::CommitFailed { .. } | TE::RollbackFailed { .. } | TE::LockPoisoned { .. } => {
                     Self::Internal(e.to_string())
                 }
+                // A write rejected because this node is a read-only replica
+                // (Issue #3355). The `/query` handler's explicit pre-dispatch
+                // check is the primary enforcement point; this arm is a
+                // defensive leak-through mapping so any other path that
+                // classifies via `from_db_error` renders the identical
+                // structured body.
+                TE::ReadOnlyReplica => Self::read_only_replica(),
             };
         }
 

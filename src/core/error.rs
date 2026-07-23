@@ -988,6 +988,18 @@ pub enum TransactionError {
         /// Maximum allowed drift for this direction
         max_allowed: i64,
     },
+    /// The write was rejected because this node is a read-only replica
+    /// (Issue #3355).
+    ///
+    /// Raised at write-transaction construction
+    /// (`AletheiaDB::write_transaction`/`write_transaction_with_options`)
+    /// and, as a defensive recheck against a promotion/demotion race,
+    /// again at commit time
+    /// (`WriteTransaction::commit_with_timestamp_inner`). A caller hitting
+    /// this should redirect the write to the primary; it is never
+    /// retriable against this node as-is.
+    #[error("write rejected: this node is a read-only replica; writes must go to the primary")]
+    ReadOnlyReplica,
 }
 
 /// Format the `CasMismatch` display message (Issue #3577).

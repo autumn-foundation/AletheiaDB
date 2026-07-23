@@ -138,9 +138,10 @@ pub use core::error::{
 pub use db::{
     AletheiaDB, ColdStorageDetails, ColdStorageTierStats, CurrentStateStats, DatabaseStats,
     EdgeTypeSchema, FactStatus, GraphSchema, HistoricalDepthStats, LabelExtent, LabelSchema,
-    LineageView, LineageViewEntry, NamespaceCount, NamespaceInfo, PropertyIndexBuilder,
-    SchemaInstant, SimilarityQuery, SimilaritySource, TemporalExtent, TierAccessStats, TimeBounds,
-    UniqueConstraintBuilder, VectorIndexBuilder, WalStateStats,
+    LineageView, LineageViewEntry, NamespaceCount, NamespaceInfo, NodeRole, PropertyIndexBuilder,
+    ReplicaProgressStats, ReplicationStats, SchemaInstant, SimilarityQuery, SimilaritySource,
+    TemporalExtent, TierAccessStats, TimeBounds, UniqueConstraintBuilder, VectorIndexBuilder,
+    WalStateStats,
 };
 // Backup/restore and point-in-time-restore are durability features absent on
 // the wasm32 ephemeral profile (see `db::backup` / `db::pitr`).

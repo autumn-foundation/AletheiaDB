@@ -1115,6 +1115,14 @@ pub async fn handle_query(
         // Authorization first: auth rejects (401/403) before limit logic runs.
         auth.authorize(access_class)?;
 
+        // Read-only replica enforcement (Issue #3355, Slice A): a write-class
+        // request against a replica-role node is refused here, before any
+        // limit resolution or database work. Read-class requests are
+        // unaffected.
+        if is_write && state.db().is_replica() {
+            return Err(AletheiaHttpError::read_only_replica());
+        }
+
         // Resolve effective limits; an over-ceiling per-call override is a 422
         // rejected up front, before any database work.
         let effective = state

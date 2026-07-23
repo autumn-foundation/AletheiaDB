@@ -84,6 +84,11 @@ pub mod pitr;
 pub mod property_index;
 /// Query builder and executor hooks.
 pub mod query;
+/// Node replication role: writable primary vs. read-only replica (Issue
+/// #3355, Slice A). Always compiled, no feature flag -- the networked
+/// replication engine (feed/applier/TCP transport) is a separate,
+/// `replication`-gated addition that builds on this enforcement core.
+pub mod replication_role;
 /// Index-layer key rotation orchestration (Issue #488).
 ///
 /// Disk/encryption key-rotation engine (redb cold tier + index re-encryption);
@@ -141,12 +146,13 @@ pub use ops::NodesAtTime;
 #[cfg(not(target_arch = "wasm32"))]
 pub use pitr::{PitrCoord, PitrPlan, PitrTarget};
 pub use property_index::PropertyIndexBuilder;
+pub use replication_role::NodeRole;
 pub use schema::{EdgeTypeSchema, GraphSchema, LabelSchema, SchemaInstant};
 pub use similarity_query::{SimilarityQuery, SimilaritySource};
 pub use snapshot::{NamedSnapshot, Snapshot};
 pub use stats::{
     ColdStorageDetails, ColdStorageTierStats, CurrentStateStats, DatabaseStats,
-    HistoricalDepthStats, TierAccessStats, WalStateStats,
+    HistoricalDepthStats, ReplicaProgressStats, ReplicationStats, TierAccessStats, WalStateStats,
 };
 pub use vector_builder::VectorIndexBuilder;
 #[cfg(feature = "durable-execution")]
@@ -222,6 +228,18 @@ pub use workflow::{
 pub struct AletheiaDB {
     /// Current state storage (hot path) - Arc-wrapped for sharing across transactions
     pub(crate) current: Arc<CurrentStorage>,
+    /// Node replication role (Issue #3355, Slice A): `Primary` (default) or
+    /// `Replica`. A single atomic, not part of the write-path lock order
+    /// below -- every write surface checks it lock-free, before touching any
+    /// of those primitives. Shared (not owned) with the [`WriteTransaction`]
+    /// it constructs, closing the promotion/demotion race between a
+    /// transaction's construction and its commit. See
+    /// [`replication_role`](crate::db::replication_role) for the seam the
+    /// Slice B replication engine hooks into for full promotion (applier
+    /// stop + LSN reseed).
+    ///
+    /// [`WriteTransaction`]: crate::api::transaction::WriteTransaction
+    pub(crate) role: Arc<std::sync::atomic::AtomicU8>,
     // Lock ordering for write-path primitives:
     // 1. `current_timestamp`
     // 2. `wal`
