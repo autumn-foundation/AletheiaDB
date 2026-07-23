@@ -108,6 +108,26 @@ impl AletheiaDB {
         guard.as_ref().map(ReplicaApplierHandle::progress_snapshot)
     }
 
+    /// The bound local address of this database's TCP replication server
+    /// (Issue #3355, Slice C), when `config.replication.listen_addr` was set
+    /// at `with_unified_config` time. `None` when no listen server is
+    /// running -- in particular, always `None` on a database constructed via
+    /// [`AletheiaDB::new`]/started via [`ReplicationServer::start`] directly
+    /// rather than through the unified config (that handle is owned by the
+    /// caller, not stored here).
+    ///
+    /// Primarily useful in tests that configure `listen_addr` as
+    /// `"127.0.0.1:0"` (an OS-assigned port) and need to learn which port was
+    /// actually bound.
+    ///
+    /// [`ReplicationServer::start`]: crate::storage::replication::ReplicationServer::start
+    #[must_use]
+    pub fn replication_server_addr(&self) -> Option<std::net::SocketAddr> {
+        self.replication_server
+            .as_ref()
+            .map(crate::storage::replication::tcp::ReplicationServerHandle::local_addr)
+    }
+
     /// Build the Arc-cloned storage handles the background applier needs,
     /// without holding a `&AletheiaDB` across the thread boundary.
     pub(crate) fn replica_storage_handles(&self) -> ReplicaStorageHandles {

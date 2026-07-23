@@ -17,6 +17,7 @@ use std::sync::Arc;
 use crate::core::error::Result;
 use crate::db::AletheiaDB;
 use crate::storage::backup::BackupSummary;
+use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
 use crate::storage::wal::{LSN, WalEntry};
 
 /// Result of a single [`ReplicationFeed::fetch_entries`] call.
@@ -79,37 +80,7 @@ impl ReplicationFeed {
     ///
     /// Propagates any I/O/decode error from reading the WAL segment directory.
     pub fn fetch_entries(&self, from_lsn: u64, max_entries: usize) -> Result<FetchOutcome> {
-        let wal = &self.primary.wal;
-
-        // Resync detection: `min_available_lsn() == None` means no segment
-        // carries metadata yet (a fresh/empty WAL directory) -- nothing has
-        // ever been truncated, so every requested LSN is still satisfiable.
-        // `min_available_lsn.0 == 1` means retention hasn't removed anything
-        // (the very first segment is still present), so a caller starting
-        // from LSN 1 (a fresh replica) is never spuriously told to resync.
-        if let Some(min_lsn) = wal.min_available_lsn()
-            && from_lsn < min_lsn.0
-            && min_lsn.0 > 1
-        {
-            return Ok(FetchOutcome::ResyncRequired {
-                min_available_lsn: min_lsn.0,
-            });
-        }
-
-        let start = LSN(from_lsn.max(1));
-        let mut entries = wal.read_from(start)?;
-        if entries.len() > max_entries {
-            entries.truncate(max_entries);
-        }
-
-        let primary_flushed_lsn = wal.max_flushed_lsn().map_or(0, |lsn| lsn.0);
-        let primary_wallclock_micros = crate::core::temporal::time::now().wallclock();
-
-        Ok(FetchOutcome::Entries {
-            entries,
-            primary_flushed_lsn,
-            primary_wallclock_micros,
-        })
+        fetch_entries_from_wal(&self.primary.wal, from_lsn, max_entries)
     }
 
     /// Take a consistent point-in-time snapshot of the primary at `path`,
@@ -123,4 +94,53 @@ impl ReplicationFeed {
     pub fn snapshot_to(&self, path: &Path) -> Result<BackupSummary> {
         self.primary.backup(path)
     }
+}
+
+/// The durable-truncation-aware `fetch_entries` logic, factored out over a
+/// bare `&ConcurrentWalSystem` (Issue #3355, Slice C).
+///
+/// [`ReplicationFeed::fetch_entries`] is a thin wrapper over this. It exists
+/// standalone so [`super::tcp`]'s config-auto-wired listen server (which is
+/// spawned from inside `AletheiaDB::with_unified_config` -- before the
+/// database being constructed can be wrapped in the `Arc<AletheiaDB>` a full
+/// [`ReplicationFeed`] requires) can serve `FetchEntries` from just the WAL
+/// handle it already owns an `Arc` to, with no self-referential-`Arc`
+/// trickery. Only snapshot bootstrap (`FetchSnapshot`, which needs
+/// [`AletheiaDB::backup`]) requires the fuller [`ReplicationFeed`]; see
+/// `crate::storage::replication::tcp`'s module docs for the exact contract
+/// this splits.
+pub(crate) fn fetch_entries_from_wal(
+    wal: &ConcurrentWalSystem,
+    from_lsn: u64,
+    max_entries: usize,
+) -> Result<FetchOutcome> {
+    // Resync detection: `min_available_lsn() == None` means no segment
+    // carries metadata yet (a fresh/empty WAL directory) -- nothing has
+    // ever been truncated, so every requested LSN is still satisfiable.
+    // `min_available_lsn.0 == 1` means retention hasn't removed anything
+    // (the very first segment is still present), so a caller starting
+    // from LSN 1 (a fresh replica) is never spuriously told to resync.
+    if let Some(min_lsn) = wal.min_available_lsn()
+        && from_lsn < min_lsn.0
+        && min_lsn.0 > 1
+    {
+        return Ok(FetchOutcome::ResyncRequired {
+            min_available_lsn: min_lsn.0,
+        });
+    }
+
+    let start = LSN(from_lsn.max(1));
+    let mut entries = wal.read_from(start)?;
+    if entries.len() > max_entries {
+        entries.truncate(max_entries);
+    }
+
+    let primary_flushed_lsn = wal.max_flushed_lsn().map_or(0, |lsn| lsn.0);
+    let primary_wallclock_micros = crate::core::temporal::time::now().wallclock();
+
+    Ok(FetchOutcome::Entries {
+        entries,
+        primary_flushed_lsn,
+        primary_wallclock_micros,
+    })
 }

@@ -188,6 +188,7 @@ The HTTP credential is per-request (`Authorization: Bearer <key>` or
 | `POST /admin/keys` (create key) | admin |
 | `GET /admin/keys` (list keys, masked) | admin |
 | `POST /admin/keys/revoke` | admin |
+| `POST /admin/promote` (promote replica to primary, Issue #3355 Slice C) | admin |
 | `GET /changes/stream` (SSE changefeed stream) | read |
 | `POST /changes/await` (`await_changes` long-poll) | read |
 

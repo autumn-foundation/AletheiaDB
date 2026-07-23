@@ -459,6 +459,17 @@ pub struct AletheiaDB {
     /// Native-only (mirrors [`Self::replication`]).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) startup_manifest_lsn: Arc<std::sync::atomic::AtomicU64>,
+    /// Running TCP replication server, when `config.replication.listen_addr`
+    /// was configured (Issue #3355, Slice C): `AletheiaDB::with_unified_config`
+    /// starts a [`crate::storage::replication::ReplicationServer`] serving
+    /// this database's feed and stores its handle here. `None` when
+    /// replication serving was not configured. Dropping the handle stops the
+    /// accept-loop thread and force-closes every connected replica socket
+    /// (see [`crate::storage::replication::ReplicationServerHandle`]).
+    /// Native-only (mirrors [`Self::replication`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) replication_server:
+        Option<crate::storage::replication::tcp::ReplicationServerHandle>,
     /// Backing tempdir for ephemeral databases created via [`AletheiaDB::new`].
     /// Declared last so it is dropped last (Rust drops struct fields in
     /// declaration order); this guarantees the WAL/persistence file handles

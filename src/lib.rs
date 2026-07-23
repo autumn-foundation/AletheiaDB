@@ -149,7 +149,10 @@ pub use db::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use db::ReplicationOptions;
 #[cfg(not(target_arch = "wasm32"))]
-pub use storage::replication::{FetchOutcome, InProcessSource, ReplicationFeed, ReplicationSource};
+pub use storage::replication::{
+    FetchOutcome, InProcessSource, ReplicationFeed, ReplicationServer, ReplicationServerHandle,
+    ReplicationSource, TcpSource,
+};
 // Backup/restore and point-in-time-restore are durability features absent on
 // the wasm32 ephemeral profile (see `db::backup` / `db::pitr`).
 #[cfg(not(target_arch = "wasm32"))]

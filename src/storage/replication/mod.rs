@@ -24,21 +24,25 @@
 //! - [`applier`] — [`applier::ReplicaApplierHandle`]: the background thread
 //!   that owns a [`source::ReplicationSource`] and drives the fetch → apply →
 //!   publish-progress → periodic-persist loop.
+//! - [`tcp`] — the Slice C real-network transport: [`tcp::ReplicationServer`]
+//!   (primary side) and [`tcp::TcpSource`] (replica side), a length-prefixed
+//!   framed protocol over `std::net::TcpStream`.
 //!
 //! # Always compiled, std-only
 //!
-//! Per the design, this engine (feed/source/apply/applier) carries no feature
-//! flag of its own and pulls in no new dependency -- only the (future) TCP
-//! transport (Slice C) is expected to gate real network I/O behind a
-//! `replication` feature. Absent on the wasm32 ephemeral profile, like the
-//! rest of the durability stack it builds on (WAL segment files, index
-//! persistence).
+//! Per the design, this engine (feed/source/apply/applier/tcp) carries no
+//! feature flag of its own and pulls in no new dependency beyond crates
+//! already unconditionally in `Cargo.toml` (`serde_json`, `sha2`, `subtle`).
+//! Absent on the wasm32 ephemeral profile, like the rest of the durability
+//! stack it builds on (WAL segment files, index persistence).
 
 pub mod applier;
 pub(crate) mod apply;
 pub mod feed;
 pub mod source;
+pub mod tcp;
 
 pub use applier::ReplicationOptions;
 pub use feed::{FetchOutcome, ReplicationFeed};
 pub use source::{InProcessSource, ReplicationSource};
+pub use tcp::{ReplicationServer, ReplicationServerHandle, TcpSource};

@@ -1015,6 +1015,23 @@ impl AletheiaDB {
             // constructed from the unified config rather than defaults.
             let changefeed_config = config.changefeed.clone();
 
+            // Capture the replication config (Issue #3355, Slice C) before
+            // `config` fields are moved below. Resolve the auth token EAGERLY
+            // (fail fast, before any storage is touched) whenever either side
+            // is configured -- an operator who turns on replication without a
+            // usable token is a startup-time misconfiguration, never a silent
+            // anonymous/unauthenticated fallback.
+            let replication_config = config.replication.clone();
+            let replication_token = if replication_config.listen_addr.is_some()
+                || replication_config.primary_addr.is_some()
+            {
+                Some(replication_config.resolve_token().map_err(|e| {
+                    crate::core::error::Error::Other(format!("replication config error: {e}"))
+                })?)
+            } else {
+                None
+            };
+
             // Named-snapshot registry (Issue #3370): durable sidecar at
             // `{data_dir}/snapshots.json` when index persistence is enabled,
             // in-memory-only otherwise. Loaded here so pins survive restart.
@@ -1132,6 +1149,8 @@ impl AletheiaDB {
                 replication: Arc::new(std::sync::Mutex::new(None)),
                 #[cfg(not(target_arch = "wasm32"))]
                 startup_manifest_lsn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                #[cfg(not(target_arch = "wasm32"))]
+                replication_server: None,
                 _tempdir: None,
             };
 
@@ -1702,6 +1721,59 @@ impl AletheiaDB {
             #[cfg(feature = "semantic-temporal")]
             db.reseed_drift_registry_after_quarantine();
 
+            // Asynchronous replication transport wiring (Issue #3355, Slice
+            // C). Both may be configured simultaneously (a serving replica);
+            // role/write-rejection (Slice A) is independent of this wiring.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(token) = replication_token {
+                // `primary_addr`: become a streaming replica. No `Arc<Self>`
+                // is needed -- `start_replication` takes `&self` and the
+                // background applier owns only Arc-cloned sub-component
+                // handles (`ReplicaStorageHandles`), never the whole
+                // `AletheiaDB` -- so this is fully automatic with no
+                // ownership wrinkle.
+                if let Some(ref primary_addr) = replication_config.primary_addr {
+                    let source = Box::new(crate::storage::replication::tcp::TcpSource::new(
+                        primary_addr.clone(),
+                        token.clone(),
+                    ));
+                    let opts = crate::storage::replication::ReplicationOptions {
+                        poll_interval: std::time::Duration::from_millis(
+                            replication_config.poll_interval_ms.max(1),
+                        ),
+                        batch_max_entries: replication_config.batch_max_entries.max(1),
+                        ..Default::default()
+                    };
+                    db.start_replication(source, opts)?;
+                }
+
+                // `listen_addr`: start serving this database's WAL feed.
+                // Unlike `start_replication` above, a full-featured server
+                // needs a real `Arc<AletheiaDB>` (its `FetchSnapshot` handler
+                // calls `AletheiaDB::backup`, which snapshots the whole
+                // database consistently) -- and `db` here is still a bare,
+                // not-yet-`Arc`-wrapped local about to be returned BY VALUE
+                // from this very function, so there is no legal `Arc<Self>`
+                // to hand a background thread. Rather than skip auto-wiring
+                // entirely, this starts the entries-only backend (serves
+                // `FetchEntries` streaming from just the WAL `Arc` this
+                // struct already owns; `FetchSnapshot` replies a structured
+                // "unavailable, use `ReplicationServer::start` with a real
+                // `Arc<AletheiaDB>` for bootstrap support" instead of
+                // hanging or silently failing) -- see
+                // `crate::storage::replication::tcp`'s module docs ("Two
+                // feed backends") for the full rationale.
+                if let Some(ref listen_addr) = replication_config.listen_addr {
+                    let handle =
+                        crate::storage::replication::tcp::ReplicationServer::start_entries_only(
+                            Arc::clone(&db.wal),
+                            listen_addr,
+                            token,
+                        )?;
+                    db.replication_server = Some(handle);
+                }
+            }
+
             Ok(db)
         })();
         result.record_error_metric()
@@ -1818,6 +1890,8 @@ impl AletheiaDB {
                 replication: Arc::new(std::sync::Mutex::new(None)),
                 #[cfg(not(target_arch = "wasm32"))]
                 startup_manifest_lsn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                #[cfg(not(target_arch = "wasm32"))]
+                replication_server: None,
                 _tempdir: None,
             };
             seed_startup_current_timestamp(&db)?;

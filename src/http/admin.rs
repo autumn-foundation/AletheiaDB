@@ -1,9 +1,10 @@
-//! Admin key-lifecycle endpoints (Issue #3350). All classified
-//! [`AccessClass::Admin`].
+//! Admin key-lifecycle endpoints (Issue #3350) plus manual promotion (Issue
+//! #3355, Slice C). All classified [`AccessClass::Admin`].
 //!
 //! - `POST /admin/keys`        — create a key; returns the plaintext exactly once.
 //! - `GET  /admin/keys`        — masked list (id, name, role, prefix; never key material).
 //! - `POST /admin/keys/revoke` — revoke by principal id (effective immediately).
+//! - `POST /admin/promote`     — promote this node from replica to primary.
 //!
 //! Revocation uses `POST` + a JSON body rather than a `DELETE` path parameter
 //! so the route shape stays uniform with the rest of the JSON API and avoids
@@ -126,6 +127,38 @@ pub async fn revoke_key(
     )))
 }
 
+/// Promote this node from a read-only replica to a writable primary (Issue
+/// #3355, Slice C operator surface).
+///
+/// Deliberately does **NOT** perform the `state.db().is_replica()` write-class
+/// refusal that [`create_key`]/[`revoke_key`] above apply: promotion is the
+/// one mutating admin operation a replica MUST accept -- refusing it because
+/// the node is a replica would make it impossible to ever promote one over
+/// this surface. Every other write path keeps rejecting on a replica; this is
+/// the single, deliberate, documented exception.
+///
+/// Calls [`crate::db::AletheiaDB::promote_to_primary`] and reports its
+/// [`crate::db::PromotionReport`]. Idempotent: promoting an already-primary
+/// node succeeds as a no-op (`applier_stopped: false`).
+#[post("/admin/promote")]
+pub async fn promote(
+    auth: AuthContext,
+    state: AppState,
+) -> Result<Json<ApiResponse>, AletheiaHttpError> {
+    auth.authorize(AccessClass::Admin)?;
+
+    let report = state
+        .db()
+        .promote_to_primary()
+        .map_err(|e| AletheiaHttpError::Internal(e.to_string()))?;
+
+    Ok(Json(ApiResponse::success(json!({
+        "role": "primary",
+        "applier_stopped": report.applier_stopped,
+        "last_applied_lsn": report.last_applied_lsn,
+    }))))
+}
+
 /// The admin route set, appended to [`crate::http::handlers::all_routes`].
 ///
 /// Kept in this module so the `routes![...]` macro resolves the companion
@@ -133,5 +166,5 @@ pub async fn revoke_key(
 /// are declared.
 #[must_use]
 pub fn admin_routes() -> Vec<Route> {
-    routes![create_key, list_keys, revoke_key]
+    routes![create_key, list_keys, revoke_key, promote]
 }
