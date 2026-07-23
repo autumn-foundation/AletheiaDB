@@ -796,13 +796,12 @@ impl AletheiaDB {
     /// (non-retriable). `lease_until` is computed as `engine_now + lease_ttl`, so
     /// a skewed-fast executor cannot install a far-future, un-stealable lease.
     ///
-    /// # Caveat: the fence is runtime-only, not crash-durable
+    /// # Crash-durable fence (Issue #3413)
     ///
-    /// The rejected claim's map is fsync'd to the WAL before the commit-guard
-    /// fence re-check runs, and crash recovery replays WAL frames without that
-    /// check, so a `FenceTooLow`-rejected claim is **re-applied on crash
-    /// recovery** (the inherited #3413 WAL-abort-framing gap). Do not rely on the
-    /// fence for zombie fencing across a crash until #3413 lands. See
+    /// The fence re-check now runs BEFORE the WAL append (under
+    /// `current_timestamp`), so a `FenceTooLow`-rejected claim appends **no WAL
+    /// frame** and is therefore never re-applied by crash recovery. The fence is
+    /// safe for zombie fencing across a crash. See
     /// [`WriteOps::claim_with_lease_fenced`](crate::api::transaction::WriteOps::claim_with_lease_fenced).
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     #[allow(clippy::too_many_arguments)]

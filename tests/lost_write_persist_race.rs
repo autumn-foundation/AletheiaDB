@@ -1,33 +1,34 @@
-//! Regression tests for the lost-write crash-recovery race between an in-flight
-//! commit and index persistence.
+//! Crash-recovery interaction between an in-flight commit and index persistence.
 //!
-//! # The bug
+//! # History
 //!
-//! The commit path makes a write DURABLE (WAL fsync + ack) BEFORE it is APPLIED
-//! to the in-memory current/historical stores, and no lock spans both points.
-//! `persist_indexes()` previously stamped the manifest with the WAL *allocation
-//! frontier* (next-to-allocate LSN), and startup replay drops every WAL entry
-//! with `lsn < manifest.lsn`. A write that was fsynced (so `lsn < frontier`) but
-//! not yet applied when the snapshot was taken was therefore BOTH absent from
-//! the persisted snapshot AND dropped by replay — a silently lost,
-//! already-acknowledged write.
+//! The commit path once made a write DURABLE (WAL fsync + ack) and released
+//! `current_timestamp` BEFORE applying it to the in-memory stores. In that
+//! window `persist_indexes()` could stamp the manifest at the WAL *allocation
+//! frontier* (above the durable-but-unapplied write) while snapshotting a state
+//! that lacked it, and startup replay drops every entry with `lsn <
+//! manifest.lsn` — a silently lost, already-durable write. An in-flight-LSN
+//! *applied watermark* was added so persist stamped `min(in_flight)` instead of
+//! the frontier.
 //!
-//! # The fix
+//! # Now: subsumed by WAL abort framing (Issue #3413)
 //!
-//! An in-flight-LSN tracker records the base LSN of every commit that is durable
-//! but not yet applied. `persist_indexes()` stamps the manifest with the minimum
-//! in-flight LSN (the *applied watermark*) instead of the frontier, so replay
-//! re-covers any durable-but-unapplied write. Re-applying a write that DID make
-//! it into the snapshot is safe because replay is idempotent (keyed by
-//! `version_id`) — Test B pins exactly that.
+//! The #3413 abort-framing fix holds `current_timestamp` across the ENTIRE
+//! commit — checks, WAL append, durability, **and apply** — releasing it only
+//! after finalize. `persist_indexes()` acquires `current_timestamp` (briefly, to
+//! read the frontier + in-flight set consistently), so it now **serializes
+//! behind any in-flight commit's apply**: it can no longer snapshot a
+//! durable-but-unapplied write, and two commits can no longer overlap (the
+//! second blocks on the clock until the first has fully applied). The lost-write
+//! race is therefore *structurally impossible*, and the applied-watermark is
+//! belt-and-suspenders (in-flight is always empty when persist observes it).
 //!
-//! # Determinism
-//!
-//! These tests do NOT rely on timing luck. They arm a one-shot commit-path seam
-//! (`race_seam`) that parks exactly one commit at the durable-but-not-applied
-//! point while the main thread drives `persist_indexes()`, so the race is forced
-//! by ordering. Crash is simulated with `std::mem::forget(db)` (Drop never runs,
-//! so no shutdown persist), exactly like a process kill after the WAL fsync.
+//! These tests now pin that stronger invariant: a commit parked at the
+//! durable-but-unapplied seam (holding `current_timestamp`) BLOCKS a racing
+//! persist / a second commit until it releases the clock, and nothing is lost or
+//! duplicated across a crash. The one-shot `race_seam` parks exactly one commit
+//! there; crash is simulated with `std::mem::forget(db)` (Drop never runs, so no
+//! shutdown persist), exactly like a process kill after the WAL fsync.
 
 use aletheiadb::api::transaction::write::race_seam;
 use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
@@ -40,8 +41,10 @@ use aletheiadb::storage::index_persistence::{IndexPersistenceManager, Persistenc
 use aletheiadb::storage::wal::DurabilityMode;
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tempfile::tempdir;
 
 /// Serialize tests: index persistence round-trips the process-global string
@@ -144,16 +147,16 @@ fn assert_history_len(db: &AletheiaDB, id: NodeId, name: &str, expected: usize) 
     );
 }
 
-/// Test A — lost write.
+/// Test A — a racing persist serializes behind a parked commit; no write is lost.
 ///
-/// A commit is parked AFTER its WAL fsync/ack but BEFORE its in-memory apply.
-/// `persist_indexes()` runs in that window; the parked write is durable but not
-/// in the snapshot. On the pre-fix code the manifest recorded the allocation
-/// frontier, so replay dropped the write → it vanished after crash+reopen. With
-/// the fix the manifest records the applied watermark (the parked commit's own
-/// LSN), so replay re-covers it.
+/// A commit parks AFTER its WAL fsync/ack but BEFORE its in-memory apply, holding
+/// `current_timestamp` (Issue #3413). `persist_indexes()` needs
+/// `current_timestamp`, so it BLOCKS until the parked commit releases the clock
+/// post-apply — it can never snapshot the durable-but-unapplied write. After the
+/// commit finishes, persist snapshots the applied state; a crash + reopen loses
+/// nothing.
 #[test]
-fn test_a_durable_unapplied_write_survives_persist_then_crash() {
+fn test_a_parked_commit_blocks_racing_persist_no_loss() {
     let _g = lock();
     race_seam::clear();
     let tmp = tempdir().unwrap();
@@ -161,8 +164,8 @@ fn test_a_durable_unapplied_write_survives_persist_then_crash() {
 
     const PRELUDE: usize = 3; // nodes committed fully before the parked one
 
-    let (prelude_ids, victim, manifest_after_persist) = {
-        let db = open(db_path);
+    let (prelude_ids, victim) = {
+        let db = Arc::new(open(db_path));
 
         // Fully commit PRELUDE nodes (no hook armed yet).
         let mut prelude_ids = Vec::new();
@@ -179,37 +182,55 @@ fn test_a_durable_unapplied_write_survives_persist_then_crash() {
             release_rx.recv().expect("await release");
         }));
 
+        let persist_done = Arc::new(AtomicBool::new(false));
+
         let victim = std::thread::scope(|scope| {
-            // Writer thread commits the victim node; it parks in the seam.
-            let writer = scope.spawn(|| create(&db, "victim"));
+            // Writer thread commits the victim node; it parks in the seam holding
+            // `current_timestamp` across apply.
+            let db_w = Arc::clone(&db);
+            let writer = scope.spawn(move || create(&db_w, "victim"));
 
             // Wait until the victim is durable (fsynced) but not yet applied.
             parked_rx.recv().expect("victim must reach the seam");
 
-            // Persist WHILE the victim is durable-but-unapplied. Pre-fix this
-            // captured the frontier (above the victim's LSN); post-fix it
-            // captures the victim's in-flight LSN as the watermark.
-            db.persist_indexes().expect("racing persist");
+            // Racing persist on its OWN thread: it needs `current_timestamp`, held
+            // by the parked commit, so it blocks until release (post-apply).
+            let db_p = Arc::clone(&db);
+            let done = Arc::clone(&persist_done);
+            let persist = scope.spawn(move || {
+                db_p.persist_indexes().expect("racing persist");
+                done.store(true, Ordering::SeqCst);
+            });
 
-            // Release the victim so it applies and the commit returns.
+            // Give persist time to reach and block on the clock; while the commit
+            // is parked it must NOT have completed (proves the serialization).
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(
+                !persist_done.load(Ordering::SeqCst),
+                "persist must block behind the parked commit (current_timestamp held across apply)"
+            );
+
+            // Release the victim so it applies and the commit returns; persist then
+            // unblocks and snapshots the APPLIED state.
             release_tx.send(()).expect("release the victim");
+            persist.join().expect("persist thread");
             writer.join().expect("writer thread")
         });
 
-        let manifest_after_persist = manifest_lsn(db_path);
+        assert!(
+            persist_done.load(Ordering::SeqCst),
+            "persist must complete once the commit releases the clock"
+        );
+        assert!(
+            manifest_lsn(db_path) > 0,
+            "manifest must be stamped by persist"
+        );
 
         // Hard crash: no Drop, no shutdown persist.
+        let db = Arc::try_unwrap(db).unwrap_or_else(|_| panic!("db still shared at crash"));
         std::mem::forget(db);
-        (prelude_ids, victim, manifest_after_persist)
+        (prelude_ids, victim)
     };
-
-    // Crash simulation sanity: the on-disk manifest must not have advanced past
-    // the racing persist.
-    assert_eq!(
-        manifest_lsn(db_path),
-        manifest_after_persist,
-        "crash simulation invalid: manifest advanced after mem::forget"
-    );
 
     let db = open(db_path);
     assert_eq!(
@@ -225,26 +246,22 @@ fn test_a_durable_unapplied_write_survives_persist_then_crash() {
     assert_history_len(&db, victim, "victim", 1);
 }
 
-/// Test B — no duplication (overlap band).
+/// Test B — a second commit serializes behind a parked one; no duplication.
 ///
-/// Forces the manifest watermark to land BELOW an already-applied HIGHER LSN, so
-/// replay re-applies a write that IS present in the snapshot. That write must
-/// end up with exactly one history version — the idempotency the watermark fix
-/// relies on.
-///
-/// A (parked, LSN_A) is durable-but-unapplied; B is then committed fully on the
-/// main thread (LSN_B > LSN_A, applied, in the snapshot). Persist captures the
-/// watermark = LSN_A. On reopen, replay from LSN_A re-applies A (new) AND B
-/// (already in the snapshot → idempotent, NOT duplicated).
+/// Under #3413 there is no durable-but-unapplied *overlap* window: a commit `B`
+/// cannot begin while a parked commit `A` still holds `current_timestamp`, so
+/// `B` blocks until `A` fully applies. Both then land in the snapshot; a crash +
+/// reopen recovers each exactly once (no loss, no duplication). Replay
+/// idempotency itself is pinned separately by the `recovery/replay_*` tests.
 #[test]
-fn test_b_overlap_band_replay_does_not_duplicate() {
+fn test_b_second_commit_serializes_behind_parked_commit_no_dup() {
     let _g = lock();
     race_seam::clear();
     let tmp = tempdir().unwrap();
     let db_path = tmp.path();
 
-    let (a, b, manifest_after_persist) = {
-        let db = open(db_path);
+    let (a, b) = {
+        let db = Arc::new(open(db_path));
 
         let (parked_tx, parked_rx) = mpsc::channel::<()>();
         let (release_tx, release_rx) = mpsc::channel::<()>();
@@ -253,35 +270,49 @@ fn test_b_overlap_band_replay_does_not_duplicate() {
             release_rx.recv().expect("await release");
         }));
 
+        let b_done = Arc::new(AtomicBool::new(false));
+
         let (a, b) = std::thread::scope(|scope| {
-            // A parks in the seam (durable, unapplied, in-flight LSN_A).
-            let writer = scope.spawn(|| create(&db, "A"));
+            // A parks in the seam holding `current_timestamp` across apply.
+            let db_a = Arc::clone(&db);
+            let writer_a = scope.spawn(move || create(&db_a, "A"));
             parked_rx.recv().expect("A must reach the seam");
 
-            // B commits FULLY on this thread (the one-shot seam is already
-            // consumed by A, so B does not park). LSN_B > LSN_A; B is applied
-            // and deregistered, so it lands IN the snapshot below.
-            let b = create(&db, "B");
+            // B commits on its own thread: it needs `current_timestamp`, held by
+            // parked A, so it BLOCKS until A releases the clock post-apply — there
+            // is no durable-but-unapplied overlap window anymore.
+            let db_b = Arc::clone(&db);
+            let done = Arc::clone(&b_done);
+            let writer_b = scope.spawn(move || {
+                let id = create(&db_b, "B");
+                done.store(true, Ordering::SeqCst);
+                id
+            });
 
-            // Persist: watermark = min in-flight = LSN_A (< LSN_B). The snapshot
-            // includes B but not A; the manifest records LSN_A.
-            db.persist_indexes().expect("racing persist");
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(
+                !b_done.load(Ordering::SeqCst),
+                "B must serialize behind parked A (current_timestamp held across apply)"
+            );
 
             release_tx.send(()).expect("release A");
-            let a = writer.join().expect("writer thread");
+            let a = writer_a.join().expect("writer A");
+            let b = writer_b.join().expect("writer B");
             (a, b)
         });
 
-        let manifest_after_persist = manifest_lsn(db_path);
-        std::mem::forget(db);
-        (a, b, manifest_after_persist)
-    };
+        assert!(
+            b_done.load(Ordering::SeqCst),
+            "B must complete after A releases"
+        );
 
-    assert_eq!(
-        manifest_lsn(db_path),
-        manifest_after_persist,
-        "crash simulation invalid: manifest advanced after mem::forget"
-    );
+        // Persist AFTER both commits applied: the snapshot holds both.
+        db.persist_indexes().expect("persist after both commits");
+
+        let db = Arc::try_unwrap(db).unwrap_or_else(|_| panic!("db still shared at crash"));
+        std::mem::forget(db);
+        (a, b)
+    };
 
     let db = open(db_path);
     assert_eq!(
@@ -289,10 +320,8 @@ fn test_b_overlap_band_replay_does_not_duplicate() {
         2,
         "both A and B must be present exactly once: fewer = lost, more = duplicated"
     );
-    // A: lost-write path (not in snapshot, recovered by replay).
     assert_present(&db, a, "A");
     assert_history_len(&db, a, "A", 1);
-    // B: overlap-band path (in snapshot AND replayed) — must NOT be duplicated.
     assert_present(&db, b, "B");
     assert_history_len(&db, b, "B", 1);
 }

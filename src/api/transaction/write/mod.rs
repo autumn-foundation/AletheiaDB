@@ -549,9 +549,10 @@ impl WriteTransaction {
         // is assigned) so its sequence totally orders commits by commit timestamp; consumed on
         // the success path by `EmitTicket::submit`. Declared in the OUTER scope so that if the
         // commit aborts/`?`-returns after reservation but before submit (a WAL failure, or the
-        // Issue #3416 commit-time write-skew re-check in `apply_changes`), dropping this
-        // `Option` releases an empty slot for the reserved seq — the sequencer never stalls on
-        // a reserved-but-never-submitted sequence.
+        // Issue #3416/#3577 commit-time precondition guards — now run before the WAL append,
+        // Issue #3413 — or a storage error during apply), dropping this `Option` releases an
+        // empty slot for the reserved seq — the sequencer never stalls on a
+        // reserved-but-never-submitted sequence.
         let mut emit_ticket: Option<crate::core::changefeed_subscription::EmitTicket> = None;
 
         // Acquire commit timestamp and perform mode-aware WAL flush.
@@ -574,20 +575,40 @@ impl WriteTransaction {
         // - Synchronous: Appends drain and flush immediately with fsync
         // - Async: Appends go to ring buffers, background thread syncs
         // - GroupCommit: Appends go to ring buffers, wait for epoch completion
+        // Issue #3413 (WAL abort framing): hold `current_timestamp` across the
+        // ENTIRE commit — the precondition guards (below, BEFORE the WAL append),
+        // the WAL append + durability, apply, and finalize — released explicitly
+        // after finalize. The guards read only current storage, so this single
+        // held lock serializes commits end-to-end: a transaction the guards reject
+        // returns with NO WAL frame, so crash recovery can never reapply a rejected
+        // write. The documented lock order (`current_timestamp` → `wal` →
+        // `historical`) is preserved — `wal` and `historical` are each acquired
+        // only while holding `current_timestamp`, and `wal` is never appended under
+        // `historical`.
+        //
+        // Test-only interleaving seam (Issue #3416 / #3413): fires here — after
+        // `validate`/`detect_conflicts`/`check_constraints`, BEFORE the
+        // `current_timestamp` lock — so a test can commit a concurrent
+        // delete/create in this window (the victim holds no commit-clock lock yet)
+        // and then observe the victim abort at its own commit-time write-skew
+        // re-check under the lock. Production builds compile this away.
+        #[cfg(test)]
+        commit_test_hooks::run_pre_commit_clock_hook();
+
+        #[cfg(feature = "observability")]
+        let ts_lock_start = std::time::Instant::now();
+
+        let mut ts = self
+            .current_timestamp
+            .lock()
+            .map_err(|_| TransactionError::LockPoisoned {
+                resource: "current_timestamp".to_string(),
+            })?;
+
+        #[cfg(feature = "observability")]
+        let ts_lock_acquired = std::time::Instant::now();
+
         let commit_timestamp = {
-            #[cfg(feature = "observability")]
-            let ts_lock_start = std::time::Instant::now();
-
-            let mut ts =
-                self.current_timestamp
-                    .lock()
-                    .map_err(|_| TransactionError::LockPoisoned {
-                        resource: "current_timestamp".to_string(),
-                    })?;
-
-            #[cfg(feature = "observability")]
-            let ts_lock_acquired = std::time::Instant::now();
-
             // Phase 2: Use HLC for distributed temporal consistency
             // Get current physical wallclock
             let current_wallclock = crate::core::temporal::time::now();
@@ -692,72 +713,88 @@ impl WriteTransaction {
                 emit_ticket = Some(broadcaster.reserve_emit_ticket());
             }
 
-            #[cfg(feature = "observability")]
-            let wal_start = std::time::Instant::now();
-
-            // Log operations to WAL (lock-free striped append!)
-            // This must happen BEFORE applying changes for durability.
-            // Returns the base (lowest) LSN allocated for this commit, if any.
-            let base_lsn = wal::log_operations_to_wal(self, commit, &closing_version_ids)?;
-
-            // Register the commit's base LSN as in-flight BEFORE the durability
-            // fsync below, so a write that becomes durable is always registered.
-            // The guard survives to end-of-function (see its declaration above).
-            if let (Some(tracker), Some(base_lsn)) = (self.in_flight.as_ref(), base_lsn) {
-                in_flight_guard = Some(tracker.register(base_lsn.0));
-            }
-
-            #[cfg(feature = "observability")]
-            let wal_logged = std::time::Instant::now();
-
-            // Commit with configured durability mode
-            // For Sync: drains and flushes immediately
-            // For Async: returns immediately
-            // For GroupCommit: registers and returns epoch
-            let wait_epoch = self.wal.commit()?;
-
-            #[cfg(feature = "observability")]
-            let wal_commit_completed = std::time::Instant::now();
-
-            // For GroupCommit mode, wait for the epoch to be flushed.
-            // AsyncBatched mode returns an epoch but does NOT wait.
-            if let Some(epoch) = wait_epoch
-                && let Some(gc) = self.wal.group_commit_coordinator()
-                && self.durability_mode.waits_for_durability()
-            {
-                gc.wait_for_flush(epoch)?;
-            }
-
-            #[cfg(feature = "observability")]
-            {
-                // Record detailed breakdown for tracing and metrics.
-                let ts_lock_wait_us =
-                    ts_lock_acquired.duration_since(ts_lock_start).as_micros() as u64;
-                let wal_log_us = wal_logged.duration_since(wal_start).as_micros() as u64;
-                let wal_commit_us =
-                    wal_commit_completed.duration_since(wal_logged).as_micros() as u64;
-                let total_us = wal_commit_completed
-                    .duration_since(ts_lock_start)
-                    .as_micros() as u64;
-
-                let total_commit_us = commit_start.elapsed().as_micros() as u64;
-                tracing::info!(
-                    ts_lock_wait_us,
-                    wal_log_us,
-                    wal_commit_us,
-                    total_us,
-                    total_commit_us,
-                    operations_count,
-                    commit_ts = %commit,
-                    durability_mode = ?self.durability_mode,
-                    "Transaction commit breakdown (concurrent WAL)"
-                );
-            }
-
             commit
         };
 
-        // Apply all changes atomically.
+        // Issue #3413 (WAL abort framing): run the commit-time precondition guards
+        // HERE — under `current_timestamp`, BEFORE the WAL append — instead of
+        // inside `apply_changes` after the frame is already durable. Each guard
+        // reads only current storage (never `historical`), and `current_timestamp`
+        // is held across `apply_changes` below, so a guard that passes now stays
+        // valid through apply: no other committer can apply in between. A rejection
+        // returns here with NO WAL frame appended, so a transaction refused at
+        // runtime can never be reapplied by crash recovery. These are the three
+        // previously-post-WAL rejection paths: the #3416 delete-orphan /
+        // dangling-endpoint write-skew re-checks and the #3577/#3755
+        // CAS/lease/fence precondition re-check.
+        apply::detect_delete_orphan_write_skew(self)?;
+        apply::detect_create_edge_dangling_endpoint(self)?;
+        cas::detect_cas_precondition_violations(self, commit_timestamp)?;
+
+        #[cfg(feature = "observability")]
+        let wal_start = std::time::Instant::now();
+
+        // Log operations to WAL (lock-free striped append!). Runs AFTER the guards
+        // above (so a rejected transaction leaves no durable frame) and BEFORE
+        // applying changes (for durability). Returns the base (lowest) LSN
+        // allocated for this commit, if any.
+        let base_lsn = wal::log_operations_to_wal(self, commit_timestamp, &closing_version_ids)?;
+
+        // Register the commit's base LSN as in-flight BEFORE the durability fsync,
+        // so a write that becomes durable is always registered. The guard survives
+        // to end-of-function (see its declaration above).
+        if let (Some(tracker), Some(base_lsn)) = (self.in_flight.as_ref(), base_lsn) {
+            in_flight_guard = Some(tracker.register(base_lsn.0));
+        }
+
+        #[cfg(feature = "observability")]
+        let wal_logged = std::time::Instant::now();
+
+        // Commit with configured durability mode.
+        // For Sync: drains and flushes immediately.
+        // For Async: returns immediately.
+        // For GroupCommit: registers and returns epoch.
+        let wait_epoch = self.wal.commit()?;
+
+        #[cfg(feature = "observability")]
+        let wal_commit_completed = std::time::Instant::now();
+
+        // For GroupCommit mode, wait for the epoch to be flushed.
+        // AsyncBatched mode returns an epoch but does NOT wait.
+        if let Some(epoch) = wait_epoch
+            && let Some(gc) = self.wal.group_commit_coordinator()
+            && self.durability_mode.waits_for_durability()
+        {
+            gc.wait_for_flush(epoch)?;
+        }
+
+        #[cfg(feature = "observability")]
+        {
+            // Record detailed breakdown for tracing and metrics.
+            let ts_lock_wait_us = ts_lock_acquired.duration_since(ts_lock_start).as_micros() as u64;
+            let wal_log_us = wal_logged.duration_since(wal_start).as_micros() as u64;
+            let wal_commit_us = wal_commit_completed.duration_since(wal_logged).as_micros() as u64;
+            let total_us = wal_commit_completed
+                .duration_since(ts_lock_start)
+                .as_micros() as u64;
+
+            let total_commit_us = commit_start.elapsed().as_micros() as u64;
+            tracing::info!(
+                ts_lock_wait_us,
+                wal_log_us,
+                wal_commit_us,
+                total_us,
+                total_commit_us,
+                operations_count,
+                commit_ts = %commit_timestamp,
+                durability_mode = ?self.durability_mode,
+                "Transaction commit breakdown (concurrent WAL)"
+            );
+        }
+
+        // Apply all changes atomically, still holding `current_timestamp` (Issue
+        // #3413): the guards above ran under this same held lock, so no other
+        // committer can have applied in between and their results remain valid.
         // Nodes/edges are written with commit_timestamp: None during this phase.
         //
         // Issue #3425: `apply_changes` returns the `historical.write()` guard
@@ -774,22 +811,19 @@ impl WriteTransaction {
         //
         // The pre-generated closing version ids (Issue #3406) are consumed here
         // in the same buffer order they were logged to the WAL.
-        //
-        // Test-only interleaving hook (Issue #3416 Pt1): fires AFTER
-        // validate/detect_conflicts/WAL but BEFORE `apply_changes` acquires the
-        // `historical.write()` guard, so a test can commit a concurrent
-        // delete/create in this window and exercise the commit-time write-skew
-        // re-checks. Production builds compile this away.
-        #[cfg(test)]
-        commit_test_hooks::run_pre_apply_hook();
 
         // Always-compiled one-shot interleaving seam for the lost-write persist
-        // race regression tests (which live in `tests/` and therefore cannot see
-        // the `#[cfg(test)]` hooks above). This fires at the SAME point — durable
-        // + acknowledged (WAL fsynced), in-flight LSN registered, but NOT yet
-        // applied — so an integration test can park exactly one commit here while
-        // it drives a racing `persist_indexes()`. In production the seam is a
-        // single relaxed atomic load (unarmed), so it is effectively zero-cost.
+        // race regression tests (which live in `tests/`). This fires at the
+        // durable-but-not-yet-applied point — WAL fsynced, in-flight LSN
+        // registered, `current_timestamp` STILL held (Issue #3413). A racing
+        // `persist_indexes()` briefly needs `current_timestamp` too (`db/admin.rs`,
+        // to read the frontier + in-flight set consistently), so it SERIALIZES
+        // behind a commit parked here rather than observing a durable-but-unapplied
+        // write — the invariant the reworked tests pin. The tests therefore park
+        // the commit on a SEPARATE thread and release it via a channel, so persist
+        // blocks then proceeds (no self-deadlock); a persist driven on the SAME
+        // thread as a parked commit WOULD hang, by design. In production the seam is
+        // a single relaxed atomic load (unarmed), so it is effectively zero-cost.
         race_seam::run_pre_apply_once();
 
         let historical_guard = apply::apply_changes(self, commit_timestamp, &closing_version_ids)?;
@@ -823,6 +857,15 @@ impl WriteTransaction {
         // build under the global historical write lock would only add latency
         // without any correctness benefit.
         drop(historical_guard);
+
+        // Issue #3413 (WAL abort framing): release `current_timestamp` now that the
+        // precondition guards, WAL append + durability, apply, and finalize are all
+        // complete. Holding it across the whole commit is what makes a guard that
+        // passed pre-WAL still valid at apply time, so a rejected transaction never
+        // leaves a durable frame for crash recovery to reapply. Everything below
+        // (vector-index notify, changefeed broadcast, visibility registration) is
+        // independent of commit serialization and runs off the held lock.
+        drop(ts);
 
         // Notify temporal vector index of transaction completion (for snapshot creation).
         // Only call this if the transaction modified vector properties to avoid unnecessary overhead.
@@ -2834,37 +2877,39 @@ pub(crate) mod commit_test_hooks {
         }
     }
 
-    static PRE_APPLY_HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+    static PRE_COMMIT_CLOCK_HOOK: Mutex<Option<Hook>> = Mutex::new(None);
 
-    /// Install a hook fired just BEFORE `apply::apply_changes` (i.e. after
-    /// `validate`/`detect_conflicts`/WAL, before the `historical.write()` guard
-    /// is acquired). This is the symmetric counterpart to the pre-finalize hook
-    /// and is the seam that lets a test drive the Issue #3416 Pt1 MIRROR
-    /// interleaving deterministically: a committing edge-creator can be parked
-    /// here (endpoints already validated, guard not yet held) while a concurrent
-    /// node delete commits, so the edge tx then aborts at its own commit-time
-    /// endpoint re-check. Parking here (rather than at pre-finalize) avoids a
-    /// self-deadlock: the guard is not yet held, so the concurrent deleter can
-    /// acquire `historical.write()` and commit.
-    pub(crate) fn set_pre_apply_hook(hook: Hook) {
-        *PRE_APPLY_HOOK
+    /// Install a hook fired just BEFORE the committing transaction acquires the
+    /// `current_timestamp` lock — i.e. after `validate`/`detect_conflicts`/
+    /// `check_constraints` but before the WAL abort-framing critical section
+    /// (Issue #3413). This is the seam that drives the #3416 write-skew re-checks
+    /// deterministically now that `current_timestamp` is held across apply: a test
+    /// parks the victim here (holding no commit-path lock yet) while a concurrent
+    /// delete/create commits, so the victim then aborts at its own commit-time
+    /// re-check under `current_timestamp`.
+    ///
+    /// Firing HERE (rather than after the WAL append, as the removed pre-apply
+    /// hook did) is what avoids a self-deadlock: `current_timestamp` is NOT yet
+    /// held, so the concurrent committer can acquire it and commit.
+    pub(crate) fn set_pre_commit_clock_hook(hook: Hook) {
+        *PRE_COMMIT_CLOCK_HOOK
             .lock()
-            .expect("pre-apply hook mutex poisoned") = Some(hook);
+            .expect("pre-commit-clock hook mutex poisoned") = Some(hook);
     }
 
-    /// Remove any installed pre-apply hook.
-    pub(crate) fn clear_pre_apply_hook() {
-        *PRE_APPLY_HOOK
+    /// Remove any installed pre-commit-clock hook.
+    pub(crate) fn clear_pre_commit_clock_hook() {
+        *PRE_COMMIT_CLOCK_HOOK
             .lock()
-            .expect("pre-apply hook mutex poisoned") = None;
+            .expect("pre-commit-clock hook mutex poisoned") = None;
     }
 
-    /// Invoke the installed pre-apply hook, if any (Arc cloned out from under
-    /// the mutex, as with `run_pre_finalize_hook`).
-    pub(crate) fn run_pre_apply_hook() {
-        let hook = PRE_APPLY_HOOK
+    /// Invoke the installed pre-commit-clock hook, if any (Arc cloned out from
+    /// under the mutex, as with `run_pre_finalize_hook`).
+    pub(crate) fn run_pre_commit_clock_hook() {
+        let hook = PRE_COMMIT_CLOCK_HOOK
             .lock()
-            .expect("pre-apply hook mutex poisoned")
+            .expect("pre-commit-clock hook mutex poisoned")
             .clone();
         if let Some(hook) = hook {
             hook();

@@ -653,51 +653,18 @@ pub(crate) fn apply_changes<'a>(
     // Acquire lock on historical storage once before processing all operations.
     let mut historical = tx.historical.write();
 
-    // Issue #3416 Pt1 — commit-time SI write-skew re-checks for node
-    // deletes/retracts AND edge creations, run under the SAME exclusive
-    // `historical.write()` guard so the two orderings are symmetric: whichever
-    // of a concurrent delete-node / create-edge pair applies SECOND aborts, so
-    // exactly one wins and no orphan is committed in EITHER ordering.
-    //
-    // `historical.write()` is the commit serialization point: no other tx can be
-    // applying while we hold it, so committed current state now reflects every
-    // earlier-committed transaction. Both checks read current storage / adjacency
-    // (leaf / order-class 6-7) while holding `historical` (class 3), never call
-    // back into `historical`/`wal`/`current_timestamp`, and touch no adjacency
-    // locks out of order — consistent with the CLAUDE.md lock order.
-    //
-    // Ordering (i): delete/retract applies second. It cannot see a concurrent
-    // create_edge that committed after its snapshot (disjoint write sets escape
-    // first-committer-wins); the delete-side check re-counts committed connected
-    // edges and aborts on a newly-appeared one.
-    detect_delete_orphan_write_skew(tx)?;
-    // Ordering (ii): create_edge applies second. Its endpoint existence was
-    // checked by `validate()` BEFORE the timestamp/WAL/apply phase and the apply
-    // path does no endpoint re-check, so a concurrent delete of an endpoint that
-    // commits between validate() and here would leave a dangling edge. The
-    // create-side check re-verifies both endpoints under the guard.
-    detect_create_edge_dangling_endpoint(tx)?;
-
-    // Issue #3577 — authoritative compare-and-set re-check. Run under the SAME
-    // exclusive `historical.write()` guard so two claimants opened on the same
-    // snapshot cannot both pass: the second observes the first's committed head
-    // version and aborts with `CasMismatch` (non-retriable). Lease expiry is
-    // judged against `commit_timestamp` (the HLC taken under `current_timestamp`),
-    // not the tx snapshot.
-    //
-    // Durability caveat: this runs BEFORE any op is applied, so a failed CAS
-    // applies nothing to in-memory state. But the WAL frame was already
-    // appended+fsync'd earlier in `commit_with_timestamp_inner`. A pure-CAS
-    // mismatch is normally caught EARLIER by the pre-lock fast-path in
-    // `conflict::detect_conflicts` (before the WAL append), so the common
-    // single-threaded stale-CAS case writes nothing durable. A mismatch that
-    // only manifests HERE — a genuine concurrent pure-CAS race whose loser
-    // passed the fast-path, or ANY lease claim (excluded from the fast-path) —
-    // still leaves a durable `[BeginTx, UpdateNode, CommitTx]` frame that, absent
-    // WAL abort framing (#3413), would replay on crash. This is the same
-    // accepted caveat as the #3416 sibling write-skew checks under this guard.
-    // Zero cost for transactions with no conditional writes.
-    super::cas::detect_cas_precondition_violations(tx, commit_timestamp)?;
+    // Issue #3413 (WAL abort framing): the commit-time precondition guards — the
+    // #3416 delete-orphan / dangling-endpoint write-skew re-checks and the
+    // #3577/#3755 CAS/lease/fence re-check — USED to run HERE, under this
+    // `historical.write()` guard, AFTER the WAL frame was already durable, so a
+    // rejection left a phantom `[BeginTx, ..ops.., CommitTx]` frame that crash
+    // recovery reapplied. They now run in `commit_with_timestamp_inner` BEFORE
+    // the WAL append, under the `current_timestamp` lock held across this apply.
+    // `current_timestamp` serializes commits end-to-end, so a guard that passed
+    // there is still valid here (no other committer can have applied in between),
+    // and a rejected transaction returns with NO WAL frame — nothing to replay.
+    // See [`detect_delete_orphan_write_skew`], [`detect_create_edge_dangling_endpoint`]
+    // (this module) and [`super::cas::detect_cas_precondition_violations`].
 
     // Issue #3406: the closing-version IDs (delete tombstones + retraction
     // versions) are pre-generated once per commit — BEFORE the WAL log phase —
@@ -761,17 +728,22 @@ pub(crate) fn apply_changes<'a>(
 ///
 /// # Locking
 ///
-/// Called while `historical.write()` (order class 3) is held. It reads the
-/// adjacency indexes (`outgoing`/`incoming`, classes 6/7) and current-storage
-/// edge map -- all LATER than `historical` in the documented lock order -- and
-/// never calls back into `historical`/`wal`/`current_timestamp`, so no
-/// lock-order inversion is introduced.
+/// Called while only `current_timestamp` (order class 1) is held, before the WAL
+/// append (Issue #3413). It reads the adjacency indexes (`outgoing`/`incoming`,
+/// classes 6/7) and current-storage edge map -- all LATER than `current_timestamp`
+/// in the documented lock order -- and never calls back into
+/// `historical`/`wal`/`current_timestamp`, so no lock-order inversion is
+/// introduced.
 ///
 /// # Cost
 ///
 /// O(degree) committed-adjacency reads per buffered node delete/retract, at
 /// commit only. Zero cost for transactions that delete/retract no nodes.
-fn detect_delete_orphan_write_skew(tx: &WriteTransaction) -> Result<()> {
+///
+/// Issue #3413: invoked from `commit_with_timestamp_inner` under the
+/// `current_timestamp` lock BEFORE the WAL append (not from `apply_changes`), so
+/// a rejection leaves no durable frame. Reads only current storage / adjacency.
+pub(super) fn detect_delete_orphan_write_skew(tx: &WriteTransaction) -> Result<()> {
     use crate::api::transaction::BufferedWrite;
 
     // Short-circuit (NIT): most transactions delete/retract no nodes; skip
@@ -877,15 +849,21 @@ fn detect_delete_orphan_write_skew(tx: &WriteTransaction) -> Result<()> {
 ///
 /// # Locking
 ///
-/// Called while `historical.write()` (order class 3) is held; reads only the
-/// current-storage node map (a leaf) and this tx's buffer, never calling back
-/// into `historical`/`wal`/`current_timestamp`. No lock-order inversion.
+/// Called while only `current_timestamp` (order class 1) is held, before the WAL
+/// append (Issue #3413); reads only the current-storage node map (a leaf) and
+/// this tx's buffer, never calling back into `historical`/`wal`/`current_timestamp`.
+/// No lock-order inversion.
 ///
 /// # Cost
 ///
 /// O(1) buffer/current lookups per buffered `CreateEdge`, at commit only. Zero
 /// cost for transactions that create no edges.
-fn detect_create_edge_dangling_endpoint(tx: &WriteTransaction) -> Result<()> {
+///
+/// Issue #3413: invoked from `commit_with_timestamp_inner` under the
+/// `current_timestamp` lock BEFORE the WAL append (not from `apply_changes`), so
+/// a rejection leaves no durable frame. Reads only this tx's buffer + current
+/// storage.
+pub(super) fn detect_create_edge_dangling_endpoint(tx: &WriteTransaction) -> Result<()> {
     use crate::api::transaction::BufferedWrite;
 
     // Resolve an endpoint exactly as `validation::validate` does: a same-tx

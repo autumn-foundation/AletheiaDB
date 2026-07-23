@@ -61,10 +61,13 @@ pub(crate) fn detect_conflicts(tx: &WriteTransaction) -> Result<()> {
     //     both pass the fast-path; the under-guard check still catches the loser
     //     (first-committer-wins).
     //
-    // Without this fast-path every stale-version pure CAS (the common,
-    // single-threaded path) durably writes a `[BeginTx, UpdateNode, CommitTx]`
-    // frame and only THEN aborts under the guard — and absent WAL abort framing
-    // (#3413) a crash would replay that rejected write.
+    // This is now purely an optimization: since Issue #3413 the authoritative
+    // re-check in `cas::detect_cas_precondition_violations` also runs BEFORE the
+    // WAL append (under `current_timestamp`), so a rejected CAS never writes a
+    // durable frame regardless of this fast-path. The fast-path still lets the
+    // common single-threaded stale-CAS case bail out earlier — before acquiring
+    // `current_timestamp` and building the WAL batch — rather than at the
+    // commit-clock re-check.
     for precondition in &tx.cas_preconditions {
         // Lease claims MUST reach the authoritative under-guard check unchanged.
         // A fenced claim (DBOS Phase 3e) always carries a lease today
