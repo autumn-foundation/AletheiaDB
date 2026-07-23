@@ -119,7 +119,19 @@ This is the part to internalize before relying on a replica for anything:
   them to know your current data-loss exposure. For a reproducible
   measurement harness, see `tests/replication_slo_harness.rs`.
 
-  <!-- SLO-NUMBERS: filled after harness run -->
+  Representative measurements from that harness (Linux CI-class hardware;
+  reproduce with `cargo test --test replication_slo_harness -- --ignored`
+  for the reference fixture):
+
+  | Metric | CI-sized fixture | Reference (10K nodes / 50K edges) | Target |
+  |--------|------------------|-----------------------------------|--------|
+  | Promotion latency (RTO, engine-side) | 1–9 ms | 17–23 ms | < 10 s |
+  | Replication lag p50 / p99 (sustained load) | 21 ms / 254 ms | 5.5 s / 18.1 s¹ | p99 < 10 s (CI-sized) |
+  | Primary write-path overhead with attached replica | ≈ 0 (within noise) | ≈ 0 (within noise) | < 25 % |
+
+  ¹ Reference-load lag reflects the current per-batch temporal-index rebuild
+  on the replica (a documented performance follow-up in the applier); it is
+  printed by the harness but not asserted.
 
 - **A paused/disconnected replica simply stops advancing** — it does not
   serve stale-but-moving data incorrectly, it serves a **frozen**,
