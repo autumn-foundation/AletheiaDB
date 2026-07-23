@@ -1,20 +1,39 @@
 {
-  "$comment": "Machine-readable parity inventory for the AletheiaDB HTTP + MCP surfaces. Consumed by the framework-migration/design lane. Pinned against branch feature/parity-harness at the current tip of work (scout commit 8351ff4). Every 'pinned_by' names a test in this repo that asserts the behavior; 'referenced' means the behavior is pinned by a pre-existing in-crate test (not re-implemented in the parity suites, to avoid duplication). TWO KINDS OF MCP PIN: (1) 'behavior-pinned' tools — get_node, create_node, create_edge, traverse — carry black-box RUNTIME assertions in tests/parity_mcp.rs (success/error envelopes, temporal block, vector elision, roundtrip reachability); (2) 'inventory-pinned' tools — the remaining 70 — have only their name + access class pinned via the golden set. Live drift detection of the full 74-tool name/class registry (a tool added/removed/renamed/reclassified) is provided by the in-crate golden test src/mcp/auth_tests.rs::live_tool_inventory_matches_golden; the external tests/parity_mcp.rs::tool_inventory_golden_is_stable is only a cross-crate mirror of that constant and cannot itself read the live registry.",
+  "$comment": "Machine-readable parity inventory for the AletheiaDB HTTP + MCP surfaces. Consumed by the framework-migration/design lane. Pinned against branch feature/parity-harness at the current tip of work (scout commit 8351ff4). Every 'pinned_by' names a test in this repo that asserts the behavior; 'referenced' means the behavior is pinned by a pre-existing in-crate test (not re-implemented in the parity suites, to avoid duplication). TWO KINDS OF MCP PIN: (1) 'behavior-pinned' tools \u2014 get_node, create_node, create_edge, traverse \u2014 carry black-box RUNTIME assertions in tests/parity_mcp.rs (success/error envelopes, temporal block, vector elision, roundtrip reachability); (2) 'inventory-pinned' tools \u2014 the remaining 70 \u2014 have only their name + access class pinned via the golden set. Live drift detection of the full 74-tool name/class registry (a tool added/removed/renamed/reclassified) is provided by the in-crate golden test src/mcp/auth_tests.rs::live_tool_inventory_matches_golden; the external tests/parity_mcp.rs::tool_inventory_golden_is_stable is only a cross-crate mirror of that constant and cannot itself read the live registry.",
   "generated_for": "framework port parity harness",
   "totals": {
-    "http_routes": 5,
+    "http_routes": 6,
     "mcp_tools": 74,
     "mcp_budgetable_read_tools": 26
   },
   "http": {
-    "surface_files": ["src/http/mod.rs", "src/http/server.rs", "src/http/handlers.rs", "src/http/admin.rs", "src/http/auth.rs", "src/http/error.rs", "src/http/config.rs"],
+    "surface_files": [
+      "src/http/mod.rs",
+      "src/http/server.rs",
+      "src/http/handlers.rs",
+      "src/http/admin.rs",
+      "src/http/auth.rs",
+      "src/http/error.rs",
+      "src/http/config.rs"
+    ],
     "parity_suite": "tests/parity_http.rs",
     "route_inventory_source": "src/http/handlers.rs::all_routes()",
     "error_envelope": {
       "shape": "{success:false, error:<string>, code?, retriable?, details?, trace_id?}",
       "additive_fields_note": "code/retriable/details are present ONLY for auth (401/403) and resource-limit (413/422/429) variants; plain 400/404/500 keep the minimal {success,error} shape.",
       "trace_id_note": "trace_id body field + x-trace-id header are populated only under the observability/otel features (pinned by tests/http_otel_tracing.rs). Absent otherwise.",
-      "code_vocabulary": ["UNAUTHENTICATED", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "INVALID_ARGUMENT", "NOT_FOUND", "INTERNAL", "CONSTRAINT_VIOLATION", "FAILED_PRECONDITION", "CONFLICT", "UNAVAILABLE"],
+      "code_vocabulary": [
+        "UNAUTHENTICATED",
+        "PERMISSION_DENIED",
+        "RESOURCE_EXHAUSTED",
+        "INVALID_ARGUMENT",
+        "NOT_FOUND",
+        "INTERNAL",
+        "CONSTRAINT_VIOLATION",
+        "FAILED_PRECONDITION",
+        "CONFLICT",
+        "UNAVAILABLE"
+      ],
       "constraint_mapping_note": "Since #3629/#3234 the legacy JSON-RPC write path routes db-layer errors through AletheiaHttpError::from_db_error: schema/type/required-key/unique violations -> 409 CONSTRAINT_VIOLATION (with details); non-conforming/duplicate-on-enable and validation/CAS/invalid-state precondition failures -> 412 FAILED_PRECONDITION; serialization/write-conflict/abort -> 409 CONFLICT (retriable); clock skew -> 503 UNAVAILABLE (retriable). Genuine bad input still maps to 400 INVALID_ARGUMENT. Pinned by tests/http_api.rs::create_node_unique_violation_maps_to_409_constraint_violation and the src/http/error.rs from_db_error unit tests.",
       "vocabulary_asymmetry_vs_mcp": "Both surfaces use RESOURCE_EXHAUSTED for per-query resource-limit errors (Issue #3368: HTTP /query since #3446, MCP `query` tool since #3368-lane4). HTTP also emits UNAVAILABLE for the 503 in-flight-query-cap guard (Issue #3368 hardening of #3446); MCP has no such code. Remaining asymmetry: HTTP emits `code` only on auth+limit variants; MCP emits `code` on every error."
     },
@@ -27,8 +46,14 @@
         "access_class": "metrics",
         "success_status": 200,
         "success_body": "{\"status\":\"healthy\"}",
-        "error_statuses": [401],
-        "pinned_by": ["tests/parity_http.rs::status_success_shape", "tests/parity_http.rs::status_requires_credential_in_required_mode", "tests/parity_http.rs::route_inventory_is_the_known_five"]
+        "error_statuses": [
+          401
+        ],
+        "pinned_by": [
+          "tests/parity_http.rs::status_success_shape",
+          "tests/parity_http.rs::status_requires_credential_in_required_mode",
+          "tests/parity_http.rs::route_inventory_is_the_known_five"
+        ]
       },
       {
         "method": "POST",
@@ -38,7 +63,19 @@
         "access_class": "per-operation (query_access_class): read for find_node/get_node/bulk_get_nodes/find_neighbors; write for create/bulk_create/bulk_update/bulk_delete; execute_query/bulk_execute_query read iff no mutating clause",
         "success_status": 200,
         "success_body": "{success:true, data?, truncated?}",
-        "error_statuses": [400, 401, 403, 404, 409, 412, 413, 422, 429, 500, 503],
+        "error_statuses": [
+          400,
+          401,
+          403,
+          404,
+          409,
+          412,
+          413,
+          422,
+          429,
+          500,
+          503
+        ],
         "pinned_by": [
           "tests/parity_http.rs::query_success_envelope_shape",
           "tests/parity_http.rs::query_not_found_minimal_error_envelope",
@@ -67,8 +104,16 @@
         "access_class": "admin",
         "success_status": 200,
         "success_body": "{success:true, data:{key (plaintext once, aletheia_sk_ prefix), id, role}}",
-        "error_statuses": [400, 401, 403],
-        "pinned_by": ["tests/parity_http.rs::admin_create_key_success_shape", "tests/parity_http.rs::admin_create_key_non_admin_is_403", "tests/parity_http.rs::admin_create_key_invalid_name_is_400"]
+        "error_statuses": [
+          400,
+          401,
+          403
+        ],
+        "pinned_by": [
+          "tests/parity_http.rs::admin_create_key_success_shape",
+          "tests/parity_http.rs::admin_create_key_non_admin_is_403",
+          "tests/parity_http.rs::admin_create_key_invalid_name_is_400"
+        ]
       },
       {
         "method": "GET",
@@ -77,9 +122,15 @@
         "handler_loc": "src/http/admin.rs:69",
         "access_class": "admin",
         "success_status": 200,
-        "success_body": "{success:true, data:{keys:[{id, key_prefix, role, ...}]}} — never full key material",
-        "error_statuses": [401, 403],
-        "pinned_by": ["tests/parity_http.rs::admin_list_keys_masks_material", "tests/parity_http.rs::admin_list_keys_non_admin_is_403"]
+        "success_body": "{success:true, data:{keys:[{id, key_prefix, role, ...}]}} \u2014 never full key material",
+        "error_statuses": [
+          401,
+          403
+        ],
+        "pinned_by": [
+          "tests/parity_http.rs::admin_list_keys_masks_material",
+          "tests/parity_http.rs::admin_list_keys_non_admin_is_403"
+        ]
       },
       {
         "method": "POST",
@@ -89,24 +140,73 @@
         "access_class": "admin",
         "success_status": 200,
         "success_body": "{success:true, data:{revoked:true, id}}",
-        "error_statuses": [401, 403, 404],
-        "pinned_by": ["tests/parity_http.rs::admin_revoke_key_success_and_immediate_effect", "tests/parity_http.rs::admin_revoke_unknown_id_is_404", "tests/parity_http.rs::admin_revoke_non_admin_is_403"]
+        "error_statuses": [
+          401,
+          403,
+          404
+        ],
+        "pinned_by": [
+          "tests/parity_http.rs::admin_revoke_key_success_and_immediate_effect",
+          "tests/parity_http.rs::admin_revoke_unknown_id_is_404",
+          "tests/parity_http.rs::admin_revoke_non_admin_is_403"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/admin/promote",
+        "handler": "promote",
+        "handler_loc": "src/http/admin.rs:143",
+        "access_class": "admin",
+        "success_status": 200,
+        "success_body": "{success:true, data:{role:\"primary\", applier_stopped, last_applied_lsn}}",
+        "error_statuses": [
+          401,
+          403
+        ],
+        "pinned_by": [
+          "tests/parity_http.rs::route_inventory_is_the_known_six",
+          "tests/replication_http_readonly.rs::promote_route_flips_replica_to_primary_and_allows_writes",
+          "tests/replication_http_readonly.rs::promote_route_denies_non_admin_roles_and_leaves_role_unchanged"
+        ]
       }
     ],
     "cross_route_invariants": {
-      "uniform_401": "tests/parity_http.rs::every_route_uniform_401_without_credential — every route returns a byte-identical 401 body + WWW-Authenticate: Bearer when no credential is presented in required mode.",
+      "uniform_401": "tests/parity_http.rs::every_route_uniform_401_without_credential \u2014 every route returns a byte-identical 401 body + WWW-Authenticate: Bearer when no credential is presented in required mode.",
       "route_inventory_fixed": "tests/parity_http.rs::route_inventory_is_the_known_five"
     }
   },
   "mcp": {
-    "surface_files": ["src/mcp/mod.rs", "src/mcp/server.rs", "src/mcp/auth.rs", "src/mcp/error.rs", "src/mcp/tools.rs", "src/mcp/batch.rs", "src/mcp/budget.rs", "src/mcp/cursor.rs"],
+    "surface_files": [
+      "src/mcp/mod.rs",
+      "src/mcp/server.rs",
+      "src/mcp/auth.rs",
+      "src/mcp/error.rs",
+      "src/mcp/tools.rs",
+      "src/mcp/batch.rs",
+      "src/mcp/budget.rs",
+      "src/mcp/cursor.rs"
+    ],
     "parity_suite": "tests/parity_mcp.rs",
     "access_class_source": "src/mcp/auth.rs::TOOL_ACCESS_CLASSES",
     "advertised_tool_source": "src/mcp/server.rs::tool_definitions()",
     "error_envelope": {
       "shape": "{error:{code, message, retriable, details?}, <legacy top-level fields>?}",
-      "code_enum": ["NOT_FOUND", "INVALID_ARGUMENT", "CONSTRAINT_VIOLATION", "FAILED_PRECONDITION", "CONFLICT", "UNAVAILABLE", "INTERNAL", "UNAUTHENTICATED", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED"],
-      "retriable_true_only_for": ["CONFLICT", "UNAVAILABLE"],
+      "code_enum": [
+        "NOT_FOUND",
+        "INVALID_ARGUMENT",
+        "CONSTRAINT_VIOLATION",
+        "FAILED_PRECONDITION",
+        "CONFLICT",
+        "UNAVAILABLE",
+        "INTERNAL",
+        "UNAUTHENTICATED",
+        "PERMISSION_DENIED",
+        "RESOURCE_EXHAUSTED"
+      ],
+      "retriable_true_only_for": [
+        "CONFLICT",
+        "UNAVAILABLE"
+      ],
       "resource_exhausted_note": "RESOURCE_EXHAUSTED (Issue #3368, MCP `query` tool per-query resource limits) defaults non-retriable; the read-only wall-clock-timeout case overrides retriable:true at its call site, the result-byte-cap case keeps the non-retriable default.",
       "pinned_by": "tests/parity_mcp.rs::error_code_vocabulary_is_stable"
     },
@@ -120,89 +220,688 @@
       "opt_out": "include_vectors:true returns full array",
       "pinned_by": "tests/parity_mcp.rs::vectors_elided_by_default_and_restorable"
     },
-    "inventory_golden": "tests/parity_mcp.rs::tool_inventory_golden_is_stable (external mirror — internal-consistency only)",
-    "inventory_live_drift_detector": "src/mcp/auth_tests.rs::live_tool_inventory_matches_golden (in-crate; derives the advertised (name, class) set from the live registry and asserts it equals the golden 74 pairs — the authoritative drift detector)",
-    "budgetable_read_tools": ["get_node", "list_nodes", "get_edge", "list_edges", "get_outgoing_edges", "get_incoming_edges", "traverse", "find_similar", "semantic_search", "hybrid_query", "query", "find_nodes_at_time", "get_node_history", "get_schema", "get_belief_revisions", "list_drift_monitors", "query_drift_alarms", "contradiction_genealogy", "find_contradictions", "trust_breakdown", "semantic_path", "concept_analogy", "concept_mean", "find_duplicate_candidates", "semantic_horizon", "context_aspects"],
+    "inventory_golden": "tests/parity_mcp.rs::tool_inventory_golden_is_stable (external mirror \u2014 internal-consistency only)",
+    "inventory_live_drift_detector": "src/mcp/auth_tests.rs::live_tool_inventory_matches_golden (in-crate; derives the advertised (name, class) set from the live registry and asserts it equals the golden 74 pairs \u2014 the authoritative drift detector)",
+    "budgetable_read_tools": [
+      "get_node",
+      "list_nodes",
+      "get_edge",
+      "list_edges",
+      "get_outgoing_edges",
+      "get_incoming_edges",
+      "traverse",
+      "find_similar",
+      "semantic_search",
+      "hybrid_query",
+      "query",
+      "find_nodes_at_time",
+      "get_node_history",
+      "get_schema",
+      "get_belief_revisions",
+      "list_drift_monitors",
+      "query_drift_alarms",
+      "contradiction_genealogy",
+      "find_contradictions",
+      "trust_breakdown",
+      "semantic_path",
+      "concept_analogy",
+      "concept_mean",
+      "find_duplicate_candidates",
+      "semantic_horizon",
+      "context_aspects"
+    ],
     "provenance_filterable_read_tools": {
-      "$comment": "Issue #3348: read tools that accept the optional additive provenance filter params (provenance_source, provenance_sources, min_confidence, include_unattributed). Purely additive — omitting all four is byte-identical to prior behavior, so this does NOT change the tool name/class golden. Source of truth: PROVENANCE_FILTERABLE_TOOLS in src/mcp/server.rs. Behavior pinned by src/mcp/tests.rs::provenance_filter_tests.",
-      "tools": ["get_node", "list_nodes", "get_outgoing_edges", "get_incoming_edges", "traverse", "find_similar", "hybrid_query"],
+      "$comment": "Issue #3348: read tools that accept the optional additive provenance filter params (provenance_source, provenance_sources, min_confidence, include_unattributed). Purely additive \u2014 omitting all four is byte-identical to prior behavior, so this does NOT change the tool name/class golden. Source of truth: PROVENANCE_FILTERABLE_TOOLS in src/mcp/server.rs. Behavior pinned by src/mcp/tests.rs::provenance_filter_tests.",
+      "tools": [
+        "get_node",
+        "list_nodes",
+        "get_outgoing_edges",
+        "get_incoming_edges",
+        "traverse",
+        "find_similar",
+        "hybrid_query"
+      ],
       "semantics": "AND across source/confidence; min_confidence inclusive; unattributed (no bundle) excluded unless include_unattributed:true; per-version (composes with as_of_*); invalid values -> INVALID_ARGUMENT with details.field; find_similar/hybrid_query filter candidates so top-k stay full; provenance filter + cursor paging -> INVALID_ARGUMENT (v1)."
     },
     "tools": [
-      {"name": "get_node", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::not_found_structured_error", "tests/parity_mcp.rs::out_of_range_id_is_non_retriable_structured_error", "tests/parity_mcp.rs::vectors_elided_by_default_and_restorable", "tests/parity_mcp.rs::success_envelope_and_temporal_block"]},
-      {"name": "create_node", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::success_envelope_and_temporal_block", "tests/parity_mcp.rs::representative_tool_roundtrip_is_wellformed"]},
-      {"name": "update_node", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "delete_node", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "retract_node", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "retract_edge", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "delete_node_cascade", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "list_nodes", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "count_nodes", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "get_edge", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "create_edge", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::representative_tool_roundtrip_is_wellformed"]},
-      {"name": "update_edge", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "delete_edge", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "apply_batch", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "src/mcp/tests.rs apply_batch suite"},
-      {"name": "list_edges", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "count_edges", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "get_outgoing_edges", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "get_incoming_edges", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "traverse", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::representative_tool_roundtrip_is_wellformed"]},
-      {"name": "find_similar", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "embed_query", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "Issue #2906 embedding tools; src/mcp/tests.rs embedding suite"},
-      {"name": "embed_text", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "Issue #2906 embedding tools; src/mcp/tests.rs embedding suite"},
-      {"name": "semantic_search", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "Issue #2906 embedding tools; src/mcp/tests.rs embedding suite"},
-      {"name": "semantic_path", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "src/mcp/tests.rs semantic-search tools suite (Issue #2907)"},
-      {"name": "concept_analogy", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "src/mcp/tests.rs semantic-search tools suite (Issue #2907)"},
-      {"name": "concept_mean", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "src/mcp/tests.rs semantic-search tools suite (Issue #2907)"},
-      {"name": "find_duplicate_candidates", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "src/mcp/tests.rs semantic-search tools suite (Issue #2907)"},
-      {"name": "semantic_horizon", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "src/mcp/tests.rs semantic-search tools suite (Issue #2907)"},
-      {"name": "context_aspects", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "src/mcp/tests.rs semantic-search tools suite (Issue #2907)"},
-      {"name": "enable_vector_index", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "list_vector_indexes", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "enable_unique_constraint", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "create_node_with_embedding", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "Issue #2906 embedding tools; src/mcp/tests.rs embedding suite"},
-      {"name": "update_node_embedding", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"], "referenced": "Issue #2906 embedding tools; src/mcp/tests.rs embedding suite"},
-      {"name": "list_unique_constraints", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "get_node_at_time", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "get_edge_at_time", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "find_nodes_at_time", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "list_changes", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "await_changes", "access_class": "read", "budgetable": false, "cursorable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable", "src/mcp/tests.rs changefeed await_changes suite"], "note": "Push-changefeed long-poll (Issue #3375). Excluded from the #3368 timeout / #3353 budget / #3360 cursor wrappers; a long-poll is expected to block. The HTTP SSE stream GET /changes/stream is a route-only surface (not an MCP tool)."},
-      {"name": "get_node_at_valid_time", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "get_node_at_transaction_time", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "get_node_history", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "diff_node_versions", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "get_edge_at_valid_time", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "get_edge_at_transaction_time", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "get_edge_history", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "diff_edge_versions", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "get_belief_revisions", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable", "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly", "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"]},
-      {"name": "create_drift_monitor", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable", "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly", "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"]},
-      {"name": "list_drift_monitors", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable", "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly", "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"]},
-      {"name": "delete_drift_monitor", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable", "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly", "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"]},
-      {"name": "query_drift_alarms", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable", "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly", "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"]},
-      {"name": "resolve_drift_alarm", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable", "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly", "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"]},
-      {"name": "contradiction_genealogy", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable", "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly", "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"]},
-      {"name": "find_contradictions", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable", "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly", "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"]},
-      {"name": "counterfactual_replay", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable", "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly", "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"]},
-      {"name": "trust_breakdown", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable", "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly", "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"]},
-      {"name": "list_trust_policies", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable", "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly", "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"]},
-      {"name": "hybrid_query", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "query", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable", "tests/parity_mcp.rs::query_over_ceiling_override_is_invalid_argument", "tests/parity_mcp.rs::query_byte_cap_is_resource_exhausted", "tests/parity_mcp.rs::query_row_cap_override_truncates_successfully", "tests/parity_mcp.rs::resource_exhausted_code_is_in_vocabulary"], "resource_limits": "Issue #3368 (MCP lane 4): optional per-call `limits` {timeout_ms, max_result_rows, max_response_bytes} folded against server defaults + operator ceilings. Over-ceiling override -> INVALID_ARGUMENT (kind invalid_params, details{dimension,requested,ceiling}); wall-clock timeout -> RESOURCE_EXHAUSTED (kind runtime_error, retriable:true, details{dimension:wall_clock_timeout,limit}); result-byte cap -> RESOURCE_EXHAUSTED (retriable:false, details{dimension:result_bytes,limit,consumed}); result-row cap -> truncated:true success (#3226). Timeout enforcement bounds the caller's wait via a thread-race without engine-level cancellation (read-only guard runs first, so a discarded query never writes); the raced worker is bounded by QueryLimitsConfig.max_in_flight_queries (default 64, MCP-only; at the cap a timed query is rejected UNAVAILABLE retriable:true with details{reason:in_flight_query_cap,max_in_flight_queries} instead of spawning; a worker that panics -> INTERNAL retriable:false, never a timeout). An equivalent in-flight cap on the HTTP /query worker path (#3446) is a parity follow-up. The result-byte cap is measured incrementally as rows are appended (peak working memory ~= cap) then re-checked exactly on the full serialized response. Composes with #3353 token budget (protective byte cap runs first inside handle_query, budget shaper runs after in dispatch_tool) and the #3360 cursor unsupported_construct. In-process per-dimension termination counters via AletheiaMcpServer::limit_termination_counts(); database_stats integration is a cross-lane storage follow-up."},
-      {"name": "get_schema", "access_class": "read", "budgetable": true, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "temporal_extent", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "lineage_upstream", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "lineage_downstream", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "audit_export", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "verify_chain", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "export_chain_head", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "create_namespace", "access_class": "write", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "list_namespaces", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "describe_namespace", "access_class": "read", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "database_stats", "access_class": "metrics", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "designate_subject", "access_class": "admin", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]},
-      {"name": "erase_subject", "access_class": "admin", "budgetable": false, "pinned_by": ["tests/parity_mcp.rs::tool_inventory_golden_is_stable"]}
+      {
+        "name": "get_node",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::not_found_structured_error",
+          "tests/parity_mcp.rs::out_of_range_id_is_non_retriable_structured_error",
+          "tests/parity_mcp.rs::vectors_elided_by_default_and_restorable",
+          "tests/parity_mcp.rs::success_envelope_and_temporal_block"
+        ]
+      },
+      {
+        "name": "create_node",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::success_envelope_and_temporal_block",
+          "tests/parity_mcp.rs::representative_tool_roundtrip_is_wellformed"
+        ]
+      },
+      {
+        "name": "update_node",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "delete_node",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "retract_node",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "retract_edge",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "delete_node_cascade",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "list_nodes",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "count_nodes",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "get_edge",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "create_edge",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::representative_tool_roundtrip_is_wellformed"
+        ]
+      },
+      {
+        "name": "update_edge",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "delete_edge",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "apply_batch",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ],
+        "referenced": "src/mcp/tests.rs apply_batch suite"
+      },
+      {
+        "name": "list_edges",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "count_edges",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "get_outgoing_edges",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "get_incoming_edges",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "traverse",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::representative_tool_roundtrip_is_wellformed"
+        ]
+      },
+      {
+        "name": "find_similar",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "embed_query",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ],
+        "referenced": "Issue #2906 embedding tools; src/mcp/tests.rs embedding suite"
+      },
+      {
+        "name": "embed_text",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ],
+        "referenced": "Issue #2906 embedding tools; src/mcp/tests.rs embedding suite"
+      },
+      {
+        "name": "semantic_search",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ],
+        "referenced": "Issue #2906 embedding tools; src/mcp/tests.rs embedding suite"
+      },
+      {
+        "name": "semantic_path",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ],
+        "referenced": "src/mcp/tests.rs semantic-search tools suite (Issue #2907)"
+      },
+      {
+        "name": "concept_analogy",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ],
+        "referenced": "src/mcp/tests.rs semantic-search tools suite (Issue #2907)"
+      },
+      {
+        "name": "concept_mean",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ],
+        "referenced": "src/mcp/tests.rs semantic-search tools suite (Issue #2907)"
+      },
+      {
+        "name": "find_duplicate_candidates",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ],
+        "referenced": "src/mcp/tests.rs semantic-search tools suite (Issue #2907)"
+      },
+      {
+        "name": "semantic_horizon",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ],
+        "referenced": "src/mcp/tests.rs semantic-search tools suite (Issue #2907)"
+      },
+      {
+        "name": "context_aspects",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ],
+        "referenced": "src/mcp/tests.rs semantic-search tools suite (Issue #2907)"
+      },
+      {
+        "name": "enable_vector_index",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "list_vector_indexes",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "enable_unique_constraint",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "create_node_with_embedding",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ],
+        "referenced": "Issue #2906 embedding tools; src/mcp/tests.rs embedding suite"
+      },
+      {
+        "name": "update_node_embedding",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ],
+        "referenced": "Issue #2906 embedding tools; src/mcp/tests.rs embedding suite"
+      },
+      {
+        "name": "list_unique_constraints",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "get_node_at_time",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "get_edge_at_time",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "find_nodes_at_time",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "list_changes",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "await_changes",
+        "access_class": "read",
+        "budgetable": false,
+        "cursorable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable",
+          "src/mcp/tests.rs changefeed await_changes suite"
+        ],
+        "note": "Push-changefeed long-poll (Issue #3375). Excluded from the #3368 timeout / #3353 budget / #3360 cursor wrappers; a long-poll is expected to block. The HTTP SSE stream GET /changes/stream is a route-only surface (not an MCP tool)."
+      },
+      {
+        "name": "get_node_at_valid_time",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "get_node_at_transaction_time",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "get_node_history",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "diff_node_versions",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "get_edge_at_valid_time",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "get_edge_at_transaction_time",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "get_edge_history",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "diff_edge_versions",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "get_belief_revisions",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable",
+          "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly",
+          "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"
+        ]
+      },
+      {
+        "name": "create_drift_monitor",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable",
+          "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly",
+          "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"
+        ]
+      },
+      {
+        "name": "list_drift_monitors",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable",
+          "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly",
+          "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"
+        ]
+      },
+      {
+        "name": "delete_drift_monitor",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable",
+          "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly",
+          "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"
+        ]
+      },
+      {
+        "name": "query_drift_alarms",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable",
+          "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly",
+          "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"
+        ]
+      },
+      {
+        "name": "resolve_drift_alarm",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable",
+          "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly",
+          "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"
+        ]
+      },
+      {
+        "name": "contradiction_genealogy",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable",
+          "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly",
+          "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"
+        ]
+      },
+      {
+        "name": "find_contradictions",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable",
+          "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly",
+          "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"
+        ]
+      },
+      {
+        "name": "counterfactual_replay",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable",
+          "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly",
+          "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"
+        ]
+      },
+      {
+        "name": "trust_breakdown",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable",
+          "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly",
+          "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"
+        ]
+      },
+      {
+        "name": "list_trust_policies",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable",
+          "crates/aletheia-server/tests/full_surface_parity_sweep.rs::mcp_catalog_equals_inventory_exactly",
+          "crates/aletheia-server/tests/security_rbac.rs::registry_matches_inventory_exactly"
+        ]
+      },
+      {
+        "name": "hybrid_query",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "query",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable",
+          "tests/parity_mcp.rs::query_over_ceiling_override_is_invalid_argument",
+          "tests/parity_mcp.rs::query_byte_cap_is_resource_exhausted",
+          "tests/parity_mcp.rs::query_row_cap_override_truncates_successfully",
+          "tests/parity_mcp.rs::resource_exhausted_code_is_in_vocabulary"
+        ],
+        "resource_limits": "Issue #3368 (MCP lane 4): optional per-call `limits` {timeout_ms, max_result_rows, max_response_bytes} folded against server defaults + operator ceilings. Over-ceiling override -> INVALID_ARGUMENT (kind invalid_params, details{dimension,requested,ceiling}); wall-clock timeout -> RESOURCE_EXHAUSTED (kind runtime_error, retriable:true, details{dimension:wall_clock_timeout,limit}); result-byte cap -> RESOURCE_EXHAUSTED (retriable:false, details{dimension:result_bytes,limit,consumed}); result-row cap -> truncated:true success (#3226). Timeout enforcement bounds the caller's wait via a thread-race without engine-level cancellation (read-only guard runs first, so a discarded query never writes); the raced worker is bounded by QueryLimitsConfig.max_in_flight_queries (default 64, MCP-only; at the cap a timed query is rejected UNAVAILABLE retriable:true with details{reason:in_flight_query_cap,max_in_flight_queries} instead of spawning; a worker that panics -> INTERNAL retriable:false, never a timeout). An equivalent in-flight cap on the HTTP /query worker path (#3446) is a parity follow-up. The result-byte cap is measured incrementally as rows are appended (peak working memory ~= cap) then re-checked exactly on the full serialized response. Composes with #3353 token budget (protective byte cap runs first inside handle_query, budget shaper runs after in dispatch_tool) and the #3360 cursor unsupported_construct. In-process per-dimension termination counters via AletheiaMcpServer::limit_termination_counts(); database_stats integration is a cross-lane storage follow-up."
+      },
+      {
+        "name": "get_schema",
+        "access_class": "read",
+        "budgetable": true,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "temporal_extent",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "lineage_upstream",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "lineage_downstream",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "audit_export",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "verify_chain",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "export_chain_head",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "create_namespace",
+        "access_class": "write",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "list_namespaces",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "describe_namespace",
+        "access_class": "read",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "database_stats",
+        "access_class": "metrics",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "designate_subject",
+        "access_class": "admin",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      },
+      {
+        "name": "erase_subject",
+        "access_class": "admin",
+        "budgetable": false,
+        "pinned_by": [
+          "tests/parity_mcp.rs::tool_inventory_golden_is_stable"
+        ]
+      }
     ]
   },
   "coverage_gaps": [

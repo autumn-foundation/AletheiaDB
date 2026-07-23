@@ -6,7 +6,7 @@
 //! contract, not an aspiration: if one fails after a port, the port changed
 //! observable behavior and the change must be justified — not the test.
 //!
-//! Scope: the FULL registered route inventory (exactly 5 routes assembled by
+//! Scope: the FULL registered route inventory (exactly 6 routes assembled by
 //! `handlers::all_routes()`), the success/error envelopes, the auth contract
 //! (401 uniform / 403 role denial), and the per-query + payload resource limits
 //! (413 / 422). Driven black-box through the public `build_test_router` /
@@ -125,13 +125,13 @@ fn find_people() -> Value {
 }
 
 // ===========================================================================
-// Route inventory — the whole surface is exactly 5 routes.
+// Route inventory — the whole surface is exactly 6 routes.
 // ===========================================================================
 
 /// PARITY: the registered route inventory is a fixed, known set. A port that
 /// adds, drops, or renames a route (or changes its method) fails here.
 #[tokio::test]
-async fn route_inventory_is_the_known_five() {
+async fn route_inventory_is_the_known_six() {
     let routes = aletheiadb::http::handlers::all_routes();
     let mut got: Vec<(String, String)> = routes
         .iter()
@@ -145,13 +145,14 @@ async fn route_inventory_is_the_known_five() {
         ("POST".into(), "/admin/keys".into()),
         ("GET".into(), "/admin/keys".into()),
         ("POST".into(), "/admin/keys/revoke".into()),
+        ("POST".into(), "/admin/promote".into()),
     ];
     want.sort();
 
     assert_eq!(
         got, want,
         "HTTP route inventory changed — a framework port must preserve exactly \
-         these 5 routes (and update tests/parity/inventory.json)"
+         these 6 routes (and update tests/parity/inventory.json)"
     );
 }
 
