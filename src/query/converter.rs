@@ -764,6 +764,10 @@ impl AstConverter {
                 // Namespace scope (Issue #3349, PR2b): a self-contained
                 // terminal op still honors a `USE / IN NAMESPACE` prefix.
                 scope: scope.clone(),
+                // AQL/Cypher-parsed queries carry no per-call resource-limit
+                // override (Issue #3368 is a Rust `QueryBuilder`-only API in
+                // v1); the database's configured defaults apply.
+                limits: None,
             });
         }
 
@@ -781,6 +785,7 @@ impl AstConverter {
                 // Namespace scope (Issue #3349, PR2b): a self-contained
                 // terminal op still honors a `USE / IN NAMESPACE` prefix.
                 scope: scope.clone(),
+                limits: None,
             });
         }
 
@@ -829,6 +834,7 @@ impl AstConverter {
             // Namespace scope (Issue #3349, PR2b): lowered from the optional
             // `USE / IN NAMESPACE` prefix clause; `None` when omitted.
             scope,
+            limits: None,
         })
     }
 

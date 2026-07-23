@@ -88,6 +88,14 @@ pub struct DatabaseStats {
     pub changefeed: ChangefeedStats,
 }
 
+// Note (Issue #3368): engine-lane per-query resource-limit termination counters
+// are deliberately NOT part of the storage-layer `DatabaseStats`. They are a
+// query-execution concern, surfaced via the dedicated
+// [`AletheiaDB::query_limit_counters`] accessor (Rust API) and, on the MCP
+// surface, via the additive `resource_limits` block the `database_stats` tool
+// appends — keeping `DatabaseStats` the pure storage-tier snapshot the MCP
+// thin-aggregator contract asserts it is.
+
 /// Push-changefeed subscription state for the `database_stats` snapshot
 /// (Issue #3678). Reads the broadcaster registry under a brief read lock —
 /// O(live subscriptions), not a version scan.
@@ -467,6 +475,18 @@ impl AletheiaDB {
             namespaces,
             changefeed,
         }
+    }
+
+    /// Snapshot of engine-lane per-query resource-limit termination/rejection
+    /// counters (Issue #3368 observability): wall-clock-timeout, result-row, and
+    /// estimated-memory terminations plus over-ceiling override rejections.
+    /// Process-lifetime relaxed atomic reads (no locks, no version scan), so it
+    /// is safe to poll frequently. This is the Rust-API observability surface
+    /// for the engine lane; the MCP `database_stats` tool exposes the same
+    /// counts in its additive `resource_limits` block.
+    #[must_use]
+    pub fn query_limit_counters(&self) -> crate::query::limits::LimitCountersSnapshot {
+        self.limit_counters.snapshot()
     }
 }
 

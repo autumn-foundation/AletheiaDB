@@ -268,10 +268,10 @@ Honest breakdown of #3368 across lanes:
 | Result-row cap | ✅ | ✅ | ✅ | **Covered (this lane)** — reads only (writes exempt) |
 | Result-byte cap (measured on the response envelope) | ✅ | ✅ | ✅ | **Covered (this lane)** — reads only (writes exempt) |
 | Request body-size (input memory) | ✅ | n/a | ✅ | Covered previously (#3424) |
-| Engine-level cancellation of in-flight CPU work | — | — | — | **Deferred** → query-executor lane |
-| Query **memory budget** | — | — | — | **Deferred** → query-executor lane |
+| Engine-level cancellation of in-flight CPU work | ✅ | Rust/MCP ✅ · HTTP — | ✅ | **Landed (engine lane)** — cooperative row-granular cancellation in the executor; see [query-resource-limits.md](query-resource-limits.md). Per-call via the Rust builder and the MCP `query`-tool worker (self-cancels near its deadline). **HTTP note:** an HTTP query routes through the engine guard at the operator's **default** `EngineQueryLimitsConfig` limit (a backstop that bounds the abandoned worker), but the per-call HTTP `timeout_ms` still bounds only the *response* via the outer `tokio::timeout` race — it is not threaded into the engine deadline. HTTP per-call engine parity is a follow-up |
+| Query **memory budget** | Rust ✅ · MCP `query` ✅ (default-off) | Rust ✅ | Rust ✅ | **Landed (engine lane)** — `estimate_row_bytes` working-memory proxy with default/override/ceiling on the Rust API and a default-off budget on the MCP `query` tool; HTTP-surface parity is a follow-up. See [query-resource-limits.md](query-resource-limits.md) |
 | Same limits on the **MCP** surface | ✅ | partial | partial | **Covered (MCP lane)** — the `query` tool (full defaults/override/ceiling) plus six read tools (`traverse`, `hybrid_query`, `find_similar`, `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time`; timeout + byte cap, server defaults only, byte cap post-hoc — Issue #3368 residue). See [docs/guides/mcp-query-tool.md](mcp-query-tool.md#extended-to-the-read-tools-issue-3368-residue) |
-| Rust-API builder ergonomics for limits | partial | — | — | Config type is public; a fluent builder is a follow-up |
+| Rust-API builder ergonomics for limits | ✅ | ✅ | ✅ | **Landed** — `QueryBuilder::with_timeout`/`with_max_rows`/`with_memory_budget` + `AletheiaDBConfig::query_limits`. See [query-resource-limits.md](query-resource-limits.md) |
 
 The HTTP timeout is a response-deadline bound, not a compute bound — see
 [the timeout note](#wall-clock-timeout--what-it-does-and-does-not-do).

@@ -807,6 +807,27 @@ pub enum QueryError {
         /// Optional hint on how to fix the issue
         hint: Option<String>,
     },
+    /// A per-query resource limit was exceeded (Issue #3368 engine lane).
+    ///
+    /// Raised cooperatively by [`crate::query::executor::iterators::ResourceGuardIterator`]
+    /// while draining a query's result stream. `dimension` is the stable
+    /// snake_case token from [`crate::query::limits::LimitDimension::as_str`]
+    /// (`"wall_clock_timeout"`, `"result_rows"`, or `"memory_bytes"`), so a
+    /// caller can branch on it without string-matching the display message.
+    /// `retriable` is `true` only for the wall-clock timeout (a read-only
+    /// re-run is safe); row/memory breaches are `false` (re-running the same
+    /// query deterministically breaches again).
+    #[error("query exceeded {dimension} limit of {limit} (consumed {consumed})")]
+    ResourceExhausted {
+        /// The stable dimension token that was breached.
+        dimension: &'static str,
+        /// The configured limit for that dimension.
+        limit: u64,
+        /// How much of the dimension's budget was actually consumed.
+        consumed: u64,
+        /// Whether retrying the same query is expected to succeed.
+        retriable: bool,
+    },
 }
 
 /// Format the `IndexNotFound` display message with optional hint.

@@ -499,6 +499,10 @@ impl CypherConverter {
                     temporal_context,
                     hints: QueryHints::default(),
                     scope,
+                    // Cypher-parsed queries carry no per-call resource-limit
+                    // override (Issue #3368 is a Rust `QueryBuilder`-only API
+                    // in v1).
+                    limits: None,
                 })
             }
             // A standalone `UNWIND` produces scalar rows, not stored entities,

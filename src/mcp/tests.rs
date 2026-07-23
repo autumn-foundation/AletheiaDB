@@ -11718,6 +11718,72 @@ mod database_stats_tests {
         );
     }
 
+    /// Issue #3368 engine lane: `database_stats.resource_limits` carries an
+    /// `engine` sub-object with the executor-guard termination counters (a
+    /// distinct family from the top-level MCP-surface counters), and an engine
+    /// termination driven through a Rust-API `db.query()` with a row cap is
+    /// visible there.
+    #[test]
+    fn database_stats_surfaces_engine_lane_counters() {
+        let server = create_test_server();
+        let db = server.db();
+
+        // Seed a hub with several neighbors, then trip the engine row cap.
+        let hub = db
+            .create_node(
+                "Person",
+                crate::core::PropertyMapBuilder::new()
+                    .insert("name", "Hub")
+                    .build(),
+            )
+            .expect("hub");
+        for _ in 0..5 {
+            let leaf = db
+                .create_node("Person", crate::core::PropertyMapBuilder::new().build())
+                .expect("leaf");
+            db.create_edge(
+                hub,
+                leaf,
+                "KNOWS",
+                crate::core::PropertyMapBuilder::new().build(),
+            )
+            .expect("edge");
+        }
+        let results = db
+            .query()
+            .start(hub)
+            .traverse("KNOWS")
+            .with_max_rows(2)
+            .execute(db)
+            .expect("execute lazily");
+        for row in results {
+            if row.is_err() {
+                break;
+            }
+        }
+
+        let value = stats_response(&server);
+        let engine = &value["resource_limits"]["engine"];
+        assert!(
+            engine.is_object(),
+            "resource_limits.engine must be present: {value}"
+        );
+        assert_eq!(
+            engine["row_cap_terminations"],
+            serde_json::json!(1),
+            "the engine row-cap termination must be surfaced: {value}"
+        );
+        // The four engine dimensions are always present.
+        for key in [
+            "timeout_terminations",
+            "row_cap_terminations",
+            "memory_terminations",
+            "override_rejections",
+        ] {
+            assert!(engine.get(key).is_some(), "engine.{key} missing: {value}");
+        }
+    }
+
     /// Wire-level argument handling: `call_tool` delivers missing arguments
     /// as JSON null, and clients may also send an empty object or extra
     /// unknown keys — all must succeed. A non-object argument value must be
@@ -11856,10 +11922,24 @@ mod database_stats_tests {
             keys(&value["resource_limits"]),
             vec![
                 "byte_cap_terminations",
+                // Issue #3368 engine lane: nested executor-guard termination
+                // counters (a distinct family from the top-level MCP-surface
+                // counters), always present.
+                "engine",
                 // Issue #3368 memory-budget dimension (default-off): additive
                 // counter, present even when the budget is never engaged.
                 "memory_terminations",
                 "override_rejections",
+                "timeout_terminations",
+            ]
+        );
+        // The nested engine block carries the four executor-guard dimensions.
+        assert_eq!(
+            keys(&value["resource_limits"]["engine"]),
+            vec![
+                "memory_terminations",
+                "override_rejections",
+                "row_cap_terminations",
                 "timeout_terminations",
             ]
         );

@@ -835,6 +835,15 @@ pub struct AletheiaDBConfig {
     /// by every changefeed surface (MCP `await_changes`, HTTP `/changes/await`
     /// and `/changes/stream`).
     pub changefeed: crate::core::changefeed_subscription::ChangefeedConfig,
+    /// Engine-lane per-query resource limits (Issue #3368): server default +
+    /// operator ceiling for wall-clock timeout, result-row cap, and memory
+    /// budget, enforced by [`crate::query::executor::QueryExecutor`] and
+    /// overridable per-call via [`crate::query::QueryBuilder::with_timeout`]/
+    /// [`with_max_rows`](crate::query::QueryBuilder::with_max_rows)/
+    /// [`with_memory_budget`](crate::query::QueryBuilder::with_memory_budget).
+    /// Defaults to [`EngineQueryLimitsConfig::default`](crate::query::limits::EngineQueryLimitsConfig::default)
+    /// (enabled, generous ceilings) so existing behavior is unaffected.
+    pub query_limits: crate::query::limits::EngineQueryLimitsConfig,
 }
 
 /// Builder for unified database configuration.
@@ -904,6 +913,15 @@ impl AletheiaDBConfigBuilder {
         changefeed_config: crate::core::changefeed_subscription::ChangefeedConfig,
     ) -> Self {
         self.config.changefeed = changefeed_config;
+        self
+    }
+
+    /// Set engine-lane per-query resource limits (Issue #3368).
+    pub fn query_limits(
+        mut self,
+        query_limits_config: crate::query::limits::EngineQueryLimitsConfig,
+    ) -> Self {
+        self.config.query_limits = query_limits_config;
         self
     }
 

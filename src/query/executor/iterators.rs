@@ -3343,6 +3343,195 @@ impl ResultIterator for ProvenanceFilterIterator {
     }
 }
 
+/// Row count below which the wall-clock deadline is polled on *every* row, and
+/// at/above which it is polled once per [`DEADLINE_CHECK_STRIDE`] rows.
+///
+/// This hybrid exists to reconcile two requirements that a single fixed stride
+/// cannot:
+///
+/// - **Correctness for slow, low-row-count queries** (e.g. a handful of deep
+///   temporal reconstructions, each taking many milliseconds). A pure stride
+///   would only re-poll the clock every `STRIDE` rows, so a query that produces
+///   *fewer than* `STRIDE` rows would be checked only at row 0 and then run to
+///   completion no matter how long it took — the deadline would never fire.
+///   Polling every row for the first `PRECISE_DEADLINE_ROWS` rows guarantees
+///   such a query is cut at the first row boundary past its deadline.
+/// - **Cheapness for large benign scans** (the AC6 "fast queries are not taxed"
+///   concern). `Instant::now()` is a ~15-25ns vDSO call; paying it on every one
+///   of a million rows would be a measurable throughput tax. Beyond
+///   `PRECISE_DEADLINE_ROWS` the query is, by definition, a *many-row* scan, so
+///   the clock read is amortized to `1/STRIDE`.
+const PRECISE_DEADLINE_ROWS: usize = 4096;
+
+/// Stride (in rows) at which the wall-clock deadline is polled once a scan has
+/// produced more than [`PRECISE_DEADLINE_ROWS`] rows. See that constant for the
+/// precision/overhead rationale.
+///
+/// Row index 0 always polls (so an already-past deadline short-circuits *before*
+/// the first pull). The residual precision tradeoff — cancellation is a
+/// row-boundary event, so a *many-fast-rows* scan can overshoot its deadline by
+/// up to the time to produce `STRIDE` more rows (tens of microseconds; far
+/// inside the ≤10% grace bound even for a 100ms timeout) — applies only in the
+/// amortized regime. A query whose *individual rows* each exceed the grace
+/// budget can overshoot by one such row regardless of stride: the inherent floor
+/// of cooperative, row-granular cancellation.
+const DEADLINE_CHECK_STRIDE: usize = 64;
+
+/// Cooperative-cancellation wrapper enforcing per-query resource limits
+/// (Issue #3368 engine lane; see [`crate::query::limits`]).
+///
+/// Installed by [`super::QueryExecutor::execute`] only when
+/// [`QueryResourceLimits::is_unlimited`] is `false` -- the common, unlimited
+/// case never allocates this wrapper and pays no per-row overhead (see the
+/// module-level docs on `crate::query::limits`).
+///
+/// Each dimension is checked in a fixed order on every [`next`](Self::next)
+/// call:
+///
+/// 1. **Wall-clock timeout**, checked *before* pulling from the inner
+///    iterator, so a query that already blew its budget performs no further
+///    work at all (provably: the test suite wraps a mock inner iterator that
+///    panics if `next()` is ever called and confirms a past deadline never
+///    reaches it).
+/// 2. **Result rows**, checked after a row is pulled.
+/// 3. **Memory bytes** (via [`estimate_row_bytes`]), checked after a row is
+///    pulled and has passed the row-count check.
+///
+/// Once any dimension is breached the guard is "fused": every subsequent
+/// `next()` call returns `None` without touching the inner iterator again,
+/// mirroring the standard library's `Fuse` behavior for an iterator that has
+/// just yielded an error it cannot meaningfully recover from mid-stream.
+pub struct ResourceGuardIterator {
+    inner: Box<dyn ResultIterator>,
+    deadline: Option<std::time::Instant>,
+    max_rows: Option<usize>,
+    max_memory_bytes: Option<usize>,
+    counters: Option<Arc<crate::query::limits::LimitCounters>>,
+    /// When the guard was constructed. Used to report `consumed` (elapsed
+    /// milliseconds) on a wall-clock timeout error.
+    started: std::time::Instant,
+    /// The wall-clock budget in milliseconds, captured at construction as the
+    /// remaining time-to-deadline (an honest proxy for the originally
+    /// configured timeout, since the guard is installed immediately after the
+    /// deadline is computed). `0` when there is no deadline.
+    configured_timeout_ms: u64,
+    rows_emitted: usize,
+    bytes_accumulated: usize,
+    /// Set once any dimension has been breached; short-circuits all further
+    /// `next()` calls to `None`.
+    terminated: bool,
+}
+
+impl ResourceGuardIterator {
+    /// Wrap `inner` with the given resolved `limits`, optionally recording
+    /// terminations into `counters`.
+    pub fn new(
+        inner: Box<dyn ResultIterator>,
+        limits: crate::query::limits::QueryResourceLimits,
+        counters: Option<Arc<crate::query::limits::LimitCounters>>,
+    ) -> Self {
+        let started = std::time::Instant::now();
+        let configured_timeout_ms = limits
+            .deadline
+            .map(|d| d.saturating_duration_since(started).as_millis() as u64)
+            .unwrap_or(0);
+        ResourceGuardIterator {
+            inner,
+            deadline: limits.deadline,
+            max_rows: limits.max_rows,
+            max_memory_bytes: limits.max_memory_bytes,
+            counters,
+            started,
+            configured_timeout_ms,
+            rows_emitted: 0,
+            bytes_accumulated: 0,
+            terminated: false,
+        }
+    }
+
+    fn record(&self, dimension: crate::query::limits::LimitDimension) {
+        if let Some(counters) = &self.counters {
+            counters.record_termination(dimension);
+        }
+    }
+}
+
+impl ResultIterator for ResourceGuardIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        use crate::core::error::{Error, QueryError};
+        use crate::query::limits::LimitDimension;
+
+        if self.terminated {
+            return None;
+        }
+
+        // 1. Wall-clock timeout: checked BEFORE pulling from `inner`, so a
+        // query that has already exhausted its budget never does another unit of
+        // work. The clock is polled on every row for the first
+        // `PRECISE_DEADLINE_ROWS` rows (so a slow, low-row-count query is cut
+        // precisely) and once per `DEADLINE_CHECK_STRIDE` rows thereafter (so a
+        // large benign scan pays no per-row clock syscall). Row index 0 always
+        // polls. See the two constants' docs for the full rationale.
+        if let Some(deadline) = self.deadline
+            && (self.rows_emitted < PRECISE_DEADLINE_ROWS
+                || self.rows_emitted.is_multiple_of(DEADLINE_CHECK_STRIDE))
+            && std::time::Instant::now() >= deadline
+        {
+            self.terminated = true;
+            self.record(LimitDimension::WallClockTimeout);
+            let consumed = self.started.elapsed().as_millis() as u64;
+            return Some(Err(Error::Query(QueryError::ResourceExhausted {
+                dimension: LimitDimension::WallClockTimeout.as_str(),
+                limit: self.configured_timeout_ms,
+                consumed,
+                retriable: true,
+            })));
+        }
+
+        let row = match self.inner.next()? {
+            Ok(row) => row,
+            Err(e) => return Some(Err(e)),
+        };
+
+        // 2. Result rows.
+        self.rows_emitted += 1;
+        if let Some(max_rows) = self.max_rows
+            && self.rows_emitted > max_rows
+        {
+            self.terminated = true;
+            self.record(LimitDimension::ResultRows);
+            return Some(Err(Error::Query(QueryError::ResourceExhausted {
+                dimension: LimitDimension::ResultRows.as_str(),
+                limit: max_rows as u64,
+                consumed: self.rows_emitted as u64,
+                retriable: false,
+            })));
+        }
+
+        // 3. Memory bytes. Only pay the row-byte-estimation cost when the
+        // dimension is actually enforced.
+        if let Some(budget) = self.max_memory_bytes {
+            self.bytes_accumulated += crate::query::limits::estimate_row_bytes(&row);
+            if self.bytes_accumulated > budget {
+                self.terminated = true;
+                self.record(LimitDimension::MemoryBytes);
+                return Some(Err(Error::Query(QueryError::ResourceExhausted {
+                    dimension: LimitDimension::MemoryBytes.as_str(),
+                    limit: budget as u64,
+                    consumed: self.bytes_accumulated as u64,
+                    retriable: false,
+                })));
+            }
+        }
+
+        Some(Ok(row))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
 /// Iterator for projecting specific properties from query results.
 pub struct ProjectIterator {
     input: Box<dyn ResultIterator>,
@@ -5151,6 +5340,172 @@ mod tests {
         fn size_hint(&self) -> (usize, Option<usize>) {
             self.items.size_hint()
         }
+    }
+
+    // ==================== ResourceGuardIterator (Issue #3368 engine lane) ==
+
+    /// An inner iterator that panics if `next()` is ever called. Used to
+    /// prove the wall-clock check runs BEFORE any pull from the wrapped
+    /// iterator.
+    struct PanicIfPulledIterator;
+
+    impl ResultIterator for PanicIfPulledIterator {
+        fn next(&mut self) -> Option<Result<QueryRow>> {
+            panic!("inner iterator must not be pulled once the deadline has passed");
+        }
+    }
+
+    fn resource_guard_test_rows(n: usize) -> Vec<Result<QueryRow>> {
+        (0..n)
+            .map(|i| {
+                Ok(QueryRow::from_entity(EntityResult::NodeId(
+                    NodeId::new(i as u64 + 1).unwrap(),
+                )))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn resource_guard_unlimited_passes_all_rows_through_unchanged() {
+        let inner = Box::new(MockIterator::from_results(resource_guard_test_rows(5)));
+        let mut guard = ResourceGuardIterator::new(
+            inner,
+            crate::query::limits::QueryResourceLimits::unlimited(),
+            None,
+        );
+
+        let mut count = 0;
+        while let Some(row) = guard.next() {
+            row.expect("unlimited guard must never error");
+            count += 1;
+        }
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn resource_guard_past_deadline_short_circuits_without_pulling_inner() {
+        let inner = Box::new(PanicIfPulledIterator);
+        let limits = crate::query::limits::QueryResourceLimits {
+            deadline: Some(std::time::Instant::now() - std::time::Duration::from_millis(10)),
+            ..crate::query::limits::QueryResourceLimits::unlimited()
+        };
+        let mut guard = ResourceGuardIterator::new(inner, limits, None);
+
+        let err = guard
+            .next()
+            .expect("must yield a result")
+            .expect_err("deadline already passed");
+        match err {
+            crate::core::error::Error::Query(
+                crate::core::error::QueryError::ResourceExhausted {
+                    dimension,
+                    retriable,
+                    ..
+                },
+            ) => {
+                assert_eq!(dimension, "wall_clock_timeout");
+                assert!(retriable, "a timeout is safe to retry");
+            }
+            other => panic!("expected ResourceExhausted, got {other:?}"),
+        }
+        // Fused: once terminated, subsequent calls return None (and would
+        // panic if they touched the inner PanicIfPulledIterator).
+        assert!(guard.next().is_none());
+    }
+
+    #[test]
+    fn resource_guard_row_cap_emits_exactly_the_cap_then_errors() {
+        let inner = Box::new(MockIterator::from_results(resource_guard_test_rows(5)));
+        let limits = crate::query::limits::QueryResourceLimits {
+            max_rows: Some(2),
+            ..crate::query::limits::QueryResourceLimits::unlimited()
+        };
+        let mut guard = ResourceGuardIterator::new(inner, limits, None);
+
+        assert!(guard.next().expect("row 1").is_ok());
+        assert!(guard.next().expect("row 2").is_ok());
+
+        let err = guard
+            .next()
+            .expect("must yield a result")
+            .expect_err("row 3 exceeds the cap of 2");
+        match err {
+            crate::core::error::Error::Query(
+                crate::core::error::QueryError::ResourceExhausted {
+                    dimension,
+                    limit,
+                    consumed,
+                    retriable,
+                },
+            ) => {
+                assert_eq!(dimension, "result_rows");
+                assert_eq!(limit, 2);
+                assert_eq!(consumed, 3);
+                assert!(!retriable, "a row-cap breach is not retriable");
+            }
+            other => panic!("expected ResourceExhausted, got {other:?}"),
+        }
+        // Fused.
+        assert!(guard.next().is_none());
+    }
+
+    #[test]
+    fn resource_guard_memory_cap_terminates_once_budget_exceeded() {
+        let inner = Box::new(MockIterator::from_results(resource_guard_test_rows(50)));
+        // A tiny budget: the very first row's estimated size already exceeds
+        // it (a bare NodeId row is small but non-zero), so the guard must
+        // still emit at least the rows that fit before terminating.
+        let first_row_bytes = crate::query::limits::estimate_row_bytes(&QueryRow::from_entity(
+            EntityResult::NodeId(NodeId::new(1).unwrap()),
+        ));
+        let limits = crate::query::limits::QueryResourceLimits {
+            max_memory_bytes: Some(first_row_bytes * 3),
+            ..crate::query::limits::QueryResourceLimits::unlimited()
+        };
+        let mut guard = ResourceGuardIterator::new(inner, limits, None);
+
+        let mut ok_count = 0;
+        loop {
+            match guard.next() {
+                Some(Ok(_)) => ok_count += 1,
+                Some(Err(crate::core::error::Error::Query(
+                    crate::core::error::QueryError::ResourceExhausted {
+                        dimension,
+                        retriable,
+                        ..
+                    },
+                ))) => {
+                    assert_eq!(dimension, "memory_bytes");
+                    assert!(!retriable, "a memory-cap breach is not retriable");
+                    break;
+                }
+                Some(Err(other)) => panic!("unexpected error: {other:?}"),
+                None => panic!("guard must terminate with an error before exhausting input"),
+            }
+        }
+        // Terminated strictly before all 50 rows were consumed.
+        assert!(ok_count < 50);
+        // Fused.
+        assert!(guard.next().is_none());
+    }
+
+    #[test]
+    fn resource_guard_records_counters_on_termination() {
+        let counters = Arc::new(crate::query::limits::LimitCounters::default());
+
+        let inner = Box::new(MockIterator::from_results(resource_guard_test_rows(3)));
+        let limits = crate::query::limits::QueryResourceLimits {
+            max_rows: Some(1),
+            ..crate::query::limits::QueryResourceLimits::unlimited()
+        };
+        let mut guard = ResourceGuardIterator::new(inner, limits, Some(counters.clone()));
+        assert!(guard.next().expect("row 1").is_ok());
+        assert!(guard.next().expect("row 2").is_err());
+
+        let snapshot = counters.snapshot();
+        assert_eq!(snapshot.result_rows, 1);
+        assert_eq!(snapshot.wall_clock_timeout, 0);
+        assert_eq!(snapshot.memory_bytes, 0);
     }
 
     // ==================== Edge provenance-accessor tests (Issue #3354a) ====

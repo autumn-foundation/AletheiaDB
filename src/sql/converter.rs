@@ -175,6 +175,9 @@ impl SqlConverter {
             hints: QueryHints::default(),
             // SQL namespace scoping is a follow-up (PR2b); no scope today.
             scope: None,
+            // SQL-parsed queries carry no per-call resource-limit override
+            // (Issue #3368 is a Rust `QueryBuilder`-only API in v1).
+            limits: None,
         })
     }
 

@@ -959,22 +959,30 @@ there is deliberately no row-termination counter.
 | MCP `query` tool | ✅ (thread-race, read-only) | ✅ truncate + disclose | ✅ fail-closed, incremental | ✅ `limits` |
 | HTTP `/query` | ✅ (Issue #3446) | ✅ truncate/reject | ✅ | ✅ `limits` |
 | MCP `traverse` / `hybrid_query` / `find_similar` / `get_node_at_time` / `get_edge_at_time` / `find_nodes_at_time` | ✅ (thread-race, read-only) | ✅ via `limit`/`top_k` (disclosed) | ✅ fail-closed, **post-hoc** (v1) | ⚠️ server defaults only — no per-call override yet (Lane-2) |
-| Rust query builder | ⚠️ builder-level limit options are a Lane-2 follow-up (embedders hold the `Arc<AletheiaDB>` and can bound work directly) | — | — | — |
+| Rust query builder | ✅ cooperative (engine guard) | ✅ `with_max_rows` | ✅ `with_memory_budget` | ✅ `with_timeout`/`with_max_rows`/`with_memory_budget` + `AletheiaDBConfig::query_limits` |
 
 A **default-off memory-budget dimension** now also governs these read tools —
 see [Memory-budget dimension](#memory-budget-dimension-issue-3368) below.
 
-**Deferred to Lane-2 (explicitly out of this residue):** true engine-level
+**Landed since this residue was written (engine lane, see
+[query-resource-limits.md](query-resource-limits.md)):** true engine-level
+cooperative cancellation (row-granular guard in the executor; the `query`-tool
+worker now self-cancels near its deadline rather than only being raced), the
+**Rust builder API** (`with_timeout`/`with_max_rows`/`with_memory_budget` +
+`AletheiaDBConfig::query_limits`), a memory-budget dimension on the `query` tool
+(default-off) with a benchmark-gated fast-path proof
+(`benches/query_resource_limits.rs`) and a concurrency soak
+(`tests/query_resource_limits_soak.rs`).
+
+**Still deferred to Lane-2:** true engine-level
 memory accounting (spill / per-operator budgets — the landed memory dimension is
 a documented *proxy*, not true allocation accounting), a per-call
-`max_query_memory_bytes` override, true engine-level cooperative cancellation,
-the Rust builder API, a benchmark-gated fast-path proof, a concurrency soak, HTTP
+`max_query_memory_bytes` override on the read tools, HTTP
 in-flight parity (#3446), and incremental (vs post-hoc) byte-cap enforcement for
-these read tools. Note also that the memory dimension covers **only** these
-wrapped read tools, **not** the `query` tool itself — `query` keeps its own
-per-call `limits`/error builders (`timeout_ms`/`max_response_bytes`, no memory
-knob); extending a memory budget to `query` under uniform coverage is a possible
-follow-up.
+these read tools. The **post-hoc** read-tool memory dimension described in this
+residue covers only the wrapped read tools; the `query` tool instead gained a
+**cooperative** engine memory budget (default-off) through the landed engine
+lane, alongside its existing `timeout_ms`/`max_response_bytes` controls.
 
 Over-limit terminations are counted per dimension in-process
 (`AletheiaMcpServer::limit_termination_counts()`) **and surfaced through

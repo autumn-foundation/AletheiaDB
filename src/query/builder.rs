@@ -60,6 +60,7 @@ use crate::core::vector::DistanceMetric as VectorMetric;
 use crate::index::vector::DistanceMetric;
 
 use super::ir::{Predicate, QueryOp, TraversalDepth};
+use super::limits::QueryLimitsOverride;
 use super::plan::{IndexHint, QueryHints, TemporalContext};
 
 /// A fully constructed query ready for execution.
@@ -77,6 +78,13 @@ pub struct Query {
     /// to those whose (immutable) namespace ∈ scope, and traversal never crosses
     /// an out-of-scope edge or bridges through an out-of-scope node.
     pub(crate) scope: Option<NamespaceScope>,
+    /// Per-call engine-lane resource-limit override (Issue #3368 public API),
+    /// set via [`QueryBuilder::with_timeout`]/[`with_max_rows`](QueryBuilder::with_max_rows)/
+    /// [`with_memory_budget`](QueryBuilder::with_memory_budget). `None` reproduces
+    /// prior behavior exactly: the database's configured
+    /// [`EngineQueryLimitsConfig`](crate::query::limits::EngineQueryLimitsConfig)
+    /// defaults apply with no per-call override.
+    pub(crate) limits: Option<QueryLimitsOverride>,
 }
 
 impl Query {
@@ -145,6 +153,7 @@ pub struct QueryBuilder<S: QueryState> {
     temporal_context: Option<TemporalContext>,
     hints: QueryHints,
     scope: Option<NamespaceScope>,
+    limits: Option<QueryLimitsOverride>,
     _phantom: PhantomData<S>,
 }
 
@@ -157,6 +166,7 @@ impl QueryBuilder<state::Initial> {
             temporal_context: None,
             hints: QueryHints::default(),
             scope: None,
+            limits: None,
             _phantom: PhantomData,
         }
     }
@@ -786,6 +796,45 @@ impl<S: QueryState> QueryBuilder<S> {
         self
     }
 
+    /// Set a per-call wall-clock timeout for this query (Issue #3368 public API).
+    ///
+    /// The requested value is folded with the database's configured
+    /// [`EngineQueryLimitsConfig`](crate::query::limits::EngineQueryLimitsConfig)
+    /// operator ceiling at [`execute`](Self::execute) time: a request within the
+    /// ceiling is honored (even when tighter than the server default); a request
+    /// exceeding the ceiling — or requesting unlimited (`Duration::ZERO`) under a
+    /// finite ceiling — is rejected with `INVALID_ARGUMENT` before any work is
+    /// done. The duration is saturated to milliseconds (`as_millis() as u64`).
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        let millis = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        self.limits.get_or_insert_with(Default::default).timeout_ms = Some(millis);
+        self
+    }
+
+    /// Set a per-call maximum result-row cap for this query (Issue #3368
+    /// public API). See [`with_timeout`](Self::with_timeout) for the ceiling
+    /// merge/rejection semantics (identical, applied per-dimension).
+    #[must_use]
+    pub fn with_max_rows(mut self, max_rows: usize) -> Self {
+        self.limits
+            .get_or_insert_with(Default::default)
+            .max_result_rows = Some(max_rows);
+        self
+    }
+
+    /// Set a per-call estimated working-memory budget in bytes for this query
+    /// (Issue #3368 public API). See [`with_timeout`](Self::with_timeout) for
+    /// the ceiling merge/rejection semantics (identical, applied
+    /// per-dimension).
+    #[must_use]
+    pub fn with_memory_budget(mut self, max_bytes: usize) -> Self {
+        self.limits
+            .get_or_insert_with(Default::default)
+            .max_memory_bytes = Some(max_bytes);
+        self
+    }
+
     /// Execute the query against the database.
     ///
     /// This is a convenience method that combines `build()` and `db.execute_query()`.
@@ -893,6 +942,7 @@ impl<S: QueryState> QueryBuilder<S> {
             temporal_context: self.temporal_context,
             hints: self.hints,
             scope: self.scope,
+            limits: self.limits,
         }
     }
 
@@ -904,6 +954,7 @@ impl<S: QueryState> QueryBuilder<S> {
             temporal_context: self.temporal_context,
             hints: self.hints,
             scope: self.scope,
+            limits: self.limits,
             _phantom: PhantomData,
         }
     }
