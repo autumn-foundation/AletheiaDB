@@ -1644,7 +1644,13 @@ for row in result {
 
 ### Scalability
 
-- **Replication**: High availability via replicas (raft-based)
+- ✅ **Asynchronous replication** (implemented, Issue #3355): single-primary,
+  pull-based WAL shipping to strictly read-only replicas, with manual
+  promotion for failover. See the
+  [Replication Guide](guides/replication-guide.md) and
+  [ADR-0059](adr/0059-asynchronous-wal-shipping-replication.md).
+  Synchronous/quorum replication and automatic (e.g. raft-based) election
+  and fencing remain future work.
 - **Automatic Sharding**: Infer domains from label distribution
 - **Shard Splitting**: Subdivide large shards automatically
 
