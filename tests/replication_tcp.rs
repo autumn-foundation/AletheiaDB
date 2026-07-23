@@ -472,6 +472,7 @@ fn resync_required_is_surfaced_correctly_over_tcp() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(feature = "config-toml")]
 fn config_listen_addr_auto_starts_a_listening_server() {
     let dir = tempfile::tempdir().expect("tempdir");
     let toml = format!(
