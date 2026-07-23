@@ -88,9 +88,8 @@ pub struct DatabaseStats {
     pub changefeed: ChangefeedStats,
     /// Replication role + (for a replica) progress/lag observability (Issue
     /// #3355). `role` is an O(1) atomic read; `replica` is `None` on a
-    /// primary and, in this Slice A skeleton, `None` on a replica too --
-    /// populated starting with the Slice B replication engine via a shared
-    /// progress handle.
+    /// primary and populated on a streaming replica via the applier's shared
+    /// progress handle (applied LSN, entries behind, lag, state).
     pub replication: ReplicationStats,
 }
 
