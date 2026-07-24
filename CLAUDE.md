@@ -1067,6 +1067,42 @@ unreadable, and pinning "now" excludes future-valid facts. MCP exposure and an
 `AS OF SNAPSHOT <name>` query DDL are a coordinated follow-up (this wave is
 Rust-API-only). See [docs/guides/snapshot-pin.md](docs/guides/snapshot-pin.md).
 
+### Multi-Tenant Isolation (Issue #3365)
+
+Serve many isolated logical databases — **tenants** — from one process. A
+`TenantManager` (`src/tenant/`) owns **one fully-separate `AletheiaDB` per
+tenant** (instance-per-tenant), so hard data isolation, per-tenant
+history/indexes/constraints/schema, ID-collision-without-interference,
+independent `.albk` backup/restore, single-tenant-equivalent temporal/WAL/recovery
+semantics, and blast-radius containment all fall out **by construction** rather
+than from leak-prone per-query filtering. Deliberately unlike agent-scoped
+namespaces (#3349), which are a cooperative in-tenant convenience, **not** a
+security/resource boundary. **Rust API:** `TenantManager::new_ephemeral()` /
+`open(root)` (durable per-tenant dirs under `{root}/tenants/{id}`, registry
+sidecar `{root}/tenants.json`, quarantine-on-corrupt); `create_tenant` /
+`get_tenant` / `get_tenant_info` / `list_tenants` / `tenant_usage` /
+`set_tenant_quota` / `delete_tenant` / `restore_tenant`; a `TenantHandle` binds a
+session to one tenant (`db()` for isolated reads/queries; quota-enforced
+`create_*`/`delete_*` for writes; `mcp_server()` for a tenant-scoped MCP server so
+existing agent tooling works unchanged). **Quotas** (`TenantQuota`, adjustable):
+`max_nodes`/`max_edges` enforced **precisely** via an atomic reservation
+taken-before-write / released-on-failure (never a partial write, never a
+concurrent race past the cap); `max_vector_index_bytes`/`max_storage_bytes`
+enforced **best-effort** against O(1) estimators (v1). A quota breach →
+`TenantError::QuotaExceeded` → `RESOURCE_EXHAUSTED` (non-retriable, `details:
+{tenant, dimension, current, limit}`) on both the MCP and HTTP #3234 envelopes;
+lifecycle errors → `INVALID_ARGUMENT`/`NOT_FOUND`/`CONFLICT`. **Usage
+accounting** (`TenantUsage`, O(1) counters) is metering-suitable. Tenant ids are
+**lowercase-only** (`[a-z0-9._-]`) so a case-insensitive-filesystem directory
+collision (`Acme` vs `acme` sharing one WAL) is impossible by construction. The
+single-tenant default (`AletheiaDB::new()`/`open()`) is untouched, zero overhead.
+**v1 scope:** Rust-API core + MCP tenant-scoping + #3234 error wiring; the string
+interner is process-global (a documented cross-tenant capacity/DoS caveat — data
+values are never shared, per-tenant interners are a follow-up), and admin *tool*
+wiring on the MCP/HTTP/CLI surfaces plus #3350 identity→tenant binding are
+coordinated follow-ups that compose directly on this core. See
+[docs/guides/multi-tenancy.md](docs/guides/multi-tenancy.md).
+
 ### Asynchronous Replication (Issue #3355)
 
 Single-primary, asynchronous, pull-based replication: a replica polls the
@@ -1527,6 +1563,7 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 - **[docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md)** - Fact-to-fact derivation lineage: version-pinned upstream/downstream closures (Issue #3371)
 - **[docs/guides/trust-propagation.md](docs/guides/trust-propagation.md)** - Computed confidence over lineage: combinators, per-label policy, trust_breakdown explainability, retraction/valid-time rules (Issue #3382)
 - **[docs/guides/namespaces-guide.md](docs/guides/namespaces-guide.md)** - Agent-scoped namespaces: shared knowledge base + private agent scratch, isolated-by-default read scoping (Issue #3349)
+- **[docs/guides/multi-tenancy.md](docs/guides/multi-tenancy.md)** - Multi-tenant isolation: one fully-separate `AletheiaDB` per tenant, per-tenant resource quotas + O(1) usage accounting, hard data isolation by construction (Issue #3365)
 
 ### Architecture Decision Records (ADRs)
 See `docs/adr/` for all architectural decisions.

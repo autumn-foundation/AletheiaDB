@@ -403,6 +403,56 @@ impl AletheiaHttpError {
             };
         }
 
+        // --- Tenant lifecycle / quota errors (Issue #3365). ---
+        // Mirrors the MCP `classify_tenant_error` mapping so both surfaces render
+        // a byte-shape-identical envelope: a malformed id is 400 INVALID_ARGUMENT,
+        // an unknown tenant is 404 NOT_FOUND, a duplicate create is 409 CONFLICT,
+        // and a quota breach is 429 RESOURCE_EXHAUSTED (non-retriable — a capacity
+        // limit heals only by freeing data or raising the quota).
+        if let E::Tenant(te) = e {
+            use crate::core::tenant::TenantError as TenE;
+            return match te {
+                TenE::InvalidId { .. } => Self::Structured {
+                    code: "INVALID_ARGUMENT",
+                    status: StatusCode::BAD_REQUEST,
+                    retriable: false,
+                    message: e.to_string(),
+                    details: None,
+                },
+                TenE::NotFound { id } => Self::Structured {
+                    code: "NOT_FOUND",
+                    status: StatusCode::NOT_FOUND,
+                    retriable: false,
+                    message: e.to_string(),
+                    details: Some(json!({ "tenant": id })),
+                },
+                TenE::AlreadyExists { id } => Self::Structured {
+                    code: "CONFLICT",
+                    status: StatusCode::CONFLICT,
+                    retriable: false,
+                    message: e.to_string(),
+                    details: Some(json!({ "tenant": id })),
+                },
+                TenE::QuotaExceeded {
+                    tenant,
+                    dimension,
+                    current,
+                    limit,
+                } => Self::Structured {
+                    code: "RESOURCE_EXHAUSTED",
+                    status: StatusCode::TOO_MANY_REQUESTS,
+                    retriable: false,
+                    message: e.to_string(),
+                    details: Some(json!({
+                        "tenant": tenant,
+                        "dimension": dimension.as_str(),
+                        "current": current,
+                        "limit": limit,
+                    })),
+                },
+            };
+        }
+
         // Every other db error keeps the prior write-path mapping (400
         // BadRequest), preserving the contract that genuine bad input stays 400.
         Self::BadRequest(e.to_string())
@@ -833,6 +883,59 @@ mod tests {
         assert_eq!(body["error"]["details"]["property"], "age");
         assert_eq!(body["error"]["details"]["expected_type"], "int");
         assert_eq!(body["error"]["details"]["actual_type"], "string");
+    }
+
+    /// Issue #3365: a tenant quota breach renders the unified #3234 envelope on
+    /// the HTTP surface byte-shape-identically to the MCP surface — `429
+    /// RESOURCE_EXHAUSTED`, `retriable: false`, structured `details`.
+    #[tokio::test]
+    async fn tenant_quota_breach_renders_resource_exhausted() {
+        use crate::core::tenant::{QuotaDimension, TenantError};
+        let db_err: crate::core::error::Error = TenantError::QuotaExceeded {
+            tenant: "acme".into(),
+            dimension: QuotaDimension::Nodes,
+            current: 100,
+            limit: 100,
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "RESOURCE_EXHAUSTED");
+        assert_eq!(body["error"]["retriable"], false);
+        assert_eq!(body["error"]["details"]["tenant"], "acme");
+        assert_eq!(body["error"]["details"]["dimension"], "nodes");
+        assert_eq!(body["error"]["details"]["current"], 100);
+        assert_eq!(body["error"]["details"]["limit"], 100);
+    }
+
+    /// Issue #3365: tenant lifecycle errors map to their HTTP statuses/codes.
+    #[tokio::test]
+    async fn tenant_lifecycle_errors_map_to_expected_statuses() {
+        use crate::core::tenant::TenantError;
+        let not_found: crate::core::error::Error =
+            TenantError::NotFound { id: "ghost".into() }.into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&not_found)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "NOT_FOUND");
+
+        let exists: crate::core::error::Error =
+            TenantError::AlreadyExists { id: "dup".into() }.into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&exists)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "CONFLICT");
+
+        let invalid: crate::core::error::Error = TenantError::InvalidId {
+            id: "bad/id".into(),
+            reason: "x".into(),
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&invalid)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
     }
 
     /// Parity guard: the HTTP `error.details` payload is exactly the shared

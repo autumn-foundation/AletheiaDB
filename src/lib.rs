@@ -67,6 +67,10 @@ pub mod index;
 pub mod provenance_chain;
 pub mod query;
 pub mod storage;
+/// Multi-tenant isolation runtime (Issue #3365): one fully-separate
+/// [`AletheiaDB`](crate::db::AletheiaDB) per tenant, per-tenant resource
+/// quotas, and O(1) usage accounting, served from one process.
+pub mod tenant;
 // Semantic search cohort (graduated from "Nova" in 0.1).
 #[cfg(feature = "semantic-search")]
 pub mod semantic_search;
