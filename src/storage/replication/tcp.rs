@@ -121,7 +121,22 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Maximum accepted frame payload size (sanity cap against a malformed or
 /// hostile peer claiming an enormous length prefix).
-pub const MAX_FRAME_SIZE: u32 = 64 * 1024 * 1024;
+///
+/// Sized as [`crate::storage::wal::entry::MAX_WAL_ENTRY_SIZE`] plus headroom
+/// for the entries-payload framing (header JSON + per-entry length
+/// prefixes), so that any single legal WAL entry -- up to the WAL's own
+/// 64 MiB cap -- can always be shipped in a one-entry batch. With the two
+/// caps equal (the original shape), a near-max entry could NEVER fit a
+/// frame once framing overhead was added, permanently stalling replication
+/// at that LSN.
+pub const MAX_FRAME_SIZE: u32 = (crate::storage::wal::entry::MAX_WAL_ENTRY_SIZE as u32) + 64 * 1024;
+
+/// Pre-authentication frame cap: before a peer has authenticated, the only
+/// legal frame is a small `MSG_HELLO` control message, so the server refuses
+/// to allocate more than this for it. Without a distinct pre-auth cap, 16
+/// unauthenticated connections each claiming a `MAX_FRAME_SIZE` length
+/// prefix could pin ~1 GiB of allocation before ever presenting a token.
+const MAX_HELLO_FRAME_SIZE: u32 = 64 * 1024;
 
 /// Maximum concurrently-served connections per [`ReplicationServer`].
 /// Connections beyond this are refused (socket dropped, no response).
@@ -313,13 +328,20 @@ fn write_frame(stream: &mut TcpStream, msg_type: u8, payload: &[u8]) -> io::Resu
 }
 
 fn read_frame(stream: &mut TcpStream) -> io::Result<(u8, Vec<u8>)> {
+    read_frame_capped(stream, MAX_FRAME_SIZE)
+}
+
+/// [`read_frame`] with an explicit payload cap, so pre-authentication reads
+/// (which only ever legitimately carry a tiny `MSG_HELLO`) can refuse large
+/// claimed lengths outright instead of allocating for them.
+fn read_frame_capped(stream: &mut TcpStream, max_len: u32) -> io::Result<(u8, Vec<u8>)> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_le_bytes(len_buf);
-    if len > MAX_FRAME_SIZE {
+    if len > max_len {
         return Err(io::Error::other(format!(
-            "peer announced a replication frame of {len} bytes, exceeding MAX_FRAME_SIZE \
-             ({MAX_FRAME_SIZE} bytes); closing connection"
+            "peer announced a replication frame of {len} bytes, exceeding the \
+             {max_len}-byte cap for this read; closing connection"
         )));
     }
     let mut type_buf = [0u8; 1];
@@ -350,26 +372,60 @@ fn read_u32_at(buf: &[u8], offset: usize) -> Result<u32> {
 
 /// Encode an `Entries` response payload: `[u32 json_len][json][repeat:
 /// u32 entry_len][entry_bytes]`.
-fn encode_entries_payload(header: &EntriesHeaderMsg, entries: &[WalEntry]) -> Result<Vec<u8>> {
-    let json = to_json(header)?;
-    let mut out = Vec::with_capacity(4 + json.len() + entries.len() * 64);
-    out.extend_from_slice(&(json.len() as u32).to_le_bytes());
-    out.extend_from_slice(&json);
+///
+/// Packs the longest PREFIX of `entries` that fits [`MAX_FRAME_SIZE`] and
+/// builds the header (with the packed count) itself, rather than erroring
+/// when the whole batch doesn't fit. Erroring closed the connection with no
+/// structured response, and since neither side ever shrank the batch, an
+/// embedding-heavy batch at the default 500 entries would reconnect-loop at
+/// the same `from_lsn` forever (Issue #3355 review). Truncating to a dense
+/// prefix is always safe: the client's applier accumulates partial frames
+/// across polls and re-requests from the first unsent LSN. `MAX_FRAME_SIZE`
+/// exceeds the WAL's own per-entry cap plus framing overhead, so any legal
+/// single entry fits and progress is guaranteed (a batch whose FIRST entry
+/// somehow exceeds it still errors -- that entry could never be shipped).
+fn encode_entries_payload(
+    primary_flushed_lsn: u64,
+    primary_wallclock_micros: i64,
+    entries: &[WalEntry],
+) -> Result<Vec<u8>> {
+    // The header JSON's length varies only with the digit counts of its
+    // fields; 256 bytes is comfortably above its maximum, and reserving it
+    // up front lets entries be packed against a fixed budget before the
+    // real header (with the final count) is known.
+    const HEADER_BUDGET: usize = 256;
 
+    let mut packed = Vec::new();
     let mut entry_buf = Vec::new();
+    let mut packed_count: u32 = 0;
     for entry in entries {
         entry_buf.clear();
         serialize_operation_into(entry.lsn, entry.timestamp, &entry.operation, &mut entry_buf)
             .map_err(|e| protocol_error(format!("failed to serialize WAL entry for wire: {e}")))?;
-        out.extend_from_slice(&(entry_buf.len() as u32).to_le_bytes());
-        out.extend_from_slice(&entry_buf);
-
-        if out.len() > MAX_FRAME_SIZE as usize {
-            return Err(protocol_error(
-                "encoded Entries payload exceeds MAX_FRAME_SIZE; reduce max_entries",
-            ));
+        let would_be = packed.len() + 4 + entry_buf.len() + HEADER_BUDGET;
+        if would_be > MAX_FRAME_SIZE as usize {
+            if packed_count == 0 {
+                return Err(protocol_error(
+                    "a single WAL entry exceeds MAX_FRAME_SIZE and can never be shipped",
+                ));
+            }
+            break;
         }
+        packed.extend_from_slice(&(entry_buf.len() as u32).to_le_bytes());
+        packed.extend_from_slice(&entry_buf);
+        packed_count += 1;
     }
+
+    let header = EntriesHeaderMsg {
+        primary_flushed_lsn,
+        primary_wallclock_micros,
+        count: packed_count,
+    };
+    let json = to_json(&header)?;
+    let mut out = Vec::with_capacity(4 + json.len() + packed.len());
+    out.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    out.extend_from_slice(&json);
+    out.extend_from_slice(&packed);
     Ok(out)
 }
 
@@ -384,7 +440,12 @@ fn decode_entries_payload(payload: &[u8]) -> Result<(EntriesHeaderMsg, Vec<WalEn
     let header: EntriesHeaderMsg = from_json(json_bytes)?;
     offset += json_len;
 
-    let mut entries = Vec::with_capacity(header.count as usize);
+    // Never pre-allocate from a peer-claimed count alone: a hostile header
+    // claiming u32::MAX entries would reserve GBs before any bounds check.
+    // Each entry occupies at least 4 payload bytes (its length prefix), so
+    // the payload length itself bounds the plausible count.
+    let plausible = payload.len().saturating_sub(offset) / 4;
+    let mut entries = Vec::with_capacity((header.count as usize).min(plausible));
     for _ in 0..header.count {
         let entry_len = read_u32_at(payload, offset)? as usize;
         offset += 4;
@@ -494,8 +555,13 @@ impl ReplicationServer {
     ///
     /// Serves both `FetchEntries` and `FetchSnapshot` (bootstrap) requests,
     /// regardless of `db`'s current [`crate::db::NodeRole`] -- a promoted
-    /// primary keeps serving, and a replica configured with both
-    /// `listen_addr` and `primary_addr` can itself serve chained reads.
+    /// primary keeps serving. Note that CHAINED replication (a replica
+    /// re-serving the stream to a downstream replica) is NOT supported in
+    /// v1: the applier applies replicated entries without appending them to
+    /// this node's own local WAL, so a listen server running on a replica
+    /// has an empty feed to serve. A replica may run a listen server so it
+    /// is ready to serve the moment it is PROMOTED (its own post-promotion
+    /// writes do land in its WAL), not to fan out mid-chain.
     ///
     /// # Errors
     ///
@@ -666,7 +732,8 @@ fn handle_connection(
 /// Returns `true` if the handshake succeeded and the caller should proceed
 /// to serve requests; `false` if the connection should be closed.
 fn perform_handshake(stream: &mut TcpStream, token_hash: [u8; 32]) -> bool {
-    let (msg_type, payload) = match read_frame(stream) {
+    // Pre-auth: cap the allocation at the hello-sized limit.
+    let (msg_type, payload) = match read_frame_capped(stream, MAX_HELLO_FRAME_SIZE) {
         Ok(v) => v,
         Err(_) => return false,
     };
@@ -706,12 +773,7 @@ fn serve_fetch_entries(stream: &mut TcpStream, backend: &FeedBackend, payload: &
             primary_flushed_lsn,
             primary_wallclock_micros,
         }) => {
-            let header = EntriesHeaderMsg {
-                primary_flushed_lsn,
-                primary_wallclock_micros,
-                count: entries.len() as u32,
-            };
-            match encode_entries_payload(&header, &entries) {
+            match encode_entries_payload(primary_flushed_lsn, primary_wallclock_micros, &entries) {
                 Ok(payload) => write_frame(stream, MSG_ENTRIES, &payload).is_ok(),
                 Err(_) => false,
             }
@@ -835,12 +897,23 @@ impl TcpSource {
             return Ok(());
         }
 
-        let socket_addr: SocketAddr = self.addr.parse().map_err(|e| {
-            Error::Storage(StorageError::io_error(format!(
-                "invalid replication primary address '{}': {e}",
-                self.addr
-            )))
-        })?;
+        // Resolve via `ToSocketAddrs` so DNS hostnames (`primary:9099` in
+        // Docker/K8s) work, not just literal `IP:port`. First resolved
+        // address wins (standard client behavior).
+        let socket_addr: SocketAddr = std::net::ToSocketAddrs::to_socket_addrs(&self.addr.as_str())
+            .map_err(|e| {
+                Error::Storage(StorageError::io_error(format!(
+                    "invalid replication primary address '{}': {e}",
+                    self.addr
+                )))
+            })?
+            .next()
+            .ok_or_else(|| {
+                Error::Storage(StorageError::io_error(format!(
+                    "replication primary address '{}' resolved to no addresses",
+                    self.addr
+                )))
+            })?;
         let mut stream = TcpStream::connect_timeout(&socket_addr, CLIENT_CONNECT_TIMEOUT)?;
         stream.set_nodelay(true).ok();
         stream.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
@@ -947,5 +1020,111 @@ impl ReplicationSource for TcpSource {
                 )),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::hlc::HybridTimestamp;
+    use crate::core::id::NodeId;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
+    use crate::storage::wal::{WalEntry, WalOperation};
+
+    fn big_entry(lsn: u64, payload_bytes: usize) -> WalEntry {
+        let props = PropertyMapBuilder::new()
+            .insert(
+                "blob",
+                PropertyValue::String("x".repeat(payload_bytes).into()),
+            )
+            .build();
+        WalEntry {
+            lsn: crate::storage::wal::LSN(lsn),
+            timestamp: HybridTimestamp::new_unchecked(1, 0),
+            operation: WalOperation::CreateNode {
+                node_id: NodeId::new(lsn).unwrap(),
+                label: GLOBAL_INTERNER.intern("TcpTest").unwrap(),
+                properties: props,
+                valid_from: HybridTimestamp::new_unchecked(1, 0),
+                provenance: None,
+            },
+            checksum: 0,
+            framed: true,
+            segment_version: None,
+        }
+    }
+
+    fn small_entry(lsn: u64) -> WalEntry {
+        WalEntry {
+            lsn: crate::storage::wal::LSN(lsn),
+            timestamp: HybridTimestamp::new_unchecked(1, 0),
+            operation: WalOperation::CreateNode {
+                node_id: NodeId::new(lsn).unwrap(),
+                label: GLOBAL_INTERNER.intern("TcpTest").unwrap(),
+                properties: PropertyMap::new(),
+                valid_from: HybridTimestamp::new_unchecked(1, 0),
+                provenance: None,
+            },
+            checksum: 0,
+            framed: true,
+            segment_version: None,
+        }
+    }
+
+    /// Review finding #6 (Issue #3355): a batch whose full encoding exceeds
+    /// MAX_FRAME_SIZE must be truncated to the prefix that fits (>= 1 entry)
+    /// and shipped, never errored -- erroring closed the connection and
+    /// neither side ever shrank the batch, stalling replication forever.
+    #[test]
+    fn oversize_batch_is_truncated_not_errored() {
+        // Three ~28 MiB entries: any two fit a 64 MiB + headroom frame, all
+        // three do not.
+        let entries = vec![
+            big_entry(1, 28 * 1024 * 1024),
+            big_entry(2, 28 * 1024 * 1024),
+            big_entry(3, 28 * 1024 * 1024),
+        ];
+        let payload = encode_entries_payload(3, 0, &entries).expect("must not error");
+        assert!(payload.len() <= MAX_FRAME_SIZE as usize);
+
+        let (header, decoded) = decode_entries_payload(&payload).expect("decode");
+        assert_eq!(header.count as usize, decoded.len());
+        assert!(
+            !decoded.is_empty() && decoded.len() < 3,
+            "expected a truncated non-empty prefix, got {} of 3",
+            decoded.len()
+        );
+        // Dense prefix from the first entry -- never a mid-batch selection.
+        assert_eq!(decoded[0].lsn.0, 1);
+        for (i, e) in decoded.iter().enumerate() {
+            assert_eq!(e.lsn.0, 1 + i as u64);
+        }
+    }
+
+    /// A small batch round-trips exactly (count preserved, all entries).
+    #[test]
+    fn small_batch_roundtrips_completely() {
+        let entries = vec![small_entry(7), small_entry(8), small_entry(9)];
+        let payload = encode_entries_payload(9, 123, &entries).expect("encode");
+        let (header, decoded) = decode_entries_payload(&payload).expect("decode");
+        assert_eq!(header.count, 3);
+        assert_eq!(header.primary_flushed_lsn, 9);
+        assert_eq!(header.primary_wallclock_micros, 123);
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[2].lsn.0, 9);
+    }
+
+    /// Any single legal WAL entry (up to MAX_WAL_ENTRY_SIZE) must fit one
+    /// frame: MAX_FRAME_SIZE carries headroom for the framing overhead.
+    #[test]
+    fn single_near_max_entry_ships() {
+        // ~63.9 MiB payload: within the WAL's own 64 MiB entry cap.
+        let entries = vec![big_entry(1, 63 * 1024 * 1024 + 900 * 1024)];
+        let payload = encode_entries_payload(1, 0, &entries).expect("must fit");
+        assert!(payload.len() <= MAX_FRAME_SIZE as usize);
+        let (header, decoded) = decode_entries_payload(&payload).expect("decode");
+        assert_eq!(header.count, 1);
+        assert_eq!(decoded.len(), 1);
     }
 }

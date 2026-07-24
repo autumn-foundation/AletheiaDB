@@ -109,10 +109,18 @@ pub(crate) fn apply_replica_batch(
     let boundary_lsn = pending[boundary_idx].lsn.0;
     let max_ts = max_applied_timestamp(&pending[..=boundary_idx]);
 
-    // Drain exactly the complete prefix out of `pending`, leaving any
-    // trailing (still-incomplete) frame in place for the next poll.
-    let remainder = pending.split_off(boundary_idx + 1);
-    let truncated = std::mem::replace(pending, remainder);
+    // Replay a CLONE of the complete prefix and only drain it out of
+    // `pending` after replay succeeds. Draining first (the original shape)
+    // corrupted the applier's bookkeeping on a replay error: the entries
+    // were gone but `last_applied` had not advanced, so the next poll's
+    // `from_lsn = last_applied + 1 + pending.len()` re-requested the wrong
+    // band and the dropped frames were skipped or double-buffered. With
+    // drain-on-success, an errored batch stays in `pending` and is retried
+    // verbatim next poll: a transient error heals (replay is idempotent per
+    // the #3419 guards, so re-applying a half-applied frame is safe), and a
+    // deterministic one stalls VISIBLY via `progress.set_error` rather than
+    // corrupting the stream. The clone is bounded by one apply batch.
+    let truncated: Vec<WalEntry> = pending[..=boundary_idx].to_vec();
 
     let initial_version_id = handles.version_id_gen.current();
     {
@@ -143,6 +151,9 @@ pub(crate) fn apply_replica_batch(
         }
         let (_final_lsn, max_node_id, max_edge_id, next_version_id) = replay_result?;
         drop(hist);
+
+        // Replay succeeded: NOW drain the applied prefix out of `pending`.
+        pending.drain(..=boundary_idx);
 
         if let Some(m) = max_node_id {
             handles.node_id_gen.ensure_at_least(m + 1);

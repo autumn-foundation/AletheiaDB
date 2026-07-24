@@ -541,7 +541,17 @@ fn config_primary_addr_auto_starts_replication_and_converges() {
         .expect("start server");
     let addr = loopback_addr(handle.local_addr());
 
+    // Isolate the WAL dir: a default (CWD-relative) WAL dir is shared with
+    // any other test binary run from the same workspace, and replaying a
+    // sibling suite's leftover segments fails startup with corrupted-data
+    // errors under the coverage job's sequential all-features run.
+    let replica_dir = tempfile::tempdir().expect("tempdir");
     let replica_config = AletheiaDBConfig::builder()
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(replica_dir.path().join("wal"))
+                .build(),
+        )
         .replication(
             ReplicationConfig::builder()
                 .primary_addr(addr)
@@ -569,7 +579,14 @@ fn config_auth_token_env_resolves_token_for_listen_server() {
         std::env::set_var(var, "env-resolved-token");
     }
 
+    // Isolated WAL dir: see config_primary_addr_auto_starts_replication_and_converges.
+    let dir = tempfile::tempdir().expect("tempdir");
     let config = AletheiaDBConfig::builder()
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(dir.path().join("wal"))
+                .build(),
+        )
         .replication(
             ReplicationConfig::builder()
                 .listen_addr("127.0.0.1:0")
@@ -596,7 +613,14 @@ fn config_auth_token_env_resolves_token_for_listen_server() {
 #[test]
 #[serial]
 fn config_missing_token_fails_startup_fast() {
+    // Isolated WAL dir: see config_primary_addr_auto_starts_replication_and_converges.
+    let dir = tempfile::tempdir().expect("tempdir");
     let config = AletheiaDBConfig::builder()
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(dir.path().join("wal"))
+                .build(),
+        )
         .replication(
             ReplicationConfig::builder()
                 .listen_addr("127.0.0.1:0")

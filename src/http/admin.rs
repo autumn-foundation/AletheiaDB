@@ -156,6 +156,7 @@ pub async fn promote(
         "role": "primary",
         "applier_stopped": report.applier_stopped,
         "last_applied_lsn": report.last_applied_lsn,
+        "index_persist_error": report.index_persist_error,
     }))))
 }
 

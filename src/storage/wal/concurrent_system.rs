@@ -793,16 +793,19 @@ impl ConcurrentWalSystem {
         self.wal.total_appends()
     }
 
-    /// The minimum LSN still present on disk across all WAL segments (Issue
-    /// #3355): `None` when no segment carries metadata (a fresh/empty WAL
-    /// dir), in which case every LSN is still "available" (nothing has been
-    /// truncated away yet).
+    /// The minimum LSN still available to the replication feed (Issue
+    /// #3355): `None` when no segment carries metadata AND nothing has been
+    /// truncated this process lifetime (a fresh/empty WAL dir), in which
+    /// case every LSN is still "available". Truncation-aware: once
+    /// `truncate_to_lsn` has removed every sealed segment, this reports the
+    /// truncation watermark + 1 rather than `None` (see
+    /// [`FlushCoordinator::get_replication_min_lsn`]).
     ///
     /// Used by the replication feed to detect when a requested resume LSN
     /// has fallen behind retention/truncation (`truncate_to_lsn`) and must
     /// report `ResyncRequired` instead of silently skipping a gap.
     pub(crate) fn min_available_lsn(&self) -> Option<LSN> {
-        self.coordinator.get_min_lsn()
+        self.coordinator.get_replication_min_lsn()
     }
 
     /// Best-known maximum LSN actually written to disk (Issue #3355): see

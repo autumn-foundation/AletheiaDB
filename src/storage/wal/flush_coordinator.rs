@@ -252,6 +252,18 @@ pub struct FlushCoordinator {
     current_segment_max_lsn: AtomicU64,
     /// Entry count in the current segment.
     current_segment_entry_count: AtomicU64,
+    /// Highest `max_lsn` among segments removed by [`Self::truncate_to_lsn`]
+    /// this process lifetime (0 = never truncated). Sealed-segment metadata
+    /// alone cannot answer "was anything truncated?" once truncation removes
+    /// EVERY sealed segment (the active segment carries no metadata file), so
+    /// the replication feed needs this watermark to distinguish "fresh WAL,
+    /// everything available" from "history was truncated away" -- otherwise a
+    /// lagging replica requesting a truncated LSN would get a gapped batch
+    /// instead of `ResyncRequired` (Issue #3355 review). In-memory only: after
+    /// a restart, surviving sealed segments repopulate `get_min_lsn`, and the
+    /// feed's gap-withholding turns the residual all-sealed-truncated corner
+    /// into an observable stall rather than silent skip.
+    truncated_up_to_lsn: AtomicU64,
 }
 
 impl FlushCoordinator {
@@ -277,6 +289,7 @@ impl FlushCoordinator {
             current_segment_min_lsn: AtomicU64::new(u64::MAX),
             current_segment_max_lsn: AtomicU64::new(0),
             current_segment_entry_count: AtomicU64::new(0),
+            truncated_up_to_lsn: AtomicU64::new(0),
         };
 
         // Find the latest segment ID
@@ -783,19 +796,24 @@ impl FlushCoordinator {
                         .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
                     && segment_id < current_id
                 {
-                    let should_remove =
-                        if let Some(metadata) = self.read_segment_metadata(segment_id) {
-                            // Remove if all entries in segment are before truncate point
-                            metadata.max_lsn.0 < truncate_lsn.0
-                        } else {
-                            // No metadata file - be conservative and don't remove
-                            false
-                        };
+                    // Remove if all entries in segment are before the
+                    // truncate point. No metadata file: be conservative and
+                    // don't remove.
+                    let removable_max_lsn = self
+                        .read_segment_metadata(segment_id)
+                        .map(|m| m.max_lsn.0)
+                        .filter(|max| *max < truncate_lsn.0);
 
-                    if should_remove {
+                    if let Some(max_lsn) = removable_max_lsn {
                         // Remove segment file
                         if std::fs::remove_file(&path).is_ok() {
                             removed_count += 1;
+                            // Record the truncation watermark so
+                            // `get_replication_min_lsn` keeps answering
+                            // correctly even once no sealed segment (and
+                            // hence no metadata file) remains.
+                            self.truncated_up_to_lsn
+                                .fetch_max(max_lsn, Ordering::Relaxed);
                         }
                         // Remove metadata file
                         let meta_path = self.segment_meta_path(segment_id);
@@ -842,6 +860,25 @@ impl FlushCoordinator {
             .into_iter()
             .map(|(_, meta)| meta.min_lsn)
             .min()
+    }
+
+    /// The minimum LSN still available to the replication feed (Issue #3355
+    /// review): like [`Self::get_min_lsn`], but truncation-aware. Once
+    /// [`Self::truncate_to_lsn`] has removed EVERY sealed segment,
+    /// `get_min_lsn` returns `None` -- indistinguishable from a fresh WAL --
+    /// while history genuinely is gone; this method answers
+    /// `truncated_up_to + 1` in that case so the feed reports
+    /// `ResyncRequired` instead of handing a lagging replica a silently
+    /// gapped batch. `None` still means "nothing ever truncated, no sealed
+    /// metadata": every LSN is satisfiable (modulo the active segment, which
+    /// the feed's gap-withholding covers).
+    pub fn get_replication_min_lsn(&self) -> Option<LSN> {
+        let truncated = self.truncated_up_to_lsn.load(Ordering::Relaxed);
+        match self.get_min_lsn() {
+            Some(min) => Some(min),
+            None if truncated > 0 => Some(LSN(truncated.saturating_add(1))),
+            None => None,
+        }
     }
 
     /// Best-known maximum LSN actually written to disk (Issue #3355
@@ -2461,6 +2498,50 @@ mod tests {
         assert!(
             result.is_err(),
             "a real remove_file failure must propagate as Err, not be swallowed"
+        );
+    }
+
+    /// Issue #3355 review finding: once `truncate_to_lsn` removes EVERY
+    /// sealed segment, `get_min_lsn` returns `None` (no metadata left) --
+    /// indistinguishable from a fresh WAL -- so the replication feed would
+    /// hand a lagging replica a gapped batch instead of `ResyncRequired`.
+    /// `get_replication_min_lsn` must keep answering from the truncation
+    /// watermark in that state.
+    #[test]
+    fn test_replication_min_lsn_survives_full_sealed_truncation() {
+        let dir = tempdir().unwrap();
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.segment_size = 50;
+        config.segments_to_retain = 100;
+
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // Seal a segment spanning LSN 10..=20, then start a new active one.
+        let entries: Vec<_> = (10..=20)
+            .map(|i| create_test_entry(i, &[i as u8; 20]))
+            .collect();
+        coordinator.flush(entries, true).unwrap();
+        coordinator
+            .flush(vec![create_test_entry(21, &[21u8; 20])], true)
+            .unwrap();
+
+        // Fresh coordinator, nothing truncated: both answers agree.
+        assert!(coordinator.get_replication_min_lsn().is_some());
+
+        // Truncate away every sealed segment.
+        let removed = coordinator.truncate_to_lsn(LSN(21)).unwrap();
+        assert!(removed >= 1, "the sealed segment must be removed");
+
+        // Plain get_min_lsn may now be None (only the active segment, which
+        // has no metadata file, remains) -- but the replication view must
+        // still report that history up to LSN 20 is gone.
+        let min = coordinator
+            .get_replication_min_lsn()
+            .expect("watermark must survive full sealed truncation");
+        assert_eq!(
+            min,
+            LSN(21),
+            "min available after truncating [10, 20] must be 21"
         );
     }
 }

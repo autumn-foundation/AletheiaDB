@@ -83,6 +83,16 @@ pub struct PromotionReport {
     /// The replica's last fully-applied primary LSN at the moment of
     /// promotion, when an applier was running. `None` otherwise.
     pub last_applied_lsn: Option<u64>,
+    /// `Some(error)` when the promotion-point index persist failed (or was
+    /// attempted with persistence configured but errored). Replicated history
+    /// is NEVER in the promoted node's local WAL -- the applier applies
+    /// without appending -- so until the next successful persist, everything
+    /// applied since the last periodic persist exists in memory only, and a
+    /// crash before then loses it with no former primary left to re-stream
+    /// from. An operator seeing this should retry persistence (or back up)
+    /// before trusting the promoted node's durability. `None` when the
+    /// persist succeeded or no persistence is configured.
+    pub index_persist_error: Option<String>,
 }
 
 impl std::fmt::Display for NodeRole {
@@ -187,12 +197,20 @@ impl AletheiaDB {
                 .take();
 
             if let Some(applier) = applier {
-                let applied_lsn = applier.progress.last_applied_lsn();
+                // Keep the progress handle across the join: the applier can
+                // legitimately complete one more batch between any
+                // pre-join read and the thread actually stopping, and
+                // seeding the allocator from a stale value would hand out
+                // LSNs already materialized in state (primary-space
+                // collision). Only the post-join read is authoritative.
+                let progress = std::sync::Arc::clone(&applier.progress);
                 report.applier_stopped = true;
-                report.last_applied_lsn = Some(applied_lsn);
 
                 // Stops + joins the background thread.
                 drop(applier);
+
+                let applied_lsn = progress.last_applied_lsn();
+                report.last_applied_lsn = Some(applied_lsn);
 
                 // LSN continuity (mirrors the Issue #3420 recovery-seeding
                 // contract): only ever move the allocator forward.
@@ -204,7 +222,13 @@ impl AletheiaDB {
                 if let (Some(manager), Some(tracker)) =
                     (&self.persistence_manager, &self.persistence_tracker)
                 {
-                    let _ =
+                    // Surface (never swallow) a persist failure: replicated
+                    // history is not in the local WAL, so a crash before the
+                    // next successful persist would lose it silently. The
+                    // promotion itself still completes -- the node must
+                    // become writable -- but the report tells the operator
+                    // durability is not yet re-established.
+                    if let Err(e) =
                         crate::storage::index_persistence::operations::persist_all_indexes_at_lsn(
                             &self.current,
                             &self.historical,
@@ -212,7 +236,10 @@ impl AletheiaDB {
                             manager,
                             tracker,
                             applied_lsn,
-                        );
+                        )
+                    {
+                        report.index_persist_error = Some(e.to_string());
+                    }
                 }
             }
         }

@@ -242,7 +242,18 @@ fn run_applier_loop(
                 progress.state.store(STATE_STREAMING, Ordering::Release);
                 progress.clear_error();
 
-                pending.extend(entries);
+                // Trust boundary: a conforming source (the in-process feed /
+                // TCP server) already guarantees a dense batch starting at
+                // exactly `from_lsn`, but `ReplicationSource` is a trait --
+                // verify anyway so a buggy or hostile source can never make
+                // this replica silently skip LSNs or tear a frame. A
+                // non-conforming batch is dropped whole (re-requested next
+                // poll); `pending` stays dense from `last_applied + 1` by
+                // induction.
+                match batch_continuity_error(&entries, from_lsn) {
+                    Some(msg) => progress.set_error(msg),
+                    None => pending.extend(entries),
+                }
 
                 if !pending.is_empty() {
                     match apply_replica_batch(handles, &mut pending) {
@@ -319,6 +330,24 @@ fn run_applier_loop(
     progress.state.store(STATE_STOPPED, Ordering::Release);
 }
 
+/// `None` if `entries` is a dense LSN run starting exactly at `expected_lsn`
+/// (an empty batch is trivially conforming); otherwise a description of the
+/// first violation. See the call site for why this is enforced.
+fn batch_continuity_error(entries: &[WalEntry], expected_lsn: u64) -> Option<String> {
+    let mut expected = expected_lsn;
+    for entry in entries {
+        if entry.lsn.0 != expected {
+            return Some(format!(
+                "replication source returned a non-contiguous batch: expected LSN \
+                 {expected}, got {}; dropping batch and re-requesting",
+                entry.lsn.0
+            ));
+        }
+        expected = expected.wrapping_add(1);
+    }
+    None
+}
+
 /// Sleep for up to `dur`, checking `shutdown` in small increments so a
 /// shutdown request is picked up promptly rather than after the full
 /// interval.
@@ -328,5 +357,45 @@ fn park_for(shutdown: &AtomicBool, dur: Duration) {
     while waited < dur && !shutdown.load(Ordering::Acquire) {
         thread::sleep(step);
         waited += step;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::hlc::HybridTimestamp;
+    use crate::storage::wal::{LSN, WalOperation};
+
+    fn entry(lsn: u64) -> WalEntry {
+        WalEntry {
+            lsn: LSN(lsn),
+            timestamp: HybridTimestamp::new_unchecked(1, 0),
+            operation: WalOperation::BeginTx { tx_id: 1 },
+            checksum: 0,
+            framed: true,
+            segment_version: None,
+        }
+    }
+
+    /// Review finding #1 (Issue #3355): the applier must reject any batch
+    /// that is not a dense run starting exactly at the requested LSN, so a
+    /// non-conforming source can never make it skip or tear.
+    #[test]
+    fn conforming_batches_pass() {
+        assert!(batch_continuity_error(&[], 5).is_none());
+        assert!(batch_continuity_error(&[entry(5)], 5).is_none());
+        assert!(batch_continuity_error(&[entry(5), entry(6), entry(7)], 5).is_none());
+    }
+
+    #[test]
+    fn head_mismatch_is_rejected() {
+        let err = batch_continuity_error(&[entry(6)], 5).expect("must reject");
+        assert!(err.contains("expected LSN 5"), "got: {err}");
+    }
+
+    #[test]
+    fn interior_gap_is_rejected() {
+        let err = batch_continuity_error(&[entry(5), entry(7)], 5).expect("must reject");
+        assert!(err.contains("expected LSN 6"), "got: {err}");
     }
 }
