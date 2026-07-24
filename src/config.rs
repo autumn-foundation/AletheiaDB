@@ -800,6 +800,173 @@ impl Default for VectorIndexConfigBuilder {
     }
 }
 
+/// Asynchronous replication (TCP transport) configuration (Issue #3355,
+/// Slice C).
+///
+/// Disabled by default (`listen_addr`/`primary_addr` both `None`), so a
+/// database's behavior and on-disk layout are unchanged unless an operator
+/// opts in. Setting `listen_addr` makes `AletheiaDB::with_unified_config`
+/// automatically start a [`crate::storage::replication::ReplicationServer`]
+/// (serving `FetchEntries` streaming automatically; see
+/// `crate::storage::replication::tcp`'s module docs for the one caveat this
+/// entails for snapshot-bootstrap serving). Setting `primary_addr` makes it
+/// automatically call [`crate::db::AletheiaDB::start_replication`] with a
+/// [`crate::storage::replication::TcpSource`], entering read-only replica
+/// mode. The two may be set simultaneously (a serving replica).
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
+#[non_exhaustive]
+pub struct ReplicationConfig {
+    /// If set, `with_unified_config` starts a TCP [`crate::storage::replication::ReplicationServer`]
+    /// bound to this address (e.g. `"0.0.0.0:4460"`, or `"127.0.0.1:0"` to
+    /// let the OS assign a port for tests).
+    pub listen_addr: Option<String>,
+    /// If set, `with_unified_config` connects a [`crate::storage::replication::TcpSource`]
+    /// to this primary address and starts streaming replication, entering
+    /// read-only replica mode.
+    pub primary_addr: Option<String>,
+    /// Inline shared-secret auth token. Prefer [`Self::auth_token_env`] for
+    /// anything beyond local testing (an inline token risks being checked
+    /// into a config file). See [`Self::resolve_token`] for precedence.
+    pub auth_token: Option<String>,
+    /// Name of an environment variable to read the shared-secret auth token
+    /// from at startup. Takes precedence over [`Self::auth_token`] when set.
+    pub auth_token_env: Option<String>,
+    /// Replica applier poll interval, in milliseconds (how often to ask the
+    /// primary for new entries when caught up).
+    pub poll_interval_ms: u64,
+    /// Maximum WAL entries requested per replica `fetch_entries` call.
+    pub batch_max_entries: usize,
+}
+
+impl Default for ReplicationConfig {
+    fn default() -> Self {
+        Self {
+            listen_addr: None,
+            primary_addr: None,
+            auth_token: None,
+            auth_token_env: None,
+            poll_interval_ms: 50,
+            batch_max_entries: 500,
+        }
+    }
+}
+
+impl ReplicationConfig {
+    /// Fluent builder over [`ReplicationConfig::default`].
+    pub fn builder() -> ReplicationConfigBuilder {
+        ReplicationConfigBuilder::new()
+    }
+
+    /// Resolve the shared-secret auth token to use when starting a
+    /// [`crate::storage::replication::ReplicationServer`] or
+    /// [`crate::storage::replication::TcpSource`].
+    ///
+    /// Precedence: [`Self::auth_token_env`] (an environment variable name)
+    /// wins over the inline [`Self::auth_token`] when both are set. This
+    /// makes `auth_token_env` the preferred production path -- the token
+    /// itself never has to touch a config file -- while `auth_token` remains
+    /// available for local development/tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidValue`] if `auth_token_env` names a
+    /// variable that is unset or empty, or if neither field resolves to a
+    /// nonempty token. Callers are expected to invoke this only when at
+    /// least one of `listen_addr`/`primary_addr` is set (an operator turning
+    /// on replication without configuring a token is a startup-time
+    /// misconfiguration, not a silent anonymous-access fallback).
+    pub fn resolve_token(&self) -> std::result::Result<String, ConfigError> {
+        if let Some(var) = &self.auth_token_env {
+            return match std::env::var(var) {
+                Ok(v) if !v.is_empty() => Ok(v),
+                Ok(_) => Err(ConfigError::InvalidValue(format!(
+                    "replication.auth_token_env names environment variable '{var}', but it is \
+                     set to an empty string"
+                ))),
+                Err(_) => Err(ConfigError::InvalidValue(format!(
+                    "replication.auth_token_env names environment variable '{var}', but it is \
+                     not set"
+                ))),
+            };
+        }
+        match &self.auth_token {
+            Some(token) if !token.is_empty() => Ok(token.clone()),
+            _ => Err(ConfigError::InvalidValue(
+                "replication requires auth_token or auth_token_env to be set whenever \
+                 listen_addr or primary_addr is configured"
+                    .to_string(),
+            )),
+        }
+    }
+}
+
+/// Builder for [`ReplicationConfig`].
+#[must_use = "builders do nothing unless you call build()"]
+#[derive(Debug, Clone)]
+pub struct ReplicationConfigBuilder {
+    config: ReplicationConfig,
+}
+
+impl ReplicationConfigBuilder {
+    /// Create a new builder with default (fully disabled) values.
+    pub fn new() -> Self {
+        Self {
+            config: ReplicationConfig::default(),
+        }
+    }
+
+    /// Start a [`crate::storage::replication::ReplicationServer`] on this
+    /// address.
+    pub fn listen_addr(mut self, addr: impl Into<String>) -> Self {
+        self.config.listen_addr = Some(addr.into());
+        self
+    }
+
+    /// Stream replication from a primary at this address.
+    pub fn primary_addr(mut self, addr: impl Into<String>) -> Self {
+        self.config.primary_addr = Some(addr.into());
+        self
+    }
+
+    /// Set the inline shared-secret auth token (see [`ReplicationConfig::auth_token`]).
+    pub fn auth_token(mut self, token: impl Into<String>) -> Self {
+        self.config.auth_token = Some(token.into());
+        self
+    }
+
+    /// Name an environment variable to resolve the auth token from at
+    /// startup (see [`ReplicationConfig::auth_token_env`]).
+    pub fn auth_token_env(mut self, var: impl Into<String>) -> Self {
+        self.config.auth_token_env = Some(var.into());
+        self
+    }
+
+    /// Set the replica applier poll interval, in milliseconds.
+    pub fn poll_interval_ms(mut self, ms: u64) -> Self {
+        self.config.poll_interval_ms = ms;
+        self
+    }
+
+    /// Set the maximum WAL entries requested per replica fetch call.
+    pub fn batch_max_entries(mut self, n: usize) -> Self {
+        self.config.batch_max_entries = n;
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> ReplicationConfig {
+        self.config
+    }
+}
+
+impl Default for ReplicationConfigBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Unified configuration for AletheiaDB.
 ///
 /// This consolidates all configuration settings for the database,
@@ -844,6 +1011,11 @@ pub struct AletheiaDBConfig {
     /// Defaults to [`EngineQueryLimitsConfig::default`](crate::query::limits::EngineQueryLimitsConfig::default)
     /// (enabled, generous ceilings) so existing behavior is unaffected.
     pub query_limits: crate::query::limits::EngineQueryLimitsConfig,
+    /// Asynchronous replication (TCP transport) configuration (Issue #3355,
+    /// Slice C). Disabled by default (both `listen_addr` and `primary_addr`
+    /// unset), so a database's behavior is unchanged unless an operator opts
+    /// in. See [`ReplicationConfig`] for what each field wires up.
+    pub replication: ReplicationConfig,
 }
 
 /// Builder for unified database configuration.
@@ -922,6 +1094,13 @@ impl AletheiaDBConfigBuilder {
         query_limits_config: crate::query::limits::EngineQueryLimitsConfig,
     ) -> Self {
         self.config.query_limits = query_limits_config;
+        self
+    }
+
+    /// Set the asynchronous replication (TCP transport) configuration
+    /// (Issue #3355, Slice C).
+    pub fn replication(mut self, replication_config: ReplicationConfig) -> Self {
+        self.config.replication = replication_config;
         self
     }
 

@@ -86,6 +86,11 @@ pub struct DatabaseStats {
     /// per-principal detail deliberately kept OFF the bounded `/metrics`
     /// exposition (which stays bounded-label-only).
     pub changefeed: ChangefeedStats,
+    /// Replication role + (for a replica) progress/lag observability (Issue
+    /// #3355). `role` is an O(1) atomic read; `replica` is `None` on a
+    /// primary and populated on a streaming replica via the applier's shared
+    /// progress handle (applied LSN, entries behind, lag, state).
+    pub replication: ReplicationStats,
 }
 
 // Note (Issue #3368): engine-lane per-query resource-limit termination counters
@@ -122,6 +127,43 @@ pub struct PrincipalSubscriptionStat {
     pub principal: String,
     /// The principal's currently-live subscription count.
     pub active_subscriptions: usize,
+}
+
+/// Replication role + progress observability (Issue #3355).
+///
+/// `role` is an O(1) atomic read of [`AletheiaDB::node_role`]. `replica` is
+/// `None` on a primary; on a replica it is populated by the replication
+/// engine's shared progress handle -- a Slice B addition, so this Slice A
+/// skeleton always reports `None` there, even while `role == "replica"`.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct ReplicationStats {
+    /// This node's current role: `"primary"` or `"replica"`.
+    pub role: String,
+    /// Replica-only progress/lag observability. Always `None` on a primary.
+    pub replica: Option<ReplicaProgressStats>,
+}
+
+/// A replica's applied position and lag relative to its primary (Issue
+/// #3355). Populated starting with the Slice B replication engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct ReplicaProgressStats {
+    /// Applier state: `"connecting"`, `"streaming"`, `"resync_required"`, or
+    /// `"stopped"`.
+    pub state: String,
+    /// The last LSN this replica has fully applied.
+    pub last_applied_lsn: u64,
+    /// The primary's last-known flushed LSN, when reported by the feed.
+    pub primary_flushed_lsn: Option<u64>,
+    /// `primary_flushed_lsn - last_applied_lsn`, when both are known.
+    pub entries_behind: Option<u64>,
+    /// Estimated replication lag in milliseconds, when derivable.
+    pub lag_ms: Option<u64>,
+    /// The most recent applier error message, if any.
+    pub last_error: Option<String>,
 }
 
 /// Status of the opt-in provenance hash chain (Issue #3351).
@@ -463,6 +505,25 @@ impl AletheiaDB {
                 .collect(),
         };
 
+        // Replication role (Issue #3355): an O(1) atomic read. `replica` is
+        // populated from the replication engine's shared progress handle
+        // (Slice B) when this node is currently a replica; always `None` on a
+        // primary (including a promoted-back-to-primary former replica) and,
+        // on the wasm32 ephemeral profile (no replication engine there),
+        // always `None`.
+        #[cfg(not(target_arch = "wasm32"))]
+        let replica_progress = if self.is_replica() {
+            self.replication_progress()
+        } else {
+            None
+        };
+        #[cfg(target_arch = "wasm32")]
+        let replica_progress = None;
+        let replication = ReplicationStats {
+            role: self.node_role().to_string(),
+            replica: replica_progress,
+        };
+
         DatabaseStats {
             current: CurrentStateStats {
                 node_count: current_stats.node_count,
@@ -474,6 +535,7 @@ impl AletheiaDB {
             chain,
             namespaces,
             changefeed,
+            replication,
         }
     }
 

@@ -5,6 +5,12 @@ bi-temporal state of a database — current nodes and edges, every version in th
 hot/warm tiers, every version in the cold (Redb) tier, and the string interner —
 into a single, self-contained artifact file (`*.albk`).
 
+`.albk` artifacts also serve as the initial-sync mechanism for asynchronous
+replication (Issue #3355): `AletheiaDB::bootstrap_replica` fetches a
+primary's current snapshot over the network in exactly this format before
+resuming streaming from its recorded `source_lsn`. See the
+[Replication Guide](replication-guide.md#bootstrap--resume) for details.
+
 ## Quick Start
 
 ### Rust API

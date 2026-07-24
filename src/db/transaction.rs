@@ -236,6 +236,11 @@ impl AletheiaDB {
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn write_transaction(&self) -> Result<WriteTransaction> {
         let result = (|| {
+            // Read-only replica enforcement (Issue #3355, Slice A): reject
+            // before any transaction state (tx id, snapshot, visibility
+            // registration) is allocated.
+            crate::db::replication_role::reject_if_replica(&self.role)?;
+
             let tx_id = self.tx_id_gen.next();
             let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
             self.visibility_manager.register_active(tx_id);
@@ -257,6 +262,7 @@ impl AletheiaDB {
             )
             .with_constraint_registry(Arc::clone(&self.constraint_registry))
             .with_in_flight_tracker(Arc::clone(&self.in_flight))
+            .with_role_cell(Arc::clone(&self.role))
             .with_changefeed(Arc::clone(&self.changefeed));
             // GDPR crypto-shred (Issue #3359, PR-1b): attach the seal context when
             // the database has active designations (fail-closed on cipher-build).
@@ -487,6 +493,10 @@ impl AletheiaDB {
         options: WriteOptions,
     ) -> Result<WriteTransaction> {
         let result = (|| {
+            // Read-only replica enforcement (Issue #3355, Slice A): reject
+            // before any transaction state is allocated.
+            crate::db::replication_role::reject_if_replica(&self.role)?;
+
             let tx_id = self.tx_id_gen.next();
             let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
             self.visibility_manager.register_active(tx_id);
@@ -511,6 +521,7 @@ impl AletheiaDB {
             )
             .with_constraint_registry(Arc::clone(&self.constraint_registry))
             .with_in_flight_tracker(Arc::clone(&self.in_flight))
+            .with_role_cell(Arc::clone(&self.role))
             .with_changefeed(Arc::clone(&self.changefeed));
             // GDPR crypto-shred (Issue #3359, PR-1b): attach the seal context when
             // the database has active designations (fail-closed on cipher-build).

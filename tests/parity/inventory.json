@@ -2,7 +2,7 @@
   "$comment": "Machine-readable parity inventory for the AletheiaDB HTTP + MCP surfaces. Consumed by the framework-migration/design lane. Pinned against branch feature/parity-harness at the current tip of work (scout commit 8351ff4). Every 'pinned_by' names a test in this repo that asserts the behavior; 'referenced' means the behavior is pinned by a pre-existing in-crate test (not re-implemented in the parity suites, to avoid duplication). TWO KINDS OF MCP PIN: (1) 'behavior-pinned' tools — get_node, create_node, create_edge, traverse — carry black-box RUNTIME assertions in tests/parity_mcp.rs (success/error envelopes, temporal block, vector elision, roundtrip reachability); (2) 'inventory-pinned' tools — the remaining 70 — have only their name + access class pinned via the golden set. Live drift detection of the full 74-tool name/class registry (a tool added/removed/renamed/reclassified) is provided by the in-crate golden test src/mcp/auth_tests.rs::live_tool_inventory_matches_golden; the external tests/parity_mcp.rs::tool_inventory_golden_is_stable is only a cross-crate mirror of that constant and cannot itself read the live registry.",
   "generated_for": "framework port parity harness",
   "totals": {
-    "http_routes": 5,
+    "http_routes": 6,
     "mcp_tools": 74,
     "mcp_budgetable_read_tools": 26
   },
@@ -28,7 +28,7 @@
         "success_status": 200,
         "success_body": "{\"status\":\"healthy\"}",
         "error_statuses": [401],
-        "pinned_by": ["tests/parity_http.rs::status_success_shape", "tests/parity_http.rs::status_requires_credential_in_required_mode", "tests/parity_http.rs::route_inventory_is_the_known_five"]
+        "pinned_by": ["tests/parity_http.rs::status_success_shape", "tests/parity_http.rs::status_requires_credential_in_required_mode", "tests/parity_http.rs::route_inventory_is_the_known_six"]
       },
       {
         "method": "POST",
@@ -91,11 +91,22 @@
         "success_body": "{success:true, data:{revoked:true, id}}",
         "error_statuses": [401, 403, 404],
         "pinned_by": ["tests/parity_http.rs::admin_revoke_key_success_and_immediate_effect", "tests/parity_http.rs::admin_revoke_unknown_id_is_404", "tests/parity_http.rs::admin_revoke_non_admin_is_403"]
+      },
+      {
+        "method": "POST",
+        "path": "/admin/promote",
+        "handler": "promote",
+        "handler_loc": "src/http/admin.rs:143",
+        "access_class": "admin",
+        "success_status": 200,
+        "success_body": "{success:true, data:{role:\"primary\", applier_stopped, last_applied_lsn}}",
+        "error_statuses": [401, 403],
+        "pinned_by": ["tests/parity_http.rs::route_inventory_is_the_known_six", "tests/replication_http_readonly.rs::promote_route_flips_replica_to_primary_and_allows_writes", "tests/replication_http_readonly.rs::promote_route_denies_non_admin_roles_and_leaves_role_unchanged"]
       }
     ],
     "cross_route_invariants": {
       "uniform_401": "tests/parity_http.rs::every_route_uniform_401_without_credential — every route returns a byte-identical 401 body + WWW-Authenticate: Bearer when no credential is presented in required mode.",
-      "route_inventory_fixed": "tests/parity_http.rs::route_inventory_is_the_known_five"
+      "route_inventory_fixed": "tests/parity_http.rs::route_inventory_is_the_known_six"
     }
   },
   "mcp": {

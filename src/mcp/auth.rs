@@ -332,6 +332,24 @@ pub(crate) fn permission_denied_error(role: Role, class: AccessClass) -> McpErro
     }))
 }
 
+/// A `FAILED_PRECONDITION` error for a write/admin-class tool call rejected
+/// because the node is a read-only replica (Issue #3355). Non-retriable: the
+/// identical call against this node can never succeed, the caller must
+/// redirect to the primary. Carries `{node_role: "replica", reason:
+/// "read_only_replica"}` so a caller/LLM can branch on it without parsing
+/// `message`.
+pub(crate) fn read_only_replica_error() -> McpError {
+    McpError::new(
+        McpErrorCode::FailedPrecondition,
+        "write rejected: this node is a read-only replica; writes must go to the primary",
+    )
+    .retriable(false)
+    .details(json!({
+        "node_role": "replica",
+        "reason": "read_only_replica",
+    }))
+}
+
 /// Startup validation for the MCP server's auth configuration.
 ///
 /// [`AuthMode::Required`] (the conservative default) with zero credentials

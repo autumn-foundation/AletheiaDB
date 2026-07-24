@@ -138,9 +138,20 @@ pub use core::error::{
 pub use db::{
     AletheiaDB, ColdStorageDetails, ColdStorageTierStats, CurrentStateStats, DatabaseStats,
     EdgeTypeSchema, FactStatus, GraphSchema, HistoricalDepthStats, LabelExtent, LabelSchema,
-    LineageView, LineageViewEntry, NamespaceCount, NamespaceInfo, PropertyIndexBuilder,
-    SchemaInstant, SimilarityQuery, SimilaritySource, TemporalExtent, TierAccessStats, TimeBounds,
-    UniqueConstraintBuilder, VectorIndexBuilder, WalStateStats,
+    LineageView, LineageViewEntry, NamespaceCount, NamespaceInfo, NodeRole, PromotionReport,
+    PropertyIndexBuilder, ReplicaProgressStats, ReplicationStats, SchemaInstant, SimilarityQuery,
+    SimilaritySource, TemporalExtent, TierAccessStats, TimeBounds, UniqueConstraintBuilder,
+    VectorIndexBuilder, WalStateStats,
+};
+// Replication engine public API (Issue #3355, Slice B): native-only, like
+// backup/PITR (`db::replication`/`storage::replication` are both gated on
+// `not(target_arch = "wasm32")`).
+#[cfg(not(target_arch = "wasm32"))]
+pub use db::ReplicationOptions;
+#[cfg(not(target_arch = "wasm32"))]
+pub use storage::replication::{
+    FetchOutcome, InProcessSource, ReplicationFeed, ReplicationServer, ReplicationServerHandle,
+    ReplicationSource, TcpSource,
 };
 // Backup/restore and point-in-time-restore are durability features absent on
 // the wasm32 ephemeral profile (see `db::backup` / `db::pitr`).

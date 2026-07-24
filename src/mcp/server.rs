@@ -156,7 +156,7 @@ use crate::index::vector::{DistanceMetric, HnswConfig};
 use crate::query::executor::{EntityId as ResultEntityId, EntityResult};
 use crate::query::limits::QueryResourceLimits;
 
-use super::auth::{McpAuthConfig, SessionAuth};
+use super::auth::{McpAuthConfig, SessionAuth, read_only_replica_error, tool_access_class};
 use super::batch::ApplyBatchRequest;
 use super::budget;
 use super::cursor::{CursorManager, CursorPayload};
@@ -165,7 +165,7 @@ use super::limits::{
     EffectiveQueryLimits, LimitCounters, LimitCountsSnapshot, LimitDimension, QueryLimitsConfig,
 };
 use super::tools::*;
-use crate::auth::{AuthMode, Principal};
+use crate::auth::{AccessClass, AuthMode, Principal};
 
 // ============================================================================
 // Resource Limits (to prevent DoS attacks)
@@ -839,6 +839,15 @@ impl AletheiaMcpServer {
     // exposed for autumn-web migration (Issue #3524)
     pub fn dispatch_tool_json(&self, name: &str, args: serde_json::Value) -> String {
         Self::extract_text(self.dispatch_tool(name, args))
+    }
+
+    /// Every advertised tool's classified [`AccessClass`], exposed for
+    /// external conformance sweeps (e.g. the Issue #3355 replica read-only
+    /// enforcement test) without depending on the crate-private
+    /// `TOOL_ACCESS_CLASSES` table directly.
+    #[must_use]
+    pub fn tool_access_classes() -> Vec<(&'static str, AccessClass)> {
+        super::auth::TOOL_ACCESS_CLASSES.to_vec()
     }
 
     /// Get an edge by its ID.
@@ -10711,6 +10720,21 @@ impl AletheiaMcpServer {
     pub(crate) fn dispatch_tool(&self, name: &str, args: serde_json::Value) -> CallToolResult {
         if let Err(err) = self.auth.authorize_tool(name) {
             return self.error_result(err);
+        }
+        // Read-only replica enforcement (Issue #3355, Slice A). Runs after
+        // authorization (so an unauthenticated/unauthorized caller still
+        // gets the uniform auth error first) but before any handler: a
+        // write/admin-class tool called against a replica-role node is
+        // refused uniformly here, regardless of which handler would have
+        // run. Read and Metrics-class tools (including an unclassified/
+        // unknown tool name) are unaffected.
+        if self.db.is_replica()
+            && matches!(
+                tool_access_class(name),
+                Some(AccessClass::Write) | Some(AccessClass::Admin)
+            )
+        {
+            return self.error_result(read_only_replica_error());
         }
         // Token-budget-aware response shaping (Issue #3353). For the read tools
         // listed in `BUDGETABLE_READ_TOOLS`, an optional `max_response_tokens` /

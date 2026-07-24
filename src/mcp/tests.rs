@@ -11903,6 +11903,8 @@ mod database_stats_tests {
                 // Per-namespace counts (Issue #3349, PR3a): serialized since the
                 // surface slice; empty array on a default-only database.
                 "namespaces",
+                // Replication role + progress skeleton (Issue #3355, Slice A).
+                "replication",
                 "resource_limits",
                 "wal"
             ]
@@ -11997,6 +11999,12 @@ mod database_stats_tests {
                 "total_appends",
             ]
         );
+        // Replication role + progress skeleton (Issue #3355, Slice A): a
+        // primary reports its role with `replica: null` (populated starting
+        // with the Slice B replication engine).
+        assert_eq!(keys(&value["replication"]), vec!["replica", "role"]);
+        assert_eq!(value["replication"]["role"], "primary");
+        assert!(value["replication"]["replica"].is_null());
     }
 
     /// Deletions through the MCP surface must be reflected coherently:

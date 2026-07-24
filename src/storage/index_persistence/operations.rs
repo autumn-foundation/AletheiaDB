@@ -1124,8 +1124,38 @@ pub(crate) fn persist_all_indexes(
     manager: &Arc<IndexPersistenceManager>,
     tracker: &Arc<PersistenceTracker>,
 ) -> Result<()> {
-    let current_lsn = wal.current_lsn().0;
+    persist_all_indexes_at_lsn(
+        current,
+        historical,
+        temporal_indexes,
+        manager,
+        tracker,
+        wal.current_lsn().0,
+    )
+}
 
+/// Persist all indexes, stamping the manifest (and every component's tracked
+/// LSN) with an explicit `manifest_lsn` rather than the local WAL's current
+/// LSN.
+///
+/// This is the seam the replication engine (Issue #3355, Slice B) uses: a
+/// replica applies entries from a PRIMARY's independent LSN space and never
+/// appends that data to its own local WAL, so `wal.current_lsn()` (which
+/// [`persist_all_indexes`] uses) would stamp the manifest with the wrong
+/// coordinate. Passing the replica's `applied_lsn` here instead means a
+/// restarted replica resumes fetching from the correct primary LSN (see
+/// [`load_indexes_startup`]'s returned `manifest.lsn`).
+///
+/// Identical to [`persist_all_indexes`] in every other respect (same
+/// component order, same best-effort error handling, same manifest shape).
+pub(crate) fn persist_all_indexes_at_lsn(
+    current: &Arc<CurrentStorage>,
+    historical: &Arc<RwLock<HistoricalStorage>>,
+    temporal_indexes: &Arc<TemporalIndexes>,
+    manager: &Arc<IndexPersistenceManager>,
+    tracker: &Arc<PersistenceTracker>,
+    current_lsn: u64,
+) -> Result<()> {
     // Persist all indexes - log errors but continue with remaining indexes
     if let Err(e) = persist_string_interner(manager, tracker, current_lsn) {
         eprintln!("Failed to persist string interner: {}", e);

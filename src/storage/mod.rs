@@ -28,6 +28,12 @@ pub mod index_persistence;
 pub mod migration;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod redb_cold_storage;
+/// Asynchronous replication engine (Issue #3355, Slice B): pull-based WAL
+/// shipping feed/source/applier. Native-only, like the `backup`/`pitr`
+/// durability features it is built on (bootstrap-from-artifact, index
+/// persistence at an explicit LSN).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod replication;
 pub mod sharding;
 pub mod snapshot;
 #[cfg(not(target_arch = "wasm32"))]

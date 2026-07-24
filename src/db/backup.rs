@@ -32,7 +32,27 @@ impl AletheiaDB {
     ///
     /// Returns `Error::Backup` on any serialization or I/O failure.
     pub fn backup(&self, path: &Path) -> Result<BackupSummary> {
-        let source_lsn = self.wal.current_lsn().0;
+        // Capture the LSN coordinate under the commit clock
+        // (`current_timestamp`, lock order #1 -- released before any other
+        // lock below is taken). A committer holds this lock across its
+        // WAL-append → apply window (#3413), so any transaction whose
+        // entries carry an LSN below the value read here is guaranteed to be
+        // fully applied -- and therefore visible to the state snapshot taken
+        // below. Reading `current_lsn` WITHOUT the lock allowed a
+        // transaction to be missing from BOTH the snapshot and a replica's
+        // resume-from-`source_lsn` stream (appended at LSN < `source_lsn`
+        // but not yet applied when the snapshot was cloned): permanently
+        // lost on the replica. Commits landing after this read have LSNs
+        // >= `source_lsn`; if they also make the snapshot, resume re-applies
+        // them idempotently (#3419) -- the safe direction.
+        let source_lsn = {
+            let _commit_clock = self.current_timestamp.lock().map_err(|_| {
+                Error::Storage(crate::core::error::StorageError::LockPoisoned {
+                    resource: "current_timestamp".to_string(),
+                })
+            })?;
+            self.wal.current_lsn().0
+        };
 
         // Take consistent point-in-time snapshots.
         //

@@ -65,6 +65,8 @@ overview.
 | **Sharded / distributed (2PC) recovery** | `tests/sentry_shard_recovery.rs::test_shard_recovery_data_loss_repro` | Shards marked unavailable after logging to force 2PC commit failure | No data loss / consistent state after coordinator commit failure | `cargo test --test sentry_shard_recovery` |
 | **Fault injection: flush I/O error** ⚠️ *uid-0 caveat* | `tests/regression_flush_corruption.rs::test_metadata_corruption_on_error`; `tests/havoc/havoc_flush_deadlock.rs::test_flush_deadlock_on_io_error` | WAL dir made read-only (`set_mode(0o444)`) to force I/O error on segment/metadata write | No deadlock, no metadata corruption when flush fails; error surfaced cleanly | `cargo test --test regression_flush_corruption`; `cargo test --test havoc test_flush_deadlock_on_io_error` |
 | **Large-dataset recovery (perf/durability)** | `tests/recovery/large_dataset_recovery.rs` (6, `#[ignore]`, Issue #294) | 10K nodes / 50K edges replay | Recovery completes correctly under target time budget (~<10s) | `cargo test --test recovery large_dataset -- --ignored` |
+| **Primary crash mid-load, replica promotion** | `tests/replication_chaos.rs::primary_kill_mid_load_promotes_replica_with_bounded_loss` (Issue #3355, Slice D, AC8) | A real TCP-streaming replica; sustained mixed create/update/delete load (>=2000 acknowledged writes) against the primary; primary forced read-only, replication server force-closed, then `std::mem::forget`ed (no graceful Drop/flush) | No corruption (every surviving node's history is readable); no acknowledged-write loss beyond a per-commit-order suffix (no holes); bi-temporal `AS OF`/history-monotonicity parity; the promoted replica accepts new writes on top of replicated history; the reopened old primary is a strict superset of what the replica ever applied | `cargo test --test replication_chaos --features config-toml` |
+| **RTO / lag / write-overhead measurement** | `tests/replication_slo_harness.rs::rto_ci_sized`, `::lag_ci_sized`, `::write_overhead_ci_sized` (always-run, generous CI bounds); `::rto_reference_10k_nodes_50k_edges`, `::lag_reference_sustained` (`#[ignore]`, issue's real 10K/50K fixture + <10s RTO target) (Issue #3355, Slice D, AC7) | Not a crash test per se: scripted promotion-latency (RTO) and sustained-load lag (RPO proxy) and write-throughput-with-vs-without-a-replica measurements | RTO/lag/write-overhead stay within the asserted bounds; every measurement is printed with a stable `SLO <metric>=<value>` prefix for scraping | `cargo test --test replication_slo_harness --features config-toml` (add `-- --ignored` for the reference variants) |
 
 **Implementation under test:** the replay/recovery logic lives in
 `src/storage/recovery.rs` (WAL entry replay, "resurrection"),
@@ -162,6 +164,36 @@ coverage work has a target. (Add a row to the table above when one lands.)
   extent, is not directly exercised here.
 - **Concurrent recovery / reads during replay.** No test drives reads or writes
   concurrently with an in-progress replay.
+- **⚠️ Known bug, discovered by the Issue #3355 Slice D chaos test, NOT YET
+  FIXED: `CreateNode` replay-time `version_id` reinvention can collide under
+  concurrent multi-threaded writers.** `WalOperation::CreateNode` carries no
+  logged `version_id` of its own (unlike `UpdateNode`/`DeleteNode`, which log
+  the primary's real, globally-unique `version_id`); replay
+  (`replay_entries_into_storage_with_constraints` in `src/storage/recovery.rs`,
+  shared by ordinary crash recovery, PITR, and the replica applier) reinvents
+  one from a local monotonic counter, implicitly assuming that stepping
+  through the WAL in LSN order reconstructs the exact same `version_id`
+  sequence the writer originally assigned. That assumption silently breaks
+  under genuinely concurrent multi-threaded writers (a `version_id` is
+  allocated at a different instant than that same write's LSN, so the two
+  orderings are not guaranteed to co-vary across threads): a replayed
+  `CreateNode` can invent a `version_id` that collides with a *different*,
+  later write's real logged `version_id`, silently corrupting that later
+  write's historical version (current state ends up right; the historical
+  version recorded under the colliding id keeps the wrong -- typically the
+  create's own -- properties). Reproduced with a standalone, replication-free
+  repro (3 threads x 300 creates with interleaved updates each, plain
+  `mem::forget` crash + reopen, no replica involved at all): ~2.8% of
+  entities end up with the wrong historical property value; 0 mismatches
+  with a single writer thread over the same op count. This is a pre-existing
+  defect in the shared WAL replay engine, unrelated to replication --
+  `tests/replication_chaos.rs` documents the finding and works around it by
+  using a single writer thread (see that file's module doc comment) pending a
+  real fix (almost certainly: give `CreateNode` its own logged `version_id`,
+  mirroring `UpdateNode`/`DeleteNode`, plus a WAL wire-version bump and a
+  recovery migration path). **No dedicated regression test exists for this
+  yet** -- add one (e.g. `tests/concurrent_create_update_version_id_collision.rs`)
+  alongside the real fix.
 
 ## Related
 

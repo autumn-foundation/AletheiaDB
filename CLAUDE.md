@@ -1067,6 +1067,36 @@ unreadable, and pinning "now" excludes future-valid facts. MCP exposure and an
 `AS OF SNAPSHOT <name>` query DDL are a coordinated follow-up (this wave is
 Rust-API-only). See [docs/guides/snapshot-pin.md](docs/guides/snapshot-pin.md).
 
+### Asynchronous Replication (Issue #3355)
+
+Single-primary, asynchronous, pull-based replication: a replica polls the
+primary's feed for durable (already-fsynced) WAL entries and applies them via
+the same recovery replay engine crash recovery and PITR use, giving read
+scale-out and a warm standby for manual failover with effectively zero
+primary write-path overhead. Config via `[replication]`
+(`ReplicationConfig`/`ReplicationConfigBuilder` in `src/config.rs`):
+`listen_addr`, `primary_addr`, `auth_token` / `auth_token_env`,
+`poll_interval_ms`, `batch_max_entries` — setting `listen_addr`/`primary_addr`
+without a resolvable token fails `with_unified_config` fast, never falling
+back to anonymous replication. Rust entry points:
+`AletheiaDB::start_replication(source, opts)` (stream into an existing
+database) and `AletheiaDB::bootstrap_replica(source, data_dir, opts)`
+(snapshot-bootstrap a fresh replica via the `.albk` format, then stream).
+Promotion: `AletheiaDB::promote_to_primary() -> PromotionReport` (Rust) or
+`POST /admin/promote` (HTTP, Admin-class — the one write path a replica is
+allowed to accept). **Consistency contract**: replicas are strictly
+read-only — every other write/admin surface rejects with a structured,
+non-retriable `FAILED_PRECONDITION`
+(`details: {node_role: "replica", reason: "read_only_replica"}`) — and apply
+only whole commit frames, so reads are always a consistent, possibly-stale
+(never torn) snapshot at transaction time ≤ the replica's applied LSN; RPO
+under primary loss equals replication lag at failure, surfaced via
+`replication_progress()`/`database_stats`. Manual failover only — no
+automatic election or fencing (split-brain risk if an old primary is not
+isolated before promotion). See
+[docs/guides/replication-guide.md](docs/guides/replication-guide.md) and
+[docs/guides/promotion-runbook.md](docs/guides/promotion-runbook.md).
+
 ### Encryption & Compliance
 
 Encryption-at-rest for on-disk data plus GDPR-oriented compliance tooling.

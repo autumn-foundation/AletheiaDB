@@ -84,6 +84,16 @@ pub mod pitr;
 pub mod property_index;
 /// Query builder and executor hooks.
 pub mod query;
+/// Public replication API: `start_replication`, `bootstrap_replica`,
+/// `replication_progress` (Issue #3355, Slice B). Native-only (built on
+/// `crate::storage::replication`, `backup`/`restore`, and index persistence).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod replication;
+/// Node replication role: writable primary vs. read-only replica (Issue
+/// #3355, Slice A). Always compiled, no feature flag -- the networked
+/// replication engine (feed/applier/TCP transport) is a separate,
+/// `replication`-gated addition that builds on this enforcement core.
+pub mod replication_role;
 /// Index-layer key rotation orchestration (Issue #488).
 ///
 /// Disk/encryption key-rotation engine (redb cold tier + index re-encryption);
@@ -141,12 +151,15 @@ pub use ops::NodesAtTime;
 #[cfg(not(target_arch = "wasm32"))]
 pub use pitr::{PitrCoord, PitrPlan, PitrTarget};
 pub use property_index::PropertyIndexBuilder;
+#[cfg(not(target_arch = "wasm32"))]
+pub use replication::ReplicationOptions;
+pub use replication_role::{NodeRole, PromotionReport};
 pub use schema::{EdgeTypeSchema, GraphSchema, LabelSchema, SchemaInstant};
 pub use similarity_query::{SimilarityQuery, SimilaritySource};
 pub use snapshot::{NamedSnapshot, Snapshot};
 pub use stats::{
     ColdStorageDetails, ColdStorageTierStats, CurrentStateStats, DatabaseStats,
-    HistoricalDepthStats, TierAccessStats, WalStateStats,
+    HistoricalDepthStats, ReplicaProgressStats, ReplicationStats, TierAccessStats, WalStateStats,
 };
 pub use vector_builder::VectorIndexBuilder;
 #[cfg(feature = "durable-execution")]
@@ -222,6 +235,18 @@ pub use workflow::{
 pub struct AletheiaDB {
     /// Current state storage (hot path) - Arc-wrapped for sharing across transactions
     pub(crate) current: Arc<CurrentStorage>,
+    /// Node replication role (Issue #3355, Slice A): `Primary` (default) or
+    /// `Replica`. A single atomic, not part of the write-path lock order
+    /// below -- every write surface checks it lock-free, before touching any
+    /// of those primitives. Shared (not owned) with the [`WriteTransaction`]
+    /// it constructs, closing the promotion/demotion race between a
+    /// transaction's construction and its commit. See
+    /// [`replication_role`](crate::db::replication_role) for the seam the
+    /// Slice B replication engine hooks into for full promotion (applier
+    /// stop + LSN reseed).
+    ///
+    /// [`WriteTransaction`]: crate::api::transaction::WriteTransaction
+    pub(crate) role: Arc<std::sync::atomic::AtomicU8>,
     // Lock ordering for write-path primitives:
     // 1. `current_timestamp`
     // 2. `wal`
@@ -413,6 +438,38 @@ pub struct AletheiaDB {
     /// [`AletheiaDB::query_limit_counters`] and folded into
     /// [`stats`](crate::db::AletheiaDB::stats)'s `resource_limits` block.
     pub(crate) limit_counters: Arc<crate::query::limits::LimitCounters>,
+    /// Replication engine runtime state (Issue #3355, Slice B): `Some` while a
+    /// background [`ReplicaApplierHandle`](crate::storage::replication::applier::ReplicaApplierHandle)
+    /// is running (populated by [`AletheiaDB::start_replication`]), `None` on
+    /// a plain primary or before replication has started. Dropping the handle
+    /// (via this slot, or explicitly during [`AletheiaDB::promote_to_primary`])
+    /// stops and joins the background thread. A leaf lock: never held while
+    /// acquiring any write-path primitive above, and briefly held only by
+    /// `start_replication`/`replication_progress`/`promote_to_primary`.
+    /// Native-only (see `crate::storage::replication`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) replication:
+        Arc<std::sync::Mutex<Option<crate::storage::replication::applier::ReplicaApplierHandle>>>,
+    /// The index-manifest LSN loaded at startup (Issue #3355, Slice B): the
+    /// resume coordinate [`AletheiaDB::start_replication`] uses when
+    /// resuming streaming, so a restarted replica continues from exactly
+    /// where its last persisted snapshot left off instead of re-streaming
+    /// its whole history. `0` when no manifest was loaded (a fresh ephemeral
+    /// or durable database) -- replication then resumes from LSN 1.
+    /// Native-only (mirrors [`Self::replication`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) startup_manifest_lsn: Arc<std::sync::atomic::AtomicU64>,
+    /// Running TCP replication server, when `config.replication.listen_addr`
+    /// was configured (Issue #3355, Slice C): `AletheiaDB::with_unified_config`
+    /// starts a [`crate::storage::replication::ReplicationServer`] serving
+    /// this database's feed and stores its handle here. `None` when
+    /// replication serving was not configured. Dropping the handle stops the
+    /// accept-loop thread and force-closes every connected replica socket
+    /// (see [`crate::storage::replication::ReplicationServerHandle`]).
+    /// Native-only (mirrors [`Self::replication`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) replication_server:
+        Option<crate::storage::replication::tcp::ReplicationServerHandle>,
     /// Backing tempdir for ephemeral databases created via [`AletheiaDB::new`].
     /// Declared last so it is dropped last (Rust drops struct fields in
     /// declaration order); this guarantees the WAL/persistence file handles
