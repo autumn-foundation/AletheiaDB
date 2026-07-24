@@ -490,7 +490,14 @@ wal_dir = "{wal_dir}"
 listen_addr = "127.0.0.1:0"
 auth_token = "toml-token"
 "#,
-        wal_dir = dir.path().join("wal").display()
+        // Escape backslashes so Windows temp paths survive TOML basic-string
+        // escaping (`\U` would otherwise start a unicode escape).
+        wal_dir = dir
+            .path()
+            .join("wal")
+            .display()
+            .to_string()
+            .replace('\\', "\\\\")
     );
 
     let config = AletheiaDBConfig::from_toml_str(&toml).expect("parse [replication] toml");
