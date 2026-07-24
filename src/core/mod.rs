@@ -42,6 +42,8 @@ pub mod observer;
 pub mod property;
 pub mod provenance;
 pub mod temporal;
+/// Multi-tenant isolation core model (Issue #3365).
+pub mod tenant;
 pub mod vector;
 
 // Re-export commonly used types for convenience

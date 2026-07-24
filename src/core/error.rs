@@ -45,6 +45,9 @@ pub enum Error {
     /// Namespace validation / registry errors (Issue #3349).
     #[error("Namespace error: {0}")]
     Namespace(crate::core::namespace::NamespaceError),
+    /// Multi-tenant lifecycle / quota errors (Issue #3365).
+    #[error("Tenant error: {0}")]
+    Tenant(crate::core::tenant::TenantError),
     /// Query-related errors.
     #[error("Query error: {0}")]
     Query(QueryError),
@@ -98,6 +101,7 @@ impl Error {
                 Error::Provenance(_) => crate::observability::ErrorCategory::Other,
                 Error::Lineage(_) => crate::observability::ErrorCategory::Other,
                 Error::Namespace(_) => crate::observability::ErrorCategory::Other,
+                Error::Tenant(_) => crate::observability::ErrorCategory::Other,
                 Error::Query(_) => crate::observability::ErrorCategory::Query,
                 Error::Transaction(_) => crate::observability::ErrorCategory::Transaction,
                 Error::Vector(_) => crate::observability::ErrorCategory::Vector,
@@ -164,6 +168,12 @@ impl From<crate::core::lineage::LineageError> for Error {
 impl From<crate::core::namespace::NamespaceError> for Error {
     fn from(e: crate::core::namespace::NamespaceError) -> Self {
         Error::Namespace(e)
+    }
+}
+
+impl From<crate::core::tenant::TenantError> for Error {
+    fn from(e: crate::core::tenant::TenantError) -> Self {
+        Error::Tenant(e)
     }
 }
 

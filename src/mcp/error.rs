@@ -230,6 +230,7 @@ impl McpError {
             .as_constraint()
             .and_then(|ce| ce.structured_details())
             .or_else(|| principal_quota_details(e))
+            .or_else(|| tenant_quota_details(e))
             .or_else(|| namespace_details(e))
             .or_else(|| capacity_exceeded_details(e))
             .or_else(|| read_only_replica_details(e));
@@ -266,6 +267,7 @@ fn classify_db_error(e: &Error) -> (McpErrorCode, bool) {
         Error::Provenance(_) => (McpErrorCode::InvalidArgument, false),
         Error::Lineage(le) => classify_lineage_error(le),
         Error::Namespace(ne) => classify_namespace_error(ne),
+        Error::Tenant(te) => classify_tenant_error(te),
         // A PITR (#3374) target outside the achievable window, or a window that
         // crosses a post-backup vocabulary change, is a caller-fault precondition
         // failure; each error's Display explains the remediation. All other
@@ -312,6 +314,43 @@ fn classify_namespace_error(e: &crate::core::namespace::NamespaceError) -> (McpE
         | NamespaceError::ScopeConflict => (McpErrorCode::InvalidArgument, false),
         NamespaceError::NotFound { .. } => (McpErrorCode::NotFound, false),
         NamespaceError::AlreadyExists { .. } => (McpErrorCode::Conflict, false),
+    }
+}
+
+/// Map a tenant error (Issue #3365). All are caller faults and never retriable:
+/// a malformed id is `INVALID_ARGUMENT`, an unknown tenant is `NOT_FOUND`, a
+/// duplicate create is `CONFLICT`, and a quota breach is `RESOURCE_EXHAUSTED`.
+/// A quota is a hard capacity limit — it heals only by freeing data or raising
+/// the quota, never by retrying the same call — so it is deliberately
+/// non-retriable (unlike the transient per-principal changefeed quota of #3678).
+fn classify_tenant_error(e: &crate::core::tenant::TenantError) -> (McpErrorCode, bool) {
+    use crate::core::tenant::TenantError;
+    match e {
+        TenantError::InvalidId { .. } => (McpErrorCode::InvalidArgument, false),
+        TenantError::NotFound { .. } => (McpErrorCode::NotFound, false),
+        TenantError::AlreadyExists { .. } => (McpErrorCode::Conflict, false),
+        TenantError::QuotaExceeded { .. } => (McpErrorCode::ResourceExhausted, false),
+    }
+}
+
+/// Structured `details` for a tenant quota breach (Issue #3365):
+/// `{tenant, dimension, current, limit}`. Returns `None` for every other error.
+fn tenant_quota_details(e: &Error) -> Option<serde_json::Value> {
+    if let Error::Tenant(crate::core::tenant::TenantError::QuotaExceeded {
+        tenant,
+        dimension,
+        current,
+        limit,
+    }) = e
+    {
+        Some(serde_json::json!({
+            "tenant": tenant,
+            "dimension": dimension.as_str(),
+            "current": current,
+            "limit": limit,
+        }))
+    } else {
+        None
     }
 }
 
@@ -666,6 +705,56 @@ mod tests {
         assert_eq!(json["details"]["principal"], "alice");
         assert_eq!(json["details"]["current"], 2);
         assert_eq!(json["details"]["limit"], 2);
+    }
+
+    #[test]
+    fn tenant_errors_map_to_3234_codes() {
+        use crate::core::tenant::{QuotaDimension, TenantError};
+        // Quota breach → RESOURCE_EXHAUSTED, non-retriable, with structured
+        // {tenant, dimension, current, limit} details (Issue #3365).
+        let quota: Error = TenantError::QuotaExceeded {
+            tenant: "acme".to_string(),
+            dimension: QuotaDimension::Nodes,
+            current: 100,
+            limit: 100,
+        }
+        .into();
+        let json = McpError::from_db_error(&quota).to_json();
+        assert_eq!(json["code"], "RESOURCE_EXHAUSTED");
+        assert_eq!(json["retriable"], false);
+        assert_eq!(json["details"]["tenant"], "acme");
+        assert_eq!(json["details"]["dimension"], "nodes");
+        assert_eq!(json["details"]["current"], 100);
+        assert_eq!(json["details"]["limit"], 100);
+
+        // Lifecycle errors map to their respective codes.
+        let not_found: Error = TenantError::NotFound {
+            id: "ghost".to_string(),
+        }
+        .into();
+        assert_eq!(
+            McpError::from_db_error(&not_found).to_json()["code"],
+            "NOT_FOUND"
+        );
+
+        let exists: Error = TenantError::AlreadyExists {
+            id: "dup".to_string(),
+        }
+        .into();
+        assert_eq!(
+            McpError::from_db_error(&exists).to_json()["code"],
+            "CONFLICT"
+        );
+
+        let invalid: Error = TenantError::InvalidId {
+            id: "bad/id".to_string(),
+            reason: "x".to_string(),
+        }
+        .into();
+        assert_eq!(
+            McpError::from_db_error(&invalid).to_json()["code"],
+            "INVALID_ARGUMENT"
+        );
     }
 
     #[test]
