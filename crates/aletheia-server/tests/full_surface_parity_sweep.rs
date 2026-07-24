@@ -7,7 +7,7 @@
 //! consolidating sweep: it asserts, from the LIVE assembled app, that the
 //! **whole** surface is now complete and matches the cross-lane source of
 //! truth `tests/parity/inventory.json` — no tool missing, none extra, every
-//! access class in lockstep, all five HTTP routes routed, `/openapi.json`
+//! access class in lockstep, all six HTTP routes routed, `/openapi.json`
 //! served and covering the tool routes, and the budgetable/cursorable behavior
 //! sets exactly as inventory documents.
 //!
@@ -185,11 +185,11 @@ async fn access_class_conformance_for_all_74() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// (3) All five HTTP routes are served (routed, not the autumn no-route 404).
+// (3) All six HTTP routes are served (routed, not the autumn no-route 404).
 // ════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn all_five_http_routes_are_served() {
+async fn all_six_http_routes_are_served() {
     let (db, store) = fixture();
     // Anonymous mode: the synthetic principal is Admin, so every route's class
     // gate passes and a non-404 status positively proves the method+path is
@@ -204,7 +204,7 @@ async fn all_five_http_routes_are_served() {
 
     let doc = inventory();
     let routes = doc["http"]["routes"].as_array().expect("http.routes array");
-    assert_eq!(routes.len(), 5, "inventory must list exactly 5 HTTP routes");
+    assert_eq!(routes.len(), 6, "inventory must list exactly 6 HTTP routes");
 
     for route in routes {
         let method = route["method"].as_str().expect("method");
@@ -222,6 +222,15 @@ async fn all_five_http_routes_are_served() {
             ("POST", "/admin/keys/revoke") => client
                 .post(path)
                 .json(&json!({ "id": principal.id }))
+                .send()
+                .await
+                .status
+                .as_u16(),
+            // Promote on an already-primary node is an idempotent 200 (#3355),
+            // so a non-404 here proves the route is mounted.
+            ("POST", "/admin/promote") => client
+                .post(path)
+                .json(&json!({}))
                 .send()
                 .await
                 .status

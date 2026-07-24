@@ -1,13 +1,13 @@
 //! The faithfully-ported HTTP routes (Issue #3524 PR1).
 //!
-//! Four of the legacy surface's five routes are ported here as autumn 0.5
+//! Five of the legacy surface's six routes are ported here as autumn 0.5
 //! `#[get]`/`#[post]` + `#[api_doc]` handlers producing **byte-identical**
 //! bodies/status codes to `src/http/handlers.rs` + `src/http/admin.rs`, by
 //! reusing the exact same public serializers/envelope/error type
 //! ([`aletheiadb::http::ApiResponse`], [`aletheiadb::http::AletheiaHttpError`])
 //! and the same [`AuthStore`](aletheiadb::auth::AuthStore) methods.
 //!
-//! The fifth route — the polymorphic `POST /query` (10 operations, per-query
+//! The sixth route — the polymorphic `POST /query` (10 operations, per-query
 //! resource limits, in-flight DoS guard, provenance filtering) — is a large,
 //! stateful port and is **deferred to a follow-up PR** (see the crate docs); it
 //! is intentionally NOT mounted in PR1's skeleton.
@@ -128,4 +128,28 @@ pub async fn revoke_key(
     Ok(Json(ApiResponse::success(
         json!({ "revoked": true, "id": req.id }),
     )))
+}
+
+/// `POST /admin/promote` — promote this node from replica to primary (Issue
+/// #3355). Byte-identical to the legacy `promote` (`src/http/admin.rs`):
+/// admin-class, deliberately EXEMPT from the replica read-only guard (it is
+/// the one mutating admin op a replica must accept — rejecting it would make
+/// promotion over this surface impossible), and idempotent on a node that is
+/// already primary (`applier_stopped: false`).
+#[post("/admin/promote")]
+#[api_doc(description = "Promote this replica to primary (admin); idempotent on a primary")]
+pub async fn promote(
+    _auth: Authorized<AdminClass>,
+    state: crate::state::ServerState,
+) -> Result<Json<ApiResponse>, AletheiaHttpError> {
+    let report = state
+        .db_arc()
+        .promote_to_primary()
+        .map_err(|e| AletheiaHttpError::Internal(e.to_string()))?;
+
+    Ok(Json(ApiResponse::success(json!({
+        "role": "primary",
+        "applier_stopped": report.applier_stopped,
+        "last_applied_lsn": report.last_applied_lsn,
+    }))))
 }

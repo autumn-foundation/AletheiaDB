@@ -77,6 +77,7 @@ pub fn try_build_server_testapp(
             http_routes::create_key,
             http_routes::list_keys,
             http_routes::revoke_key,
+            http_routes::promote,
             node_tools::get_node,
             node_tools::list_nodes,
             node_tools::count_nodes,
