@@ -10,6 +10,8 @@ The SDK follows [semver](https://semver.org/). Given `MAJOR.MINOR.PATCH`:
 - **MINOR** — additive, backward-compatible: wrapping a newly-merged endpoint (e.g. graduating a stub to a real call), new optional options, new exported types.
 - **PATCH** — bug fixes and doc changes with no surface change.
 
+**Runtime-behavior changes** carry no TypeScript-surface change and so fall outside the three categories above as literally stated. They are classified by observable impact: a change that makes the SDK *issue a different number of requests* (notably a shift in an error's `retriable`, which under the opt-in retry policy changes how many times a write is sent) is at least **MINOR** and must be called out explicitly in the support matrix below — never shipped as a silent PATCH.
+
 ## Server ↔ SDK support matrix
 
 The SDK targets the **HTTP surface** described by `tests/parity/inventory.json` and the autumn-server route handlers (`crates/aletheia-server/src/*_tools.rs`). Because the server is pre-1.0 and its HTTP surface is being ported route-by-route, this initial SDK line tracks the surface by capability rather than a frozen server version.
@@ -17,7 +19,7 @@ The SDK targets the **HTTP surface** described by `tests/parity/inventory.json` 
 | SDK version | Server HTTP surface | Notes |
 |-------------|---------------------|-------|
 | `0.1.x` | autumn-server node/edge/traverse/temporal + admin/health routes (Issue #3524 PR1–PR4) | 34 routes wrapped; vector/hybrid/query/schema/stats/batch/lineage were typed stubs (`NotImplementedError`). |
-| `0.2.x` | full autumn-server surface — all 46 tools, including vector/hybrid/`query`/schema/stats/batch/lineage (Issue #3627) | Every stub graduated to a real typed call. `NotImplementedError` is retained (exported) but no longer thrown. HTTP error bodies use the unified nested envelope (Issue #3629). |
+| `0.2.x` | full autumn-server surface — all 46 tools, including vector/hybrid/`query`/schema/stats/batch/lineage (Issue #3627) | Every stub graduated to a real typed call. `NotImplementedError` is retained (exported) but no longer thrown. HTTP error bodies use the unified nested envelope (Issue #3629); the legacy flat `{success:false,…}` body is still parsed, to the identical typed error, for pre-#3629 servers. `priorityProperties` rides comma-joined on all nine budgetable GET reads, `getSchema` included (Issues #3638 / #3679). **Behavior change (#3679):** when an error body *omits* `retriable`, a `RESOURCE_EXHAUSTED` on HTTP 429 now defaults to retriable on both envelope shapes (previously nested-only bodies defaulted to non-retriable); a stated flag is still always honored verbatim. `statusToCode` now maps 412 → `FAILED_PRECONDITION` and 422 → `INVALID_ARGUMENT` (was `RESOURCE_EXHAUSTED`), matching `AletheiaHttpError::code_str`. A `priorityProperties` entry containing a comma now throws `InvalidArgumentError` instead of being silently split. |
 
 The remaining routes have merged: `findSimilar`, `hybridQuery`, `query`, `enableVectorIndex`, `listVectorIndexes`, `getSchema`, `databaseStats`, `temporalExtent`, `applyBatch`, `lineageUpstream`, and `lineageDownstream` are now real typed calls.
 

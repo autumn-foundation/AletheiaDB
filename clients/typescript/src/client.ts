@@ -11,6 +11,7 @@
  * @packageDocumentation
  */
 
+import { makeError } from './errors.js';
 import type { ClientOptions, RequestSpec } from './http.js';
 import { Transport, unwrapData } from './http.js';
 import type { TimeInput } from './time.js';
@@ -143,7 +144,7 @@ export class AletheiaClient {
   // ───────────────────────────────────────────────────────────────────────────
 
   /** `GET /nodes/{id}` — fetch a node by id with bi-temporal bounds. */
-  getNode(id: number, opts: GetNodeOptions = {}): Promise<NodeEntity> {
+  async getNode(id: number, opts: GetNodeOptions = {}): Promise<NodeEntity> {
     return this.transport.request<NodeEntity>({
       method: 'GET',
       path: `/nodes/${id}`,
@@ -155,7 +156,7 @@ export class AletheiaClient {
   }
 
   /** `GET /nodes` — list nodes with optional label/property filtering + paging. */
-  listNodes(opts: ListNodesOptions = {}): Promise<NodeListResponse> {
+  async listNodes(opts: ListNodesOptions = {}): Promise<NodeListResponse> {
     return this.transport.request<NodeListResponse>({
       method: 'GET',
       path: '/nodes',
@@ -252,7 +253,7 @@ export class AletheiaClient {
   }
 
   /** `POST /nodes/find_at_time` — resolve nodes by label/property at a bi-temporal point (#3236). */
-  findNodesAtTime(req: FindNodesAtTimeRequest): Promise<NodeListResponse> {
+  async findNodesAtTime(req: FindNodesAtTimeRequest): Promise<NodeListResponse> {
     return this.transport.request<NodeListResponse>({
       method: 'POST',
       path: '/nodes/find_at_time',
@@ -277,7 +278,7 @@ export class AletheiaClient {
   // ───────────────────────────────────────────────────────────────────────────
 
   /** `GET /edges/{id}` — fetch an edge by id with bi-temporal bounds. */
-  getEdge(id: number, opts: GetEdgeOptions = {}): Promise<EdgeEntity> {
+  async getEdge(id: number, opts: GetEdgeOptions = {}): Promise<EdgeEntity> {
     return this.transport.request<EdgeEntity>({
       method: 'GET',
       path: `/edges/${id}`,
@@ -289,7 +290,7 @@ export class AletheiaClient {
   }
 
   /** `GET /edges` — list edges with optional label filtering + paging. */
-  listEdges(opts: ListEdgesOptions = {}): Promise<EdgeListResponse> {
+  async listEdges(opts: ListEdgesOptions = {}): Promise<EdgeListResponse> {
     return this.transport.request<EdgeListResponse>({
       method: 'GET',
       path: '/edges',
@@ -313,7 +314,7 @@ export class AletheiaClient {
   }
 
   /** `GET /nodes/{node_id}/edges/outgoing` — outgoing edges from a node. */
-  getOutgoingEdges(nodeId: number, opts: AdjacencyOptions = {}): Promise<EdgeListResponse> {
+  async getOutgoingEdges(nodeId: number, opts: AdjacencyOptions = {}): Promise<EdgeListResponse> {
     return this.transport.request<EdgeListResponse>({
       method: 'GET',
       path: `/nodes/${nodeId}/edges/outgoing`,
@@ -322,7 +323,7 @@ export class AletheiaClient {
   }
 
   /** `GET /nodes/{node_id}/edges/incoming` — incoming edges to a node. */
-  getIncomingEdges(nodeId: number, opts: AdjacencyOptions = {}): Promise<EdgeListResponse> {
+  async getIncomingEdges(nodeId: number, opts: AdjacencyOptions = {}): Promise<EdgeListResponse> {
     return this.transport.request<EdgeListResponse>({
       method: 'GET',
       path: `/nodes/${nodeId}/edges/incoming`,
@@ -389,7 +390,7 @@ export class AletheiaClient {
   // ───────────────────────────────────────────────────────────────────────────
 
   /** `GET /traverse` — multi-hop traversal, optionally as of a bi-temporal point (#3225). */
-  traverse(opts: TraverseOptions = {}): Promise<TraverseResponse> {
+  async traverse(opts: TraverseOptions = {}): Promise<TraverseResponse> {
     return this.transport.request<TraverseResponse>({
       method: 'GET',
       path: '/traverse',
@@ -411,7 +412,7 @@ export class AletheiaClient {
   }
 
   /** `GET /nodes/{id}/history` — full version history of a node, oldest first. */
-  getNodeHistory(id: number, opts: NodeHistoryOptions = {}): Promise<NodeHistoryResponse> {
+  async getNodeHistory(id: number, opts: NodeHistoryOptions = {}): Promise<NodeHistoryResponse> {
     return this.transport.request<NodeHistoryResponse>({
       method: 'GET',
       path: `/nodes/${id}/history`,
@@ -572,7 +573,7 @@ export class AletheiaClient {
   // ───────────────────────────────────────────────────────────────────────────
 
   /** `POST /find_similar` — k-NN over a property's embeddings (#3220 elision, #3353 budget). */
-  findSimilar(req: FindSimilarRequest): Promise<FindSimilarResponse> {
+  async findSimilar(req: FindSimilarRequest): Promise<FindSimilarResponse> {
     return this.transport.request<FindSimilarResponse>({
       method: 'POST',
       path: '/find_similar',
@@ -613,7 +614,7 @@ export class AletheiaClient {
   // ───────────────────────────────────────────────────────────────────────────
 
   /** `POST /hybrid_query` — graph traversal + vector similarity + temporal filtering in one call. */
-  hybridQuery(req: HybridQueryRequest = {}): Promise<HybridQueryResponse> {
+  async hybridQuery(req: HybridQueryRequest = {}): Promise<HybridQueryResponse> {
     return this.transport.request<HybridQueryResponse>({
       method: 'POST',
       path: '/hybrid_query',
@@ -639,7 +640,7 @@ export class AletheiaClient {
   // ───────────────────────────────────────────────────────────────────────────
 
   /** `POST /query` — execute a single read-only Cypher/AQL statement (#3353 budget). */
-  query(req: QueryRequest): Promise<QueryResponse> {
+  async query(req: QueryRequest): Promise<QueryResponse> {
     return this.transport.request<QueryResponse>({
       method: 'POST',
       path: '/query',
@@ -662,18 +663,17 @@ export class AletheiaClient {
    * `GET /schema` — node labels, edge types, and property keys with counts
    * (optional bi-temporal via `asOf*`).
    *
-   * Only the scalar token/byte budget is sent — `getSchema` is not one of the
-   * eight `priority_properties` GET reads, and its {@link GetSchemaOptions}
-   * type offers no `priorityProperties` (see {@link schemaBudgetQuery}).
+   * One of the nine budgetable GET reads: the full #3353 budget rides here,
+   * `priorityProperties` included (see {@link budgetQuery}).
    */
-  getSchema(opts: GetSchemaOptions = {}): Promise<SchemaResponse> {
+  async getSchema(opts: GetSchemaOptions = {}): Promise<SchemaResponse> {
     return this.transport.request<SchemaResponse>({
       method: 'GET',
       path: '/schema',
       query: {
         as_of_valid_time: optTime(opts.asOfValidTime),
         as_of_transaction_time: optTime(opts.asOfTransactionTime),
-        ...schemaBudgetQuery(opts),
+        ...budgetQuery(opts),
       },
     });
   }
@@ -752,42 +752,70 @@ function reqTime(t: TimeInput): string {
 }
 
 /**
+ * Normalize `priorityProperties` into the list actually sent, or `undefined`
+ * when there is nothing to send.
+ *
+ * Applied to **both** the GET query form and the POST body form, so one option
+ * object means the same thing on every read. Without this the two surfaces
+ * disagree: the server's GET routes run `de_priority_properties`
+ * (`crates/aletheia-server/src/edge_tools.rs`), which trims each entry and drops
+ * empties, while the POST body deserializes the array verbatim — so
+ * `[' name ', '']` would protect `["name"]` on a GET read and `[" name ", ""]`
+ * on a POST read. Normalizing client-side collapses that divergence: entries
+ * are trimmed, empty/whitespace-only entries are dropped, and an input with
+ * nothing left yields `undefined` so the key is omitted entirely — never a bare
+ * `?priority_properties=`, and never `Some(vec![])` server-side.
+ *
+ * @throws {InvalidArgumentError} if a property name contains a comma. Such a
+ *   name is **unrepresentable** on the GET wire — the server splits the joined
+ *   value on `,`, so `['a,b']` would silently protect two properties that do
+ *   not exist while the real one is elided by the #3353 budget ladder. Failing
+ *   loudly beats a silently wrong response body.
+ */
+function normalizePriority(priorityProperties?: string[]): string[] | undefined {
+  if (priorityProperties === undefined) return undefined;
+  const kept: string[] = [];
+  for (const raw of priorityProperties) {
+    if (raw.includes(',')) {
+      throw makeError({
+        code: 'INVALID_ARGUMENT',
+        message:
+          `priorityProperties entry ${JSON.stringify(raw)} contains a comma, which is the ` +
+          'separator the server splits GET reads on; such a property name cannot be expressed ' +
+          'on the wire.',
+        retriable: false,
+      });
+    }
+    const trimmed = raw.trim();
+    if (trimmed.length > 0) kept.push(trimmed);
+  }
+  return kept.length > 0 ? kept : undefined;
+}
+
+/**
  * Comma-join `priorityProperties` for a GET query string, or `undefined` when
  * there is nothing to send.
  *
  * The server's GET routes (since PR #3638) accept `priority_properties` as a
  * single **comma-separated** query param and split it on `,` server-side, so we
- * join the array with a comma. The transport URL-encodes the joined value once
- * (`,` → `%2C`), so it always rides as ONE param (never repeated keys, which
- * `serde_urlencoded` still cannot decode into a `Vec`).
- *
- * An `undefined` or empty array yields `undefined` so the key is omitted
- * entirely — never a bare `?priority_properties=`. (A property name that itself
- * contains a comma is ambiguous under the server's comma-split contract; that
- * is an inherent limitation of the wire format, shared with every
- * comma-separated query param.)
+ * join the normalized array with a comma. The transport URL-encodes the joined
+ * value once (`,` → `%2C`), so it always rides as ONE param (never repeated
+ * keys, which `serde_urlencoded` still cannot decode into a `Vec`).
  */
 function joinPriority(priorityProperties?: string[]): string | undefined {
-  if (priorityProperties === undefined || priorityProperties.length === 0) {
-    return undefined;
-  }
-  return priorityProperties.join(',');
+  return normalizePriority(priorityProperties)?.join(',');
 }
 
 /**
- * Build the #3353 budget query fragment (query-string form) for the eight
+ * Build the #3353 budget query fragment (query-string form) for the nine
  * budgetable GET reads (`getNode`, `listNodes`, `getEdge`, `listEdges`,
- * `traverse`, `getNodeHistory`, and the two adjacency reads via
+ * `traverse`, `getNodeHistory`, `getSchema`, and the two adjacency reads via
  * {@link adjacencyQuery}).
  *
  * Emits the scalar `max_response_tokens` / `max_response_bytes` (`u64`) and,
  * since server PR #3638, the comma-joined `priority_properties` (see
  * {@link joinPriority}). The POST-body reads (`findNodesAtTime`, `findSimilar`,
  * `hybridQuery`) carry the raw array instead — see {@link budgetBody}.
- *
- * Note: `getSchema` uses the scalar-only {@link schemaBudgetQuery} and is NOT
- * one of the eight — its bespoke options type never offers
- * `priorityProperties`.
  */
 function budgetQuery(opts: {
   maxResponseTokens?: number;
@@ -802,24 +830,13 @@ function budgetQuery(opts: {
 }
 
 /**
- * Build the scalar-only budget query fragment for `GET /schema`.
+ * Build the #3353 budget body fragment (JSON-body form) for the POST reads
+ * (`findNodesAtTime`, `findSimilar`, `hybridQuery`, `query`), which carry
+ * `priority_properties` as a real JSON array rather than comma-joined.
  *
- * `getSchema` is deliberately excluded from the eight `priority_properties`
- * GET reads: its {@link GetSchemaOptions} type offers no `priorityProperties`,
- * so this fragment carries only the scalar token/byte budget and never a
- * `priority_properties` key.
+ * The array is put through the same {@link normalizePriority} as the GET form
+ * so both surfaces send the same effective list.
  */
-function schemaBudgetQuery(opts: {
-  maxResponseTokens?: number;
-  maxResponseBytes?: number;
-}): Record<string, number | undefined> {
-  return {
-    max_response_tokens: opts.maxResponseTokens,
-    max_response_bytes: opts.maxResponseBytes,
-  };
-}
-
-/** Build the #3353 budget body fragment (JSON-body form). */
 function budgetBody(opts: {
   maxResponseTokens?: number;
   maxResponseBytes?: number;
@@ -828,7 +845,7 @@ function budgetBody(opts: {
   return {
     max_response_tokens: opts.maxResponseTokens,
     max_response_bytes: opts.maxResponseBytes,
-    priority_properties: opts.priorityProperties,
+    priority_properties: normalizePriority(opts.priorityProperties),
   };
 }
 

@@ -127,13 +127,40 @@ const CODE_TO_CLASS: Record<AletheiaErrorCode, new (init: AletheiaErrorInit) => 
 };
 
 /**
- * Default retriability for a known code, used only when the server envelope
- * omits `retriable` (the plain HTTP 4xx/5xx shapes do). Mirrors the #3234
- * contract: only `CONFLICT`, `UNAVAILABLE`, and the timeout flavor of
- * `RESOURCE_EXHAUSTED` may be transient — and even those default conservatively
- * to what the server states when it states anything.
+ * Default retriability, used **only** when the envelope omits `retriable`.
+ *
+ * A stated flag **always** wins, and every current AletheiaDB server states one
+ * (`AletheiaHttpError::into_response_with_trace` writes `retriable`
+ * unconditionally). This default therefore fires against a bare status, a
+ * proxy's error page, or an older / non-conforming server — never against a
+ * conforming response.
+ *
+ * Mirrors the #3234 contract: only `CONFLICT` and `UNAVAILABLE` are transient
+ * by code alone. `RESOURCE_EXHAUSTED` is split by status, since the code cannot
+ * distinguish its flavors: an HTTP 429 (the transient-overload status: a
+ * read-class wall-clock timeout, or a rate limiter in front of the server) gets
+ * the benefit of the doubt, while 413/422 — the byte/row caps and the invalid
+ * limit override — stay non-retriable.
+ *
+ * Deliberately **not** a blanket "429 is retriable": the status is checked only
+ * alongside `RESOURCE_EXHAUSTED`, so a 429 carrying a caller-fault code
+ * (`NOT_FOUND`, `INVALID_ARGUMENT`, …) stays non-retriable as the #3234 table
+ * requires. Note the server also emits 429 with an explicit `retriable: false`
+ * for a **write-class** wall-clock timeout (the write may already have
+ * committed — a retry could duplicate it) and for a tenant-quota breach; both
+ * state the flag, so both are honored verbatim and never reach this fallback.
+ *
+ * The default is shared by **both** envelope shapes — the nested #3234/#3629
+ * body and the legacy flat one — so an identical error normalizes identically
+ * whichever shape it arrived in.
+ *
+ * @param code - the structured error code.
+ * @param httpStatus - the originating HTTP status. In-band MCP errors ride an
+ *   HTTP 200 and pass `200` here, which matches no status rule — they fall
+ *   through to the code-only decision, as intended.
  */
-function defaultRetriable(code: string): boolean {
+function defaultRetriable(code: string, httpStatus?: number): boolean {
+  if (code === 'RESOURCE_EXHAUSTED') return httpStatus === 429;
   return code === 'CONFLICT' || code === 'UNAVAILABLE';
 }
 
@@ -152,23 +179,16 @@ export function makeError(init: AletheiaErrorInit): AletheiaError {
 }
 
 /**
- * The nested structured error object shared by the MCP in-band surface (#3234)
- * and — since Issue #3629 — the HTTP error surface: `{ error: { code, message,
- * retriable, details? } }`. On the HTTP surface a `trace_id` may sit as a
- * top-level sibling of `error` (never inside it).
+ * The **legacy flat** HTTP envelope, retained only to keep a client pinned
+ * against a pre-#3629 server working: `{ success: false, error, code?,
+ * retriable?, details?, trace_id? }`. No current server emits this shape.
+ *
+ * The current nested shape — `{ error: { code, message, retriable, details? },
+ * trace_id? }`, shared byte-for-byte by the MCP in-band surface (#3234) and the
+ * HTTP error surface (#3629) — is read field-by-field with runtime guards in
+ * {@link parseMcpError} rather than through a declared interface, since a
+ * malformed body must not be trusted to match its type.
  */
-interface McpErrorEnvelope {
-  error: {
-    code: string;
-    message?: string;
-    retriable?: boolean;
-    details?: ErrorDetails;
-  };
-  /** Present only on the HTTP surface (#3629); a top-level sibling of `error`. */
-  trace_id?: string;
-}
-
-/** The HTTP envelope: `{ success: false, error, code?, retriable?, details?, trace_id? }`. */
 interface HttpErrorEnvelope {
   success: false;
   error: string;
@@ -192,27 +212,37 @@ export function parseMcpError(body: unknown, httpStatus?: number): AletheiaError
   if (!isObject(body)) return null;
   const err = body['error'];
   if (!isObject(err) || typeof err['code'] !== 'string') return null;
-  const envelope = body as unknown as McpErrorEnvelope;
-  const code = envelope.error.code;
-  const traceId = typeof envelope.trace_id === 'string' ? envelope.trace_id : undefined;
+  const code = err['code'];
   return makeError({
     code,
-    message: envelope.error.message ?? code,
-    retriable: envelope.error.retriable ?? defaultRetriable(code),
-    details: envelope.error.details,
+    message: typeof err['message'] === 'string' ? err['message'] : code,
+    retriable: asBoolean(err['retriable']) ?? defaultRetriable(code, httpStatus),
+    details: asDetails(err['details']),
     httpStatus,
-    traceId,
+    // The server places `trace_id` top-level, a sibling of `error`. Fall back to
+    // an inner one only for a non-conforming emitter — recovering the id is
+    // strictly better than dropping it, and a conforming body never gets here.
+    traceId: asString(body['trace_id']) ?? asString(err['trace_id']),
   });
 }
 
+/** Narrow to a real `boolean`, or `undefined` — a `"true"` string is not a flag. */
+function asBoolean(v: unknown): boolean | undefined {
+  return typeof v === 'boolean' ? v : undefined;
+}
+
+/** Narrow to a non-empty `string`, or `undefined`. */
+function asString(v: unknown): string | undefined {
+  return typeof v === 'string' && v.length > 0 ? v : undefined;
+}
+
 /**
- * Default retriability for an HTTP error. Mirrors {@link defaultRetriable} but
- * additionally treats HTTP 429 (Too Many Requests) as retriable — the server's
- * plain 429 shape carries no `retriable` flag, yet a backoff-and-retry is the
- * correct response to rate limiting.
+ * Narrow to a real object for {@link ErrorDetails}, or `undefined`. A malformed
+ * scalar/array `details` must not land in a field declared
+ * `Record<string, unknown>`.
  */
-function httpRetriableDefault(code: string, httpStatus: number): boolean {
-  return httpStatus === 429 ? true : defaultRetriable(code);
+function asDetails(v: unknown): ErrorDetails | undefined {
+  return isObject(v) && !Array.isArray(v) ? v : undefined;
 }
 
 /**
@@ -233,32 +263,70 @@ export function parseHttpError(
 
     if (body['success'] === false || typeof body['error'] === 'string' || typeof body['code'] === 'string') {
       const env = body as unknown as HttpErrorEnvelope;
-      const code = env.code ?? statusFallbackCode;
-      const message = typeof env.error === 'string' ? env.error : `HTTP ${httpStatus}`;
+      const code = asString(env.code) ?? statusFallbackCode;
       return makeError({
         code,
-        message,
-        retriable: env.retriable ?? httpRetriableDefault(code, httpStatus),
-        details: env.details,
+        // Falls back to the code (not `HTTP <status>`) exactly as the nested
+        // branch does, so a message-less body normalizes identically in both
+        // shapes.
+        message: asString(env.error) ?? code,
+        retriable: asBoolean(env.retriable) ?? defaultRetriable(code, httpStatus),
+        details: asDetails(env.details),
         httpStatus,
-        traceId: env.trace_id,
+        // Guarded exactly like `parseMcpError`: a non-string `trace_id` from a
+        // malformed body must not land in a field typed `string | undefined`.
+        traceId: asString(env.trace_id),
       });
     }
   }
   // A non-empty plain-text body (e.g. a proxy's "502 Bad Gateway" page) becomes
   // the error message so the caller sees the server's actual payload.
   const message =
-    typeof body === 'string' && body.length > 0 ? body : `HTTP ${httpStatus}`;
+    typeof body === 'string' && body.length > 0
+      ? body
+      : // A *nested-shaped* body that `parseMcpError` rejected — `error` is an
+        // object but its `code` is missing or not a string — still carries the
+        // server's explanation. Salvage it rather than discarding it for a bare
+        // `HTTP <status>`: with the nested envelope now the only shape a real
+        // server emits, a malformed nested body is the likeliest failure mode.
+        (nestedMessage(body) ?? `HTTP ${httpStatus}`);
   // No usable envelope: synthesize from the status.
   return makeError({
     code: statusFallbackCode,
     message,
-    retriable: httpRetriableDefault(statusFallbackCode, httpStatus),
+    retriable: defaultRetriable(statusFallbackCode, httpStatus),
     httpStatus,
   });
 }
 
-/** Map an HTTP status to the fallback structured code used when the body omits one. */
+/**
+ * Extract `error.message` from a nested-shaped body whose `code` was missing or
+ * non-string, or `null` when there is no usable string there.
+ */
+function nestedMessage(body: unknown): string | null {
+  if (!isObject(body)) return null;
+  const err = body['error'];
+  if (!isObject(err)) return null;
+  const message = err['message'];
+  return typeof message === 'string' && message.length > 0 ? message : null;
+}
+
+/**
+ * Map an HTTP status to the fallback structured code used when the body omits
+ * one. Mirrors `AletheiaHttpError::status()` / `code_str()` (`src/http/error.rs`):
+ *
+ * - 412 is the server's `FAILED_PRECONDITION` status (read-only replica, a
+ *   non-conforming schema-constraint enable, transaction validation, …).
+ * - 413 is the row/byte cap → `RESOURCE_EXHAUSTED`; 429 is the wall-clock
+ *   timeout / principal quota → also `RESOURCE_EXHAUSTED`.
+ * - 422 is emitted by exactly one variant, `InvalidLimitOverride`, whose
+ *   `code_str()` is `INVALID_ARGUMENT` — **not** a resource cap.
+ *
+ * 409 is genuinely ambiguous (the server returns it for both the retriable
+ * `CONFLICT` and the non-retriable `CONSTRAINT_VIOLATION`); a code-less 409
+ * carries no signal to tell them apart, so it keeps the historical `CONFLICT`
+ * mapping. Every conforming server states the code, so this is a last resort.
+ */
 export function statusToCode(status: number): string {
   switch (status) {
     case 400:
@@ -271,10 +339,13 @@ export function statusToCode(status: number): string {
       return 'NOT_FOUND';
     case 409:
       return 'CONFLICT';
+    case 412:
+      return 'FAILED_PRECONDITION';
     case 413:
-    case 422:
     case 429:
       return 'RESOURCE_EXHAUSTED';
+    case 422:
+      return 'INVALID_ARGUMENT';
     case 503:
       return 'UNAVAILABLE';
     default:

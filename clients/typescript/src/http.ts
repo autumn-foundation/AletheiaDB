@@ -217,7 +217,12 @@ export class Transport {
     if (inBand) {
       throw inBand;
     }
-    // HTTP admin/status routes wrap success as { success: true, data }.
+    // HTTP admin/status routes wrap success as { success: true, data }. Its
+    // negative case is checked here — NOT a remnant of the removed flat *error*
+    // envelope (#3629), which only ever rode a non-2xx and is handled above.
+    // A conforming server never sends `success: false` with a 2xx; this is a
+    // guard against one that does, so the failure surfaces as a typed error
+    // rather than being decoded as a success payload.
     if (isObject(parsed) && parsed['success'] === false) {
       throw parseHttpError(parsed, resp.status, statusToCode(resp.status));
     }

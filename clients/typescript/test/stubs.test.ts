@@ -166,7 +166,8 @@ describe('vector / query / schema / stats / batch / lineage wiring (#3627)', () 
     expect(req.query.get('as_of_valid_time')).toBe(toWireTime('2024-01-01T00:00:00Z'));
     expect(req.query.get('as_of_transaction_time')).toBe(toWireTime('2024-06-01T00:00:00Z'));
     expect(req.query.get('max_response_tokens')).toBe('1000');
-    // getSchema is not one of the eight priority_properties GET reads (#3638).
+    // Not supplied by this caller, so the key is omitted (getSchema DOES
+    // support priority_properties — see budget-query.test.ts).
     expect(req.query.has('priority_properties')).toBe(false);
     // Response parse: the schema payload round-trips.
     expect((result as { node_labels: unknown[] }).node_labels).toHaveLength(1);
