@@ -1,5 +1,5 @@
 {
-  "lastUpdate": 1785347387621,
+  "lastUpdate": 1785364409221,
   "repoUrl": "https://github.com/autumn-foundation/AletheiaDB",
   "entries": {
     "AletheiaDB Benchmarks": [
@@ -16,43 +16,43 @@
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "d4201c67e79df5bf0346df8157076c664e1eea90",
-          "message": "TS SDK: priority_properties on GET /schema; refresh flat-envelope fixtures (#3679) (#3781)\n\nCloses #3679.\n\nBoth halves of the issue that #3659 left open, developed red → green →\nrefactor.\n\n## 1. `priority_properties` on GET reads\n\n#3659 wired **eight** of the nine budgetable GET reads and kept\n`getSchema` excluded behind a bespoke scalar-only `schemaBudgetQuery`.\nThat exclusion was wrong: the server's `GetSchemaQuery` carries the same\n`de_priority_properties` comma-split as every other GET read\n(`crates/aletheia-server/src/schema_batch_tools.rs`), `get_schema` is in\nthe #3353 budgetable cohort, and the server has a passing parity test\nfor it (`get_schema_priority_properties_get_param_accepted_and_parity`).\nThe SDK was silently dropping a supported parameter.\n\nEnumerating the server's route table gives exactly **nine** `#[get]`\nroutes carrying `de_priority_properties`, and the SDK now covers all\nnine 1:1:\n\n| | `GET /nodes/{id}` | `GET /nodes` | `GET /edges/{id}` | `GET /edges`\n| `GET /traverse` | `GET /nodes/{id}/history` | outgoing | incoming |\n`GET /schema` |\n|---|---|---|---|---|---|---|---|---|---|\n\n`GetSchemaOptions` gains `priorityProperties` (composing the shared\n`BudgetOptions` rather than duplicating it) and `getSchema` uses the\ncommon `budgetQuery`.\n\n## 2. Flat-envelope fixture refresh\n\nThe last legacy flat `{success:false,error}` fixture — a 429 in\n`transport.test.ts` — is replaced by the nested #3234/#3629 envelope the\nserver actually emits. **That swap exposed a real defect**:\n`parseMcpError` derived its fallback `retriable` from the code alone, so\na nested 429 omitting `retriable` normalized to *non*-retriable, while\nthe flat path's status-aware default made the identical error retriable.\nThe two defaults are now one shared `defaultRetriable(code,\nhttpStatus)`.\n\nThe retained flat parse branch is no longer an unlabeled remnant: it is\nexercised through a `legacyFlatHttpError()` fixture documented as\nback-compat-only, and `test/error-envelope.test.ts` asserts both shapes\nnormalize to observably identical errors.\n\n## Review findings fixed\n\nFour independent reviews (wire-contract parity, test quality, API\nsurface/semver, adversarial correctness) found defects in the first\ncommit and in code it touched. All fixed in `e97aaff`:\n\n- **429 default was too broad** — gating on status alone made a 429\ncarrying `NOT_FOUND`/`INVALID_ARGUMENT` retriable, contradicting #3234.\nNow gated on `RESOURCE_EXHAUSTED`. The docstring's rationale was also\nwrong: the server emits 429 with explicit `retriable: false` for a\nwrite-class wall-clock timeout (the write may already have committed)\nand a tenant-quota breach.\n- **`statusToCode` disagreed with the server** — 422 is\n`InvalidLimitOverride` → `INVALID_ARGUMENT`, not a resource cap; 412\n(`FAILED_PRECONDITION`) had no case at all.\n- **Malformed bodies lost information** — a nested body with a\nmissing/non-string `code` discarded the server's `message`;\n`retriable`/`details`/`trace_id` were forwarded unvalidated (a `\"true\"`\nstring could land in a field declared `boolean`).\n- **`priorityProperties` diverged between GET and POST** — the server\ntrims/drops empties on GET but takes a POST body verbatim; `['']`\nemitted the bare `?priority_properties=` the docs promised never to\nemit. Normalization is now shared. A name containing a comma is rejected\nwith `INVALID_ARGUMENT` rather than silently protecting two properties\nthat don't exist.\n- **Tests were weaker than they looked** — mutation testing showed the\nequivalence block stayed green with `parseHttpError` gutted to a\nconstant. Every case now asserts absolute expected values, with\ncross-shape equality as a secondary check.\n\n## Verification\n\n`155 tests passed` (was 90), typecheck, lint, dual ESM+CJS build, and\nboth entry-point smokes pass. New coverage: status→code fallback across\nthe vocabulary (previously only the bare 401 was pinned), end-to-end\nretry against a real HTTP status (retry was only ever exercised\nin-band), malformed-body salvage, GET/POST normalization parity,\n`getSchema` with `asOf*` + budget merged, and budget alongside a cursor.\n\n## Notes / out of scope\n\n- `COMPATIBILITY.md` gains a rule for runtime-behavior changes, which\nits three semver categories did not cover, and the `0.2.x` row now\ndocuments the behavioral half of this change, not just the additive\nhalf.\n- **Not addressed** (pre-existing, separate concerns): the retry policy\nmakes no idempotent/non-idempotent distinction (#3369 design); the SDK\ndoes not read the `x-trace-id` or `Retry-After` response headers (needs\na `FetchResponseLike` surface change, #3376 territory); a code-less HTTP\n409 still defaults to `CONFLICT` (genuinely ambiguous server-side — 409\nis both `CONFLICT` and `CONSTRAINT_VIOLATION`).\n\n---\n_Generated by [Claude\nCode](https://claude.ai/code/session_01CdeFSxZKX6NJ1bNDAdyFLD)_\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
-          "timestamp": "2026-07-29T12:36:18-05:00",
-          "tree_id": "3da237e89bdece995b939f0690a42fa3bf16b0ee",
-          "url": "https://github.com/autumn-foundation/AletheiaDB/commit/d4201c67e79df5bf0346df8157076c664e1eea90"
+          "id": "ce177bbaf39e8b9c9b6096e21d2cda4e54b731d8",
+          "message": "fix(rotation): cancel any vN→vN+1 rotation, not only v1→v2 (#3680) (#3782)\n\nFixes #3680.\n\n## The bug\n\n`AletheiaDB::cancel_pending_rotation` hard-coded the generation it rolls\nback to as the base key version:\n\n```rust\nlet old_version = ENC_INDEX_KEY_VERSION_V1;\n```\n\nThat is only correct for a database's **first** rotation. Cancelling an\ninterrupted second (or n-th) rotation — say `v2 → v3` — installed\ngenerations `{v1, v3}` into the live keyring and then ran the reverse\npass. The un-migrated files still stamped `v2` matched no live\ngeneration (`add_generation` flips the keyring to strict per-version\ndispatch), so the reverse pass could not decrypt them and the dataset\ncould not be put back to its pre-rotation state.\n\n## The fix\n\nThe old generation now comes from the pending ledger, via a new\n`RotationLedger::rotation_old_version()`:\n\n```rust\nlet old_version = pending.rotation_old_version();\n```\n\nThe helper applies the same `new_version - 1` derivation (floored at the\nbase version) that `resolve_provisioned_key_version` already documents\nand relies on: a forward rotation always targets `new_version =\nold_version + 1` (`run_rotation`), and the configured key still names\nthe **old** generation while a rotation is pending, because the provider\nswitch only happens after a rotation completes.\n`resolve_provisioned_key_version` now calls the same helper, so the\ncancel driver and startup keyring provisioning can never drift apart\nabout which generation a pending rotation came from.\n\nAlso: **refuse to cancel an `enable`/`disable` encryption-migration\nledger.** Those ride the same `rotation.state` file but are not\nrotations — a disable ledger records `new_version = current_version`,\nnot `old + 1` (see `RotationDirection::Disable`) — so driving one\nthrough the reverse rotation pass would target a bogus generation. It\nnow returns `NotInProgress` and leaves the migration ledger intact for\nits own resume path.\n\nNo on-disk format change: the ledger is read exactly as before, only\ninterpreted correctly.\n\n## Tests\n\nThree new tests in `src/db/rotation.rs`:\n\n-\n`cancel_pending_rotation_rolls_back_to_the_ledgers_old_generation_not_v1`\n— stages a database in the post-first-rotation state (all index files at\n`v2`, keyring current at `v2`), interrupts a `v2 → v3` rotation to a\nsecond key, then cancels. Asserts the report is `v3 → v2`, the dataset\nis uniformly back at `v2` (nothing stranded at `v3`, nothing wrongly\nre-stamped down to `v1`), the ledger is cleared, and the new generation\nis retired from the live keyring. **Verified to fail against the old\nhard-coded base version** (`assertion left == right failed: 1 vs 2`).\n- `rotation_old_version_generalizes_beyond_v1` — the pure version\narithmetic across `v2..=v8` for both forward and cancel ledgers, plus\ndegenerate/legacy `target_version` values (`0`, `1`) flooring at the\nbase generation rather than underflowing.\n- `cancel_pending_rotation_refuses_enable_and_disable_ledgers` — both\nmigration directions are refused with `no key rotation is in progress`\nand the ledger is left on disk.\n\n## Docs\n\n`docs/ENCRYPTION.md` — a short note under `keys rotate` describing what\n`--cancel` rolls back to and that a pending enable/disable migration is\nnot cancellable this way.\n\n## Checks\n\n- `cargo clippy --all-targets --all-features -- -D warnings` — clean\n- `cargo fmt --all` — applied\n- `cargo test --features encryption --lib` — **4556 passed, 0 failed**\n- `cargo check --lib` (default features) — clean\n\n## Out of scope\n\n`cancel_pending_rotation` still only drives the **index** layer's\nreverse pass; a cancel of a full-MEK rotation that already re-keyed the\nWAL or cold tiers does not roll those back. That is a pre-existing gap\nunrelated to the version-transition bug this issue reports, and is\nuntouched here.\n\n---\n_Generated by [Claude\nCode](https://claude.ai/code/session_01RgEBsmmchPXUEKRQcNhrm5)_\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+          "timestamp": "2026-07-29T17:20:18-05:00",
+          "tree_id": "95f9cc085b6e96298a25125251709966dfb27aa3",
+          "url": "https://github.com/autumn-foundation/AletheiaDB/commit/ce177bbaf39e8b9c9b6096e21d2cda4e54b731d8"
         },
-        "date": 1785347387621,
+        "date": 1785364409221,
         "tool": "customSmallerIsBetter",
         "benches": [
           {
             "name": "target_batch_insertion/insert_1000_edges",
-            "value": 494526.0044443266,
+            "value": 490281.3286169136,
             "unit": "ns"
           },
           {
             "name": "target_3_hop/traverse_three_hops",
-            "value": 164.8726871078827,
+            "value": 161.49743443780872,
             "unit": "ns"
           },
           {
             "name": "target_time_travel/at_anchor",
-            "value": 191.86300327477917,
+            "value": 188.88422040414574,
             "unit": "ns"
           },
           {
             "name": "target_time_travel/with_5_deltas",
-            "value": 189.16385085296824,
+            "value": 185.3084422325315,
             "unit": "ns"
           },
           {
             "name": "target_time_travel/worst_case_9_deltas",
-            "value": 197.76943272748343,
+            "value": 196.84422354910765,
             "unit": "ns"
           },
           {
             "name": "target_single_hop/traverse_one_hop",
-            "value": 19.48101822303881,
+            "value": 19.396871695864988,
             "unit": "ns"
           }
         ]
