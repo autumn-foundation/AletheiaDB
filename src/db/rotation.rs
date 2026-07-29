@@ -44,6 +44,14 @@
 //!   rotation is in flight so an *interrupted* one resumes on the next startup.
 //!   A second rotation started while a breadcrumb exists is refused
 //!   ([`RotationError::AlreadyInProgress`]) — resume or cancel the pending one.
+//! * **Cancel (rollback) covers the index/checkpoint layer only.** The reverse
+//!   pass drives only [`IndexKeyRotation`]; the full-MEK forward path's WAL /
+//!   cold / subject-keyring passes have no counterpart. So a cancel is refused
+//!   ([`RotationError::UnsupportedCancelWithRekeyedLayers`]) whenever the pending
+//!   ledger records one of those layers as anything but `Skipped`, leaving the
+//!   ledger untouched for a roll-FORWARD [`resume_pending_rotation`] instead —
+//!   rather than reporting a successful rollback over a split-key database
+//!   (Issue #3783).
 //! * Audit events (`key.rotation.*`) are emitted through the
 //!   [`EncryptionManager`](crate::encryption::EncryptionManager)'s configured
 //!   audit logger (Issue #489), honoring the `[encryption.audit]` config; no key
@@ -97,6 +105,14 @@ fn rotation_err(e: RotationError) -> Error {
         }
         .into(),
         RotationError::KeyProvider(msg) => StorageError::KeyProvider(msg).into(),
+        // A refused cancel (Issue #3783) is an operator-precondition failure, not
+        // a storage fault: the database is untouched and the remedy is a different
+        // command (`--resume`). Surfaced as `FailedPrecondition` so it classifies
+        // alongside the module's other actionable refusals (e.g.
+        // `fail_if_pending_subject_keyring_without_crypto_shred`).
+        refused @ RotationError::UnsupportedCancelWithRekeyedLayers { .. } => {
+            Error::FailedPrecondition(refused.to_string())
+        }
         other => StorageError::PersistenceError(other.to_string()).into(),
     }
 }
@@ -899,10 +915,35 @@ impl AletheiaDB {
     /// `old + 1` (see [`RotationDirection::Disable`]), so driving it through the
     /// reverse rotation pass would target a bogus generation.
     ///
+    /// # Scope: index/checkpoint ONLY — other re-keyed layers are refused (#3783)
+    ///
+    /// This drives exactly one engine, the index/checkpoint
+    /// [`IndexKeyRotation`] reverse pass. A full-MEK forward rotation (#3617) also
+    /// re-keys the WAL, the cold (redb) tier, and the crypto-shred subject
+    /// keyring, and **none of those has a reverse pass**. So when the pending
+    /// ledger records any of `layer.wal` / `layer.cold` /
+    /// `layer.subject_keyring` as something other than `Skipped`, the cancel is
+    /// **refused** with
+    /// [`RotationError::UnsupportedCancelWithRekeyedLayers`] naming those layers,
+    /// before anything is touched — the pending forward ledger is left
+    /// byte-identical so the operator can roll FORWARD with
+    /// [`resume_pending_index_rotation`](Self::resume_pending_index_rotation)
+    /// instead (idempotent across every layer), keeping the old key available
+    /// until it completes.
+    ///
+    /// Previously the cancel ran the index reverse pass regardless, cleared the
+    /// ledger, and returned `Ok`, telling the operator the new key was never
+    /// adopted while the WAL / cold / subject-keyring bytes were still on it —
+    /// discarding the new key then made them permanently undecryptable. An
+    /// index-only rotation (every non-index layer `Skipped`) is exactly what the
+    /// reverse pass does cover, so it still cancels normally.
+    ///
     /// # Errors
     ///
     /// * no rotation is pending (including when only an enable/disable migration
     ///   ledger is present);
+    /// * the pending rotation already re-keyed a layer this reverse pass cannot
+    ///   roll back ([`RotationError::UnsupportedCancelWithRekeyedLayers`]);
     /// * the breadcrumb is corrupt or its recorded key source cannot be sourced;
     /// * a filesystem or decryption error occurs during the reverse pass.
     pub fn cancel_pending_rotation(&self) -> Result<RotationReport> {
@@ -923,6 +964,22 @@ impl AletheiaDB {
             RotationDirection::Enable | RotationDirection::Disable
         ) {
             return Err(rotation_err(RotationError::NotInProgress));
+        }
+
+        // Issue #3783: the reverse pass below drives ONLY the index/checkpoint
+        // engine. If the interrupted forward rotation already moved the WAL, the
+        // cold tier, or the crypto-shred subject keyring onto the new key, rolling
+        // the index back would leave the database split-key while reporting
+        // success. Refuse LOUDLY instead — before any keyring generation is
+        // installed and before the cancel marker is published, so a refused cancel
+        // leaves the pending forward ledger byte-identical for `--resume`.
+        let blocked = pending.unrollbackable_layers();
+        if !blocked.is_empty() {
+            let err = rotation_err(RotationError::UnsupportedCancelWithRekeyedLayers {
+                layers: blocked.join(", "),
+            });
+            self.log_rotation_failure(&manager, &err);
+            return Err(err);
         }
 
         let started = Instant::now();
@@ -947,13 +1004,11 @@ impl AletheiaDB {
         keyring.add_generation(old_version, Arc::clone(&old_cipher));
         keyring.add_generation(pending.new_version, Arc::clone(&new_cipher));
 
-        // Publish the cancel marker durably BEFORE rolling anything back.
-        write_rotation_state(
-            &manager,
-            pending.new_version,
-            &pending.new_source,
-            RotationDirection::Cancel,
-        )?;
+        // Publish the cancel marker durably BEFORE rolling anything back. Derived
+        // FROM the pending ledger (Issue #3783) so the per-layer statuses and the
+        // #3620 `mek_kcv` survive the direction flip instead of being flattened to
+        // an index-scope marker.
+        write_ledger(&manager, &RotationLedger::cancel_scope(&pending))?;
 
         let engine = IndexKeyRotation::new(
             manager.indexes_path(),
@@ -1522,9 +1577,92 @@ impl RotationLedger {
             .max(ENC_INDEX_KEY_VERSION_V1)
     }
 
+    /// The non-index layers whose recorded status BLOCKS a cancel (reverse) pass,
+    /// rendered as `layer=status` pairs (Issue #3783).
+    ///
+    /// The cancel driver reverses only the index/checkpoint tree. A full-MEK
+    /// forward rotation (#3617) also re-keys the WAL, the cold (redb) tier, and the
+    /// crypto-shred subject keyring, and there is no reverse pass for any of them —
+    /// so a cancel from a ledger recording ANY of those as `Pending` or `Complete`
+    /// would roll the index back to the old key while leaving those layers on the
+    /// new one (a split-key database) and then report success.
+    ///
+    /// `Pending` blocks just as `Complete` does, deliberately: the ledger cannot
+    /// distinguish "the layer's pass never started" from "it was interrupted
+    /// half-way", and a half-rolled WAL has already had its old-generation segments
+    /// retired. Fail closed on the ambiguity — the operator rolls FORWARD instead
+    /// (`--resume`), which IS symmetric and idempotent across every layer.
+    ///
+    /// Empty for an index-scope ledger (every non-index layer `Skipped`), which is
+    /// exactly the case the reverse pass does cover, so cancelling stays available
+    /// for an index-only rotation. `wal_retire` is deliberately absent: it is an
+    /// enable/disable cleanup step, always `Skipped` on a rotation ledger, and
+    /// names no key generation to roll back.
+    fn unrollbackable_layers(&self) -> Vec<String> {
+        [
+            ("wal", self.wal),
+            ("cold", self.cold),
+            ("subject_keyring", self.subject_keyring),
+        ]
+        .into_iter()
+        .filter(|(_, status)| !matches!(status, LayerStatus::Skipped))
+        .map(|(name, status)| format!("{name}={}", status.as_str()))
+        .collect()
+    }
+
+    /// The reverse (cancel) plan derived FROM the pending forward ledger being
+    /// cancelled (Issue #3783).
+    ///
+    /// The index/checkpoint layers are reset to `Pending` because the reverse pass
+    /// still has to run over them. Every OTHER per-layer status — and the `mek_kcv`
+    /// — is **preserved verbatim** rather than flattened to `Skipped`/`None` the way
+    /// [`index_scope`](RotationLedger::index_scope) does:
+    ///
+    /// * the non-index statuses are the only durable record of which layers the
+    ///   interrupted forward pass had already moved onto the new key, so flattening
+    ///   them would make an interrupted cancel unable to tell what still needs
+    ///   undoing (and would silently erase the evidence the
+    ///   [`unrollbackable_layers`](RotationLedger::unrollbackable_layers) guard
+    ///   reads);
+    /// * dropping `mek_kcv` would lose the #3620 wrong-key detection across a
+    ///   cancel, downgrading a precise "the source secret changed" error back to a
+    ///   cryptic downstream AEAD failure.
+    ///
+    /// In practice the guard means a cancel marker written by this binary always
+    /// carries `Skipped` non-index layers — but recording the truth is what lets a
+    /// future symmetric reverse pass (or a diagnosing operator) reconstruct the
+    /// state, and it keeps the marker honest if the guard is ever relaxed.
+    fn cancel_scope(pending: &RotationLedger) -> Self {
+        Self {
+            direction: RotationDirection::Cancel,
+            new_version: pending.new_version,
+            new_source: pending.new_source.clone(),
+            // The reverse index/checkpoint pass has not run yet.
+            index: LayerStatus::Pending,
+            checkpoint: LayerStatus::Pending,
+            // PRESERVE — never flatten: what the forward pass already re-keyed.
+            wal: pending.wal,
+            cold: pending.cold,
+            wal_retire: pending.wal_retire,
+            subject_keyring: pending.subject_keyring,
+            // PRESERVE the key-check value so #3620 wrong-key detection survives.
+            mek_kcv: pending.mek_kcv.clone(),
+            // Enable-only (`None` on any rotation ledger); carried through so a
+            // future direction that does pin one cannot lose it here.
+            algorithm: pending.algorithm,
+        }
+    }
+
     /// The default PR1 cross-layer plan: index and checkpoint re-key through
     /// the index engine (checkpoints ride the index DEK), while WAL and cold
     /// are out of scope and recorded `Skipped`.
+    ///
+    /// Test-only since Issue #3783: the cancel driver was its last production
+    /// caller and now derives its marker from the pending ledger
+    /// ([`cancel_scope`](RotationLedger::cancel_scope)) instead of flattening the
+    /// per-layer statuses through this constructor. Retained because the ledger
+    /// tests use it to plant index-scope forward/cancel/enable/disable ledgers.
+    #[cfg(test)]
     fn index_scope(
         direction: RotationDirection,
         new_version: u32,
@@ -1701,9 +1839,13 @@ fn rotation_state_present(manager: &IndexPersistenceManager) -> Result<bool> {
 }
 
 /// Write the default PR1 index-scope ledger (index + checkpoint pending, WAL +
-/// cold skipped). Signature-compatible with the #488 breadcrumb writer so every
-/// existing caller keeps working; the on-disk format is now `version=3` (the
-/// serde full-config writer; `version=2` only on a non-serde build).
+/// cold skipped). Signature-compatible with the #488 breadcrumb writer; the
+/// on-disk format is now `version=3` (the serde full-config writer; `version=2`
+/// only on a non-serde build).
+///
+/// Test-only since Issue #3783 — see
+/// [`RotationLedger::index_scope`] for why the cancel driver stopped using it.
+#[cfg(test)]
 fn write_rotation_state(
     manager: &IndexPersistenceManager,
     new_version: u32,
@@ -2828,6 +2970,11 @@ pub(crate) fn disable_resume_ciphers(
 /// * `cancel` — run the reverse pass (roll every migrated file back to the old
 ///   key), retire the new generation, clear the breadcrumb. An interrupted
 ///   cancel thus resumes as a cancel, never rolls forward (Issue #488 P1.2).
+///   Refused up front (Issue #3783, ledger retained) when the cancel ledger
+///   records `layer.wal` / `layer.cold` / `layer.subject_keyring` as anything
+///   other than `Skipped`: the reverse pass covers only the index/checkpoint
+///   tree, so completing it would leave those layers on the new key while
+///   reporting success.
 ///
 /// A no-op when no rotation was in flight. A present-but-corrupt breadcrumb
 /// aborts startup (Issue #488 P1.1).
@@ -2835,7 +2982,9 @@ pub(crate) fn disable_resume_ciphers(
 /// # Errors
 ///
 /// Returns an error if the breadcrumb is corrupt, the recorded new key source
-/// cannot be sourced, or the re-encryption pass fails.
+/// cannot be sourced, a cancel ledger records a layer the reverse pass cannot roll
+/// back ([`RotationError::UnsupportedCancelWithRekeyedLayers`]), or the
+/// re-encryption pass fails.
 pub fn resume_pending_rotation(
     manager: &Arc<IndexPersistenceManager>,
     enc_cfg: &EncryptionConfig,
@@ -2852,6 +3001,25 @@ pub fn resume_pending_rotation(
         RotationDirection::Enable | RotationDirection::Disable
     ) {
         return Ok(None);
+    }
+    // Issue #3783: the same refusal the live `cancel_pending_rotation` driver
+    // applies, re-asserted here so resuming an interrupted cancel can never clear
+    // the ledger and report success while a non-index layer sits on the new key.
+    // Checked FIRST — before any keyring generation is installed and before the WAL
+    // block below (which would otherwise roll the WAL *forward* off a cancel
+    // ledger) — so the refusal leaves the ledger and every layer untouched. A
+    // cancel marker written by this binary always records those layers `Skipped`
+    // (the driver's guard runs before the marker is published), so this is a
+    // fail-closed backstop for a hand-edited or future-written ledger.
+    if matches!(ledger.direction, RotationDirection::Cancel) {
+        let blocked = ledger.unrollbackable_layers();
+        if !blocked.is_empty() {
+            return Err(rotation_err(
+                RotationError::UnsupportedCancelWithRekeyedLayers {
+                    layers: blocked.join(", "),
+                },
+            ));
+        }
     }
     let Some(keyring) = manager.keyring() else {
         // Encryption not configured on this startup; leave the ledger.
@@ -4726,6 +4894,410 @@ mod tests {
             // Refused, and the migration ledger is left intact for its own engine.
             assert!(root.join("data").join("rotation.state").exists());
         }
+        super::clear_rotation_state(&manager);
+    }
+
+    // ── Issue #3783: cancel refuses while a non-index layer is re-keyed ──
+
+    /// Snapshot every persisted index file's `AEIX` `key_version`, keyed by path —
+    /// the observable that proves whether the reverse pass ran.
+    fn index_version_map(indexes_dir: &Path) -> std::collections::BTreeMap<String, u32> {
+        fn walk(dir: &Path, out: &mut std::collections::BTreeMap<String, u32>) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if let Ok(bytes) = std::fs::read(&p)
+                    && let Some(v) = index_file_key_version(&bytes)
+                {
+                    out.insert(p.to_string_lossy().into_owned(), v);
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(indexes_dir, &mut out);
+        out
+    }
+
+    /// Plant a forward ledger with explicit per-layer statuses.
+    fn plant_forward_ledger(
+        manager: &std::sync::Arc<IndexPersistenceManager>,
+        new_source: KeyProviderConfig,
+        wal: LayerStatus,
+        cold: LayerStatus,
+        subject_keyring: LayerStatus,
+    ) {
+        super::write_ledger(
+            manager,
+            &super::RotationLedger {
+                direction: super::RotationDirection::Forward,
+                new_version: 2,
+                new_source,
+                index: LayerStatus::Complete,
+                checkpoint: LayerStatus::Complete,
+                wal,
+                cold,
+                wal_retire: LayerStatus::Skipped,
+                mek_kcv: Some("00112233445566aa".to_string()),
+                subject_keyring,
+                algorithm: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// The predicate the guard reads: only the three NON-index layers, and only
+    /// when they are not `Skipped`, block a cancel. `index` / `checkpoint` (which
+    /// the reverse pass DOES cover) and `wal_retire` (an enable/disable cleanup
+    /// step naming no key generation) never block.
+    #[test]
+    fn unrollbackable_layers_names_only_rekeyed_non_index_layers() {
+        let source = KeyProviderConfig::File {
+            path: "/nonexistent/new.key".into(),
+        };
+        let base = super::RotationLedger::index_scope(
+            super::RotationDirection::Forward,
+            2,
+            source.clone(),
+        );
+        // An index-scope ledger is fully rollbackable — this is the case the
+        // reverse pass covers, so cancelling must stay available for it.
+        assert!(base.unrollbackable_layers().is_empty());
+
+        // Neither the index domain nor the enable/disable-only `wal_retire` step
+        // blocks a cancel, whatever their status.
+        let mut index_only = base.clone();
+        index_only.index = LayerStatus::Complete;
+        index_only.checkpoint = LayerStatus::Complete;
+        index_only.wal_retire = LayerStatus::Pending;
+        assert!(index_only.unrollbackable_layers().is_empty());
+
+        // Each of the three layers blocks, whether Pending OR Complete: the ledger
+        // cannot distinguish "never started" from "interrupted half-way".
+        type SetLayer = fn(&mut super::RotationLedger, LayerStatus);
+        let layers: [(&str, SetLayer); 3] = [
+            ("wal", |l, s| l.wal = s),
+            ("cold", |l, s| l.cold = s),
+            ("subject_keyring", |l, s| l.subject_keyring = s),
+        ];
+        for status in [LayerStatus::Pending, LayerStatus::Complete] {
+            for (name, set) in layers {
+                let mut l = base.clone();
+                set(&mut l, status);
+                assert_eq!(
+                    l.unrollbackable_layers(),
+                    vec![format!("{name}={}", status.as_str())],
+                    "{name}={status:?} must block a cancel",
+                );
+            }
+        }
+
+        // All three at once are named together, in driver order.
+        let mut all = base.clone();
+        all.wal = LayerStatus::Complete;
+        all.cold = LayerStatus::Pending;
+        all.subject_keyring = LayerStatus::Pending;
+        assert_eq!(
+            all.unrollbackable_layers().join(", "),
+            "wal=complete, cold=pending, subject_keyring=pending",
+        );
+    }
+
+    /// The cancel marker must PRESERVE the pending ledger's non-index layer
+    /// statuses and its `mek_kcv`, not flatten them to `Skipped`/`None` the way the
+    /// old `index_scope` marker did — otherwise the moment the cancel marker lands
+    /// the ledger no longer records which layers were re-keyed, and the #3620
+    /// wrong-key detection is lost across a cancel.
+    #[test]
+    fn cancel_scope_preserves_non_index_layer_statuses_and_kcv() {
+        let pending = super::RotationLedger {
+            direction: super::RotationDirection::Forward,
+            new_version: 5,
+            new_source: KeyProviderConfig::Env {
+                variable: "MEK_NEW".to_string(),
+            },
+            index: LayerStatus::Complete,
+            checkpoint: LayerStatus::Complete,
+            wal: LayerStatus::Complete,
+            cold: LayerStatus::Pending,
+            wal_retire: LayerStatus::Skipped,
+            mek_kcv: Some("deadbeefdeadbeef".to_string()),
+            subject_keyring: LayerStatus::Pending,
+            algorithm: None,
+        };
+        let cancel = super::RotationLedger::cancel_scope(&pending);
+
+        assert_eq!(cancel.direction, super::RotationDirection::Cancel);
+        assert_eq!(cancel.new_version, pending.new_version);
+        assert_eq!(cancel.new_source, pending.new_source);
+        // The reverse index/checkpoint pass still has to run.
+        assert_eq!(cancel.index, LayerStatus::Pending);
+        assert_eq!(cancel.checkpoint, LayerStatus::Pending);
+        // Preserved verbatim — the record of what a cancel would have to undo.
+        assert_eq!(cancel.wal, LayerStatus::Complete);
+        assert_eq!(cancel.cold, LayerStatus::Pending);
+        assert_eq!(cancel.subject_keyring, LayerStatus::Pending);
+        assert_eq!(cancel.wal_retire, pending.wal_retire);
+        // Preserved so #3620 wrong-key detection survives a cancel.
+        assert_eq!(cancel.mek_kcv.as_deref(), Some("deadbeefdeadbeef"));
+        assert_eq!(
+            cancel.rotation_old_version(),
+            4,
+            "the generation to roll back to is unchanged by the direction flip",
+        );
+
+        // And every preserved field survives the durable round-trip.
+        let read = ledger_roundtrip(&cancel);
+        assert_eq!(read, cancel);
+    }
+
+    /// A cancel must be REFUSED — loudly, with the offending layers named, and
+    /// with nothing touched — when the interrupted forward rotation already moved
+    /// the WAL / cold tier / subject keyring onto the new key. Previously it ran
+    /// the index reverse pass, cleared the ledger, and returned `Ok`, telling the
+    /// operator the new key was never adopted while those layers were still on it.
+    #[test]
+    fn cancel_pending_rotation_refuses_when_a_non_index_layer_was_rekeyed() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+        let indexes_dir = root.join("data").join("indexes");
+        let ledger_path = root.join("data").join("rotation.state");
+
+        let db = build_db_index_only(root, &old_key);
+        seed(&db);
+        let manager = db.persistence_manager.clone().unwrap();
+        let source = KeyProviderConfig::File {
+            path: new_key.clone(),
+        };
+
+        // Half-migrate the index tree to v2, exactly as an interrupted forward
+        // pass would leave it, so a reverse pass running anyway is observable.
+        let keyring = manager.keyring().unwrap();
+        let cipher_new = std::sync::Arc::clone(
+            EncryptionManager::from_config(&EncryptionConfig::file_based(&new_key))
+                .unwrap()
+                .index_cipher(),
+        );
+        let cipher_old = keyring.current_cipher().unwrap();
+        keyring.add_generation(2, std::sync::Arc::clone(&cipher_new));
+        let engine = IndexKeyRotation::new(
+            manager.indexes_path(),
+            keyring.clone(),
+            1,
+            cipher_old,
+            2,
+            std::sync::Arc::clone(&cipher_new),
+        );
+        let mut n = 0;
+        engine
+            .re_encrypt(&mut |_| {
+                n += 1;
+                n < 2
+            })
+            .unwrap();
+        let before_files = index_version_map(&indexes_dir);
+        assert!(
+            before_files.values().any(|v| *v == 2) && before_files.values().any(|v| *v == 1),
+            "test setup must leave a genuinely half-migrated tree: {before_files:?}",
+        );
+
+        for (wal, cold, subject_keyring, expect) in [
+            (
+                LayerStatus::Complete,
+                LayerStatus::Skipped,
+                LayerStatus::Skipped,
+                "wal=complete",
+            ),
+            (
+                LayerStatus::Pending,
+                LayerStatus::Skipped,
+                LayerStatus::Skipped,
+                "wal=pending",
+            ),
+            (
+                LayerStatus::Skipped,
+                LayerStatus::Complete,
+                LayerStatus::Skipped,
+                "cold=complete",
+            ),
+            (
+                LayerStatus::Skipped,
+                LayerStatus::Skipped,
+                LayerStatus::Pending,
+                "subject_keyring=pending",
+            ),
+            (
+                LayerStatus::Complete,
+                LayerStatus::Pending,
+                LayerStatus::Pending,
+                "wal=complete, cold=pending, subject_keyring=pending",
+            ),
+        ] {
+            plant_forward_ledger(&manager, source.clone(), wal, cold, subject_keyring);
+            let before_ledger = std::fs::read(&ledger_path).unwrap();
+
+            let err = db.cancel_pending_rotation().unwrap_err();
+            assert!(
+                matches!(err, Error::FailedPrecondition(_)),
+                "a refused cancel is an operator precondition failure, got: {err:?}",
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains("cannot cancel this key rotation") && msg.contains(expect),
+                "the refusal must name the blocking layer(s) ({expect}), got: {msg}",
+            );
+            assert!(
+                msg.contains("--resume"),
+                "the refusal must point at rolling forward, got: {msg}",
+            );
+
+            // Nothing was touched: the pending FORWARD ledger is byte-identical
+            // (never flipped to a cancel marker) and the half-migrated index tree
+            // is exactly as it was, so `--resume` can still finish the rotation.
+            assert_eq!(
+                std::fs::read(&ledger_path).unwrap(),
+                before_ledger,
+                "a refused cancel must leave the pending forward ledger untouched",
+            );
+            assert_eq!(
+                index_version_map(&indexes_dir),
+                before_files,
+                "a refused cancel must not run the index reverse pass",
+            );
+        }
+
+        // Flatten the blocking layers back to `Skipped` and the same ledger
+        // cancels normally — the refusal is scoped to what the pass cannot undo.
+        plant_forward_ledger(
+            &manager,
+            source,
+            LayerStatus::Skipped,
+            LayerStatus::Skipped,
+            LayerStatus::Skipped,
+        );
+        let report = db
+            .cancel_pending_rotation()
+            .expect("an index-only rotation must still cancel");
+        assert_eq!(report.new_version, 1);
+        assert!(!ledger_path.exists());
+        assert!(assert_all_at_version(&indexes_dir, 1) > 0);
+    }
+
+    /// Resuming an INTERRUPTED cancel is refused the same way, checked before any
+    /// keyring generation is installed and before the WAL block that would
+    /// otherwise roll the WAL *forward* off a cancel ledger. The ledger is
+    /// retained (never cleared), so nothing reports success.
+    #[test]
+    fn resume_refuses_a_cancel_ledger_recording_a_rekeyed_layer() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+        let ledger_path = root.join("data").join("rotation.state");
+
+        let db = build_db_index_only(root, &old_key);
+        seed(&db);
+        let manager = db.persistence_manager.clone().unwrap();
+
+        super::write_ledger(
+            &manager,
+            &super::RotationLedger {
+                direction: super::RotationDirection::Cancel,
+                new_version: 2,
+                new_source: KeyProviderConfig::File {
+                    path: new_key.clone(),
+                },
+                index: LayerStatus::Pending,
+                checkpoint: LayerStatus::Pending,
+                wal: LayerStatus::Complete,
+                cold: LayerStatus::Pending,
+                wal_retire: LayerStatus::Skipped,
+                mek_kcv: None,
+                subject_keyring: LayerStatus::Skipped,
+                algorithm: None,
+            },
+        )
+        .unwrap();
+        let before = std::fs::read(&ledger_path).unwrap();
+
+        let err = db.resume_pending_index_rotation().unwrap_err();
+        assert!(
+            matches!(err, Error::FailedPrecondition(_)),
+            "expected the cancel refusal, got: {err:?}",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("wal=complete") && msg.contains("cold=pending"),
+            "the refusal must name every blocking layer, got: {msg}",
+        );
+        assert_eq!(
+            std::fs::read(&ledger_path).unwrap(),
+            before,
+            "a refused cancel-resume must retain the ledger verbatim",
+        );
+
+        super::clear_rotation_state(&manager);
+    }
+
+    /// The refusal is audited as a FAILURE (with a key-safe category), never as a
+    /// completed rotation — the operator must not be able to read
+    /// `key.rotation.completed` out of the log and conclude the rollback happened.
+    #[test]
+    fn refused_cancel_audits_a_failure_not_a_completion() {
+        use crate::encryption::audit::AuditLevel;
+        use crate::encryption::config::{AuditConfig, AuditDestination};
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old_key = root.join("old.key");
+        let new_key = root.join("new.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&old_key).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&new_key).unwrap();
+        let audit_path = root.join("audit.log");
+
+        let mut enc = EncryptionConfig::file_based(&old_key);
+        enc.audit = AuditConfig {
+            enabled: true,
+            level: AuditLevel::KeyEvents,
+            destination: AuditDestination::File,
+            file_path: Some(audit_path.clone()),
+            instance_id: Some("node-3783".into()),
+            ..AuditConfig::default()
+        };
+
+        let db = build_db_index_only_with_enc(root, enc);
+        seed(&db);
+        let manager = db.persistence_manager.clone().unwrap();
+        plant_forward_ledger(
+            &manager,
+            KeyProviderConfig::File { path: new_key },
+            LayerStatus::Complete,
+            LayerStatus::Skipped,
+            LayerStatus::Skipped,
+        );
+
+        db.cancel_pending_rotation().unwrap_err();
+
+        let log = std::fs::read_to_string(&audit_path).expect("audit log written");
+        assert!(
+            log.contains("key.rotation.failed"),
+            "expected a rotation.failed event: {log}"
+        );
+        assert!(
+            !log.contains("key.rotation.completed"),
+            "a refused cancel must NEVER audit a completed rotation: {log}"
+        );
+        // The audit category is the opaque token, never the raw error text (P2.2).
+        assert!(
+            !log.contains("split-key"),
+            "the audit event must not carry the raw error message: {log}"
+        );
         super::clear_rotation_state(&manager);
     }
 

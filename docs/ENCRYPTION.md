@@ -676,6 +676,29 @@ rotation and is not cancellable this way — `--cancel` reports `no key rotation
 is in progress` and leaves the migration ledger untouched for its own
 resume path.
 
+> **Important — `--cancel` covers the index/checkpoint layer only (Issue #3783).**
+> The reverse (rollback) pass drives exactly one engine, the index/checkpoint
+> re-encryption. A full-MEK rotation also re-keys the **WAL**, the **cold (redb)
+> tier**, and the **crypto-shred subject keyring**, and there is no reverse pass
+> for any of them. So when the pending rotation ledger records `layer.wal`,
+> `layer.cold`, or `layer.subject_keyring` as anything other than `skipped`,
+> `--cancel` **refuses**, naming the offending layers:
+>
+> ```
+> error: cannot cancel this key rotation: it already moved other encrypted-at-rest layer(s) onto the new key (wal=complete, cold=pending), and the cancel pass only rolls back the index/checkpoint layer — rolling back now would leave the database split-key (index on the old key, those layers on the new one). Roll FORWARD instead with `keys rotate --resume`, and keep the old key available until it completes; do NOT discard the new key
+> ```
+>
+> The refusal happens **before anything is touched** — the pending forward
+> ledger is left byte-identical and no file is re-encrypted — so the correct
+> recovery is `keys rotate --resume`, which *is* symmetric and idempotent across
+> every layer. Keep the **old** key available until the resume completes, and do
+> not discard the **new** key while any layer is still on it: the old-generation
+> WAL segments a forward pass already retired, the re-wrapped cold values, and
+> the wrapped per-subject DEKs are only readable under the new key.
+>
+> An **index-only** rotation (every non-index layer `skipped`) is exactly what
+> the reverse pass does cover, so it still cancels normally.
+
 > **Important — cross-layer refusal.** The shipped engine performs an
 > *index-only* rotation and **safely refuses** while any *other* at-rest layer
 > (WAL, cold storage, checkpoint) is encrypted under the same master key —
