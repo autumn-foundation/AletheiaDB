@@ -205,14 +205,13 @@ fn daemon_start_rejects_an_unknown_surface() {
 #[test]
 fn cli_refuses_to_open_a_data_dir_a_live_daemon_owns() {
     let dir = TempDir::new().expect("tempdir");
-    // A live process that is not us, recorded as the lock owner.
-    let mut owner = spawn_long_lived_process();
-    std::fs::write(dir.path().join("daemon.lock"), owner.id().to_string()).expect("write lock");
+    // This test process is the lock owner: it is unambiguously alive, needs no
+    // spawned stand-in, and cannot be confused with the process under test --
+    // `run` launches the CLI as a *separate* process, so there is no self-pid
+    // shortcut for it to take.
+    std::fs::write(dir.path().join("daemon.lock"), live_pid().to_string()).expect("write lock");
 
     let out = run(&["node", "create", "Person"], Some(dir.path()));
-
-    let _ = owner.kill();
-    let _ = owner.wait();
 
     assert_eq!(
         out.code, 1,
@@ -247,19 +246,47 @@ fn cli_ignores_a_stale_daemon_lock() {
     );
 }
 
-/// Spawn a process that stays alive long enough to be a lock owner.
+/// A pid that is certainly alive: this test process.
+fn live_pid() -> u32 {
+    std::process::id()
+}
+
+/// Spawn a process that stays alive long enough to probe for liveness.
+///
+/// Only `daemon_liveness_uses_a_portable_pid_probe` needs this -- it is the one
+/// assertion that requires a pid which is alive *and can then be reaped*. Every
+/// other test here uses `live_pid()`.
+///
+/// Windows uses `ping`, not `timeout`: `timeout` refuses to run without a
+/// console ("ERROR: Input redirection is not supported") and exits at once, so
+/// under a test harness it yields an already-dead pid. Kept in step with the
+/// same helper in `src/daemon_lock.rs`, which spawns for the same reason.
 fn spawn_long_lived_process() -> std::process::Child {
     let (program, args): (&str, Vec<&str>) = if cfg!(windows) {
-        ("cmd", vec!["/C", "timeout", "/T", "30"])
+        ("ping", vec!["-n", "31", "127.0.0.1"])
     } else {
         ("sleep", vec!["30"])
     };
-    Command::new(program)
+    let mut child = Command::new(program)
         .args(args)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .expect("spawn long-lived process")
+        .unwrap_or_else(|e| panic!("spawn `{program}` as a live process: {e}"));
+
+    // Confirm it is running before asserting anything about liveness, using
+    // `try_wait` rather than the probe under test, so a dead fixture reports
+    // itself instead of looking like a broken probe.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    match child.try_wait() {
+        Ok(None) => child,
+        Ok(Some(status)) => panic!(
+            "the `{program}` test helper exited immediately with {status}; it cannot \
+             stand in for a live process on this platform"
+        ),
+        Err(e) => panic!("cannot determine whether the `{program}` helper is running: {e}"),
+    }
 }
 
 /// Liveness must not depend on `/proc`, which exists only on Linux.
@@ -295,8 +322,8 @@ fn daemon_liveness_uses_a_portable_pid_probe() {
 #[test]
 fn embedded_mcp_server_refuses_a_data_dir_a_live_daemon_owns() {
     let dir = TempDir::new().expect("tempdir");
-    let mut owner = spawn_long_lived_process();
-    std::fs::write(dir.path().join("daemon.lock"), owner.id().to_string()).expect("write lock");
+    // As above: this process is the live owner; `aletheia-mcp` is spawned separately.
+    std::fs::write(dir.path().join("daemon.lock"), live_pid().to_string()).expect("write lock");
 
     let output = Command::new(env!("CARGO_BIN_EXE_aletheia-mcp"))
         .env_remove("ALETHEIADB_CONFIG")
@@ -306,9 +333,6 @@ fn embedded_mcp_server_refuses_a_data_dir_a_live_daemon_owns() {
         .stdin(std::process::Stdio::null())
         .output()
         .expect("spawn aletheia-mcp");
-
-    let _ = owner.kill();
-    let _ = owner.wait();
 
     assert!(
         !output.status.success(),
