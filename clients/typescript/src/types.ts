@@ -234,12 +234,22 @@ export interface BudgetOptions {
    *
    * Honored on both surfaces. The POST-body reads
    * ({@link AletheiaClient.findNodesAtTime}, {@link AletheiaClient.findSimilar},
-   * {@link AletheiaClient.hybridQuery}) carry it as a JSON array. The nine
-   * budgetable GET reads
+   * {@link AletheiaClient.hybridQuery}, {@link AletheiaClient.query}) carry it
+   * as a JSON array. The nine budgetable GET reads
    * (`getNode`/`listNodes`/`getEdge`/`listEdges`/`traverse`/`getNodeHistory`/
    * `getSchema` and the two adjacency reads) serialize it **comma-joined** onto
-   * the query string, which the server (PR #3638) splits on `,` server-side. An
-   * empty array is omitted entirely — never a bare `?priority_properties=`.
+   * the query string, which the server (PR #3638) splits on `,` server-side.
+   *
+   * Normalized identically on both surfaces before sending: entries are
+   * trimmed, empty/whitespace-only entries are dropped, and a list with nothing
+   * left is omitted entirely — never a bare `?priority_properties=`. A property
+   * name containing a **comma** throws `InvalidArgumentError`: it is
+   * unrepresentable on the GET wire (the server would split it into two names),
+   * and sending it would silently protect the wrong properties.
+   *
+   * Only meaningful alongside a budget: with neither `maxResponseTokens` nor
+   * `maxResponseBytes` set there is no budget to degrade against, and the
+   * server discards `priority_properties` entirely.
    */
   priorityProperties?: string[];
 }
@@ -689,24 +699,15 @@ export interface QueryResponse {
  * Options for {@link AletheiaClient.getSchema}. `asOf*` switch to a bi-temporal
  * snapshot.
  *
- * `getSchema` is one of the nine budgetable GET reads (#3353): it accepts the
- * full token/byte budget **and** `priorityProperties`, which `GET /schema`
- * reads comma-separated through the same `de_priority_properties` splitter as
- * every other GET read (`GetSchemaQuery`,
- * `crates/aletheia-server/src/schema_batch_tools.rs`).
+ * `getSchema` is one of the nine budgetable GET reads (#3353), so it composes
+ * the shared {@link BudgetOptions}: it accepts the full token/byte budget
+ * **and** `priorityProperties`, which `GET /schema` reads comma-separated
+ * through the same `de_priority_properties` splitter as every other GET read
+ * (`GetSchemaQuery`, `crates/aletheia-server/src/schema_batch_tools.rs`).
  */
-export interface GetSchemaOptions {
+export interface GetSchemaOptions extends BudgetOptions {
   asOfValidTime?: TimeInput;
   asOfTransactionTime?: TimeInput;
-  /** Cap the response at roughly this many tokens (estimated `ceil(bytes/4)`). */
-  maxResponseTokens?: number;
-  /** Byte-exact response cap. */
-  maxResponseBytes?: number;
-  /**
-   * Property keys to protect first as the schema response degrades. Serialized
-   * comma-joined onto the query string; an empty array is omitted entirely.
-   */
-  priorityProperties?: string[];
 }
 
 /**

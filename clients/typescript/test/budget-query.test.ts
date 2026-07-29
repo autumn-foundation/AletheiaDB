@@ -109,6 +109,120 @@ describe('priority_properties GET serialization — edge cases', () => {
     expect(req.query.has('priority_properties')).toBe(false);
     expect(req.query.get('max_response_tokens')).toBe('1000');
   });
+
+  it('getSchema merges asOf* + budget + priority_properties onto ONE query string', async () => {
+    // The bi-temporal coordinates and the budget fragment are spread into the
+    // same object literal; this pins that neither clobbers the other.
+    const req = await capture({ node_labels: [], edge_types: [] }, (db) =>
+      db.getSchema({
+        asOfValidTime: '2024-01-01T00:00:00Z',
+        asOfTransactionTime: '2024-06-01T00:00:00Z',
+        ...budget,
+      }),
+    );
+    expect(req.path).toBe('/schema');
+    expect(req.query.has('as_of_valid_time')).toBe(true);
+    expect(req.query.has('as_of_transaction_time')).toBe(true);
+    expect(req.query.get('priority_properties')).toBe('title,name');
+    expect(req.query.get('max_response_tokens')).toBe('800');
+    expect(req.query.get('max_response_bytes')).toBe('4096');
+  });
+
+  it('the budget rides alongside a #3360 cursor continuation', async () => {
+    // #3353 and #3360 compose: the cursor page is produced first, then the
+    // budget shapes that page. Both must reach the server on one request.
+    const req = await capture(nodeList, (db) =>
+      db.listNodes({ cursor: 'opaque-token', ...budget }),
+    );
+    expect(req.query.get('cursor')).toBe('opaque-token');
+    expect(req.query.get('priority_properties')).toBe('title,name');
+    expect(req.query.get('max_response_tokens')).toBe('800');
+  });
+});
+
+/**
+ * Normalization is applied identically to the GET query form and the POST body
+ * form, so one option object means the same thing on every read. Server-side
+ * the GET routes trim + drop empties (`de_priority_properties`) while a POST
+ * body deserializes verbatim, so without client-side normalization the same
+ * input would protect different property sets on the two surfaces.
+ */
+describe('priority_properties normalization is identical on GET and POST', () => {
+  it('drops empty and whitespace-only entries, and trims the rest (GET)', async () => {
+    const req = await capture(nodeList, (db) =>
+      db.listNodes({ label: 'Doc', priorityProperties: [' name ', '', '   ', 'title'] }),
+    );
+    expect(req.query.get('priority_properties')).toBe('name,title');
+  });
+
+  it('drops empty and whitespace-only entries, and trims the rest (POST)', async () => {
+    const req = await capture({ nodes: [], count: 0 }, (db) =>
+      db.findNodesAtTime({
+        label: 'Person',
+        validTime: '2024-01-01',
+        priorityProperties: [' name ', '', '   ', 'title'],
+      }),
+    );
+    expect((req.body as { priority_properties: unknown }).priority_properties).toEqual([
+      'name',
+      'title',
+    ]);
+  });
+
+  it('an all-empty list is omitted entirely — never a bare ?priority_properties=', async () => {
+    const req = await capture(nodeList, (db) =>
+      db.listNodes({ label: 'Doc', priorityProperties: ['', '  '] }),
+    );
+    expect(req.query.has('priority_properties')).toBe(false);
+    expect(req.url).not.toContain('priority_properties');
+  });
+
+  it('an all-empty list is omitted from a POST body too', async () => {
+    const req = await capture({ nodes: [], count: 0 }, (db) =>
+      db.findNodesAtTime({ label: 'Person', validTime: '2024-01-01', priorityProperties: [''] }),
+    );
+    expect((req.body as { priority_properties: unknown }).priority_properties).toBeUndefined();
+  });
+
+  it('a property name containing a comma throws instead of silently splitting', async () => {
+    // The server splits the joined GET value on ',', so 'a,b' would protect two
+    // properties that do not exist while the real one is elided — a silently
+    // wrong response body. Fail loudly instead.
+    const { fetch } = mockFetch(() => ({ body: nodeList }));
+    const db = new AletheiaClient({ baseUrl: 'http://x', apiKey: 'k', fetch });
+    const err = await db
+      .listNodes({ label: 'Doc', priorityProperties: ['a,b'] })
+      .catch((e: unknown) => e);
+    expect((err as { code: string }).code).toBe('INVALID_ARGUMENT');
+    expect((err as { retriable: boolean }).retriable).toBe(false);
+  });
+
+  it('the guard REJECTS the returned promise; it never throws synchronously', () => {
+    // Argument validation happens while building the request spec, before the
+    // transport is touched. The reads are `async` so that throw surfaces as a
+    // rejection — a synchronous throw from a method typed `Promise<T>` would
+    // escape every `.catch()` the caller wrote.
+    const { fetch } = mockFetch(() => ({ body: nodeList }));
+    const db = new AletheiaClient({ baseUrl: 'http://x', apiKey: 'k', fetch });
+    let threwSynchronously = false;
+    let p: Promise<unknown> = Promise.resolve();
+    try {
+      p = db.listNodes({ priorityProperties: ['a,b'] });
+    } catch {
+      threwSynchronously = true;
+    }
+    expect(threwSynchronously).toBe(false);
+    return expect(p).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('the comma guard applies to POST-body reads too', async () => {
+    const { fetch } = mockFetch(() => ({ body: { nodes: [], count: 0 } }));
+    const db = new AletheiaClient({ baseUrl: 'http://x', apiKey: 'k', fetch });
+    const err = await db
+      .findNodesAtTime({ label: 'Person', validTime: '2024-01-01', priorityProperties: ['a,b'] })
+      .catch((e: unknown) => e);
+    expect((err as { code: string }).code).toBe('INVALID_ARGUMENT');
+  });
 });
 
 describe('priority_properties IS preserved on POST-body reads (serde_json arrays)', () => {
