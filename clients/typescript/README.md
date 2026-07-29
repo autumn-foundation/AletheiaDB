@@ -113,6 +113,19 @@ try {
 
 An **unknown** code degrades to the base `AletheiaError` with `retriable === false`.
 
+### Error envelope
+
+Both server surfaces emit the **same** nested envelope (Issue #3234, unified onto HTTP by #3629), so an in-band MCP error (HTTP 200) and a real non-2xx normalize identically:
+
+```json
+{ "error": { "code": "NOT_FOUND", "message": "no such node", "retriable": false, "details": {} },
+  "trace_id": "0af7651916cd43dd8448eb211c80319c" }
+```
+
+`trace_id` is a **top-level sibling** of `error` (never nested inside it) and surfaces as `err.traceId`. The legacy flat `{ "success": false, "error": "…", "code": "…" }` body has been removed server-side; the SDK still parses it, to the identical typed error, purely so a client pinned against a pre-#3629 server keeps working.
+
+`retriable` is taken verbatim from the server whenever it is stated. Only when the field is absent does the SDK fall back to a default: `CONFLICT`/`UNAVAILABLE`, plus any HTTP 429 (the server's timeout / rate-limit status, which also carries `Retry-After`) — while 413/422 stay non-retriable.
+
 The built-in retry policy is **off by default**. When enabled it retries **only** `retriable` errors — never a non-retriable code — with bounded attempts and jittered exponential backoff:
 
 ```ts
@@ -136,7 +149,7 @@ new AletheiaClient({
 
 ## Pagination & completeness
 
-Reads that support it accept `limit`/`offset` (#3226), `useCursor`/`cursor` (#3360), and the token budget `maxResponseTokens`/`maxResponseBytes`/`priorityProperties` (#3353). Responses surface `count`, `has_more`, `next_offset`, `truncated`, `sampled`, `cursor`, `snapshot_valid_time`/`snapshot_transaction_time`, and `budget`:
+Reads that support it accept `limit`/`offset` (#3226), `useCursor`/`cursor` (#3360), and the token budget `maxResponseTokens`/`maxResponseBytes`/`priorityProperties` (#3353). On the nine budgetable **GET** reads (`getNode`, `listNodes`, `getEdge`, `listEdges`, `traverse`, `getNodeHistory`, `getSchema`, and the two adjacency reads) `priorityProperties` rides as a single comma-joined query param, which the server splits on `,` (#3638); the POST-body reads carry it as a JSON array. An empty array is omitted entirely. Responses surface `count`, `has_more`, `next_offset`, `truncated`, `sampled`, `cursor`, `snapshot_valid_time`/`snapshot_transaction_time`, and `budget`:
 
 ```ts
 const page1 = await db.listNodes({ label: 'Person', useCursor: true });

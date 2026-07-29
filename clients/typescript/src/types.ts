@@ -234,13 +234,12 @@ export interface BudgetOptions {
    *
    * Honored on both surfaces. The POST-body reads
    * ({@link AletheiaClient.findNodesAtTime}, {@link AletheiaClient.findSimilar},
-   * {@link AletheiaClient.hybridQuery}) carry it as a JSON array. The eight
+   * {@link AletheiaClient.hybridQuery}) carry it as a JSON array. The nine
    * budgetable GET reads
-   * (`getNode`/`listNodes`/`getEdge`/`listEdges`/`traverse`/`getNodeHistory`
-   * and the two adjacency reads) serialize it **comma-joined** onto the query
-   * string, which the server (PR #3638) splits on `,` server-side. An empty
-   * array is omitted. `getSchema` is not one of the eight — its options type
-   * does not offer this field.
+   * (`getNode`/`listNodes`/`getEdge`/`listEdges`/`traverse`/`getNodeHistory`/
+   * `getSchema` and the two adjacency reads) serialize it **comma-joined** onto
+   * the query string, which the server (PR #3638) splits on `,` server-side. An
+   * empty array is omitted entirely — never a bare `?priority_properties=`.
    */
   priorityProperties?: string[];
 }
@@ -690,10 +689,11 @@ export interface QueryResponse {
  * Options for {@link AletheiaClient.getSchema}. `asOf*` switch to a bi-temporal
  * snapshot.
  *
- * Note: `getSchema` is not one of the eight `priority_properties` GET reads, so
- * `priorityProperties` is **not** offered here — only the scalar token/byte
- * budget is honored on `GET /schema`. Use `maxResponseBytes`/`maxResponseTokens`
- * to bound the schema response.
+ * `getSchema` is one of the nine budgetable GET reads (#3353): it accepts the
+ * full token/byte budget **and** `priorityProperties`, which `GET /schema`
+ * reads comma-separated through the same `de_priority_properties` splitter as
+ * every other GET read (`GetSchemaQuery`,
+ * `crates/aletheia-server/src/schema_batch_tools.rs`).
  */
 export interface GetSchemaOptions {
   asOfValidTime?: TimeInput;
@@ -702,6 +702,11 @@ export interface GetSchemaOptions {
   maxResponseTokens?: number;
   /** Byte-exact response cap. */
   maxResponseBytes?: number;
+  /**
+   * Property keys to protect first as the schema response degrades. Serialized
+   * comma-joined onto the query string; an empty array is omitted entirely.
+   */
+  priorityProperties?: string[];
 }
 
 /**

@@ -6,7 +6,7 @@ import {
   type FetchLike,
   type FetchResponseLike,
 } from '../src/index.js';
-import { mockFetch, nodeFixture } from './fixtures.js';
+import { httpError, mockFetch, nodeFixture } from './fixtures.js';
 
 const noSleep = (): Promise<void> => Promise.resolve();
 const fixedRandom = (): number => 0.5;
@@ -69,8 +69,10 @@ describe('plain-text error body + 429 retriability (#3369 review: MEDIUM)', () =
     expect((err as AletheiaError).httpStatus).toBe(502);
   });
 
-  it('defaults a 429 to retriable (envelope without an explicit flag)', async () => {
-    const { fetch } = mockFetch(() => ({ status: 429, body: { success: false, error: 'slow down' } }));
+  it('defaults a 429 to retriable (nested envelope without an explicit flag)', async () => {
+    // The server's unified nested envelope (#3234/#3629) — no `retriable` field,
+    // so the SDK must fall back to the status-aware default (429 → retriable).
+    const { fetch } = mockFetch(() => httpError(429, 'slow down', 'RESOURCE_EXHAUSTED'));
     const db = new AletheiaClient({ baseUrl: 'http://x', apiKey: 'k', fetch });
     const err = await db.listNodes().catch((e: unknown) => e);
     expect((err as AletheiaError).httpStatus).toBe(429);

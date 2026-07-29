@@ -127,13 +127,27 @@ const CODE_TO_CLASS: Record<AletheiaErrorCode, new (init: AletheiaErrorInit) => 
 };
 
 /**
- * Default retriability for a known code, used only when the server envelope
- * omits `retriable` (the plain HTTP 4xx/5xx shapes do). Mirrors the #3234
- * contract: only `CONFLICT`, `UNAVAILABLE`, and the timeout flavor of
- * `RESOURCE_EXHAUSTED` may be transient — and even those default conservatively
- * to what the server states when it states anything.
+ * Default retriability, used **only** when the envelope omits `retriable` (a
+ * bare 4xx/5xx, a proxy's error page, or an older / non-conforming server — the
+ * current server always states the flag, and a stated flag always wins).
+ *
+ * Mirrors the #3234 contract: only `CONFLICT`, `UNAVAILABLE`, and the timeout
+ * flavor of `RESOURCE_EXHAUSTED` may be transient. Since the code alone cannot
+ * distinguish the timeout flavor of `RESOURCE_EXHAUSTED` (retriable) from the
+ * byte/row-cap flavor (not), `httpStatus` disambiguates when it is known: HTTP
+ * 429 is the server's wall-clock-timeout / rate-limit status (it even sets
+ * `Retry-After`), whereas 413/422 are the non-retriable caps.
+ *
+ * This default is shared by **both** envelope shapes — the nested #3234/#3629
+ * body and the legacy flat one — so an identical error normalizes identically
+ * whichever shape it arrived in.
+ *
+ * @param code - the structured error code.
+ * @param httpStatus - the originating HTTP status, when known. Omitted for
+ *   in-band MCP errors, which ride an HTTP 200 and carry no status signal.
  */
-function defaultRetriable(code: string): boolean {
+function defaultRetriable(code: string, httpStatus?: number): boolean {
+  if (httpStatus === 429) return true;
   return code === 'CONFLICT' || code === 'UNAVAILABLE';
 }
 
@@ -198,21 +212,11 @@ export function parseMcpError(body: unknown, httpStatus?: number): AletheiaError
   return makeError({
     code,
     message: envelope.error.message ?? code,
-    retriable: envelope.error.retriable ?? defaultRetriable(code),
+    retriable: envelope.error.retriable ?? defaultRetriable(code, httpStatus),
     details: envelope.error.details,
     httpStatus,
     traceId,
   });
-}
-
-/**
- * Default retriability for an HTTP error. Mirrors {@link defaultRetriable} but
- * additionally treats HTTP 429 (Too Many Requests) as retriable — the server's
- * plain 429 shape carries no `retriable` flag, yet a backoff-and-retry is the
- * correct response to rate limiting.
- */
-function httpRetriableDefault(code: string, httpStatus: number): boolean {
-  return httpStatus === 429 ? true : defaultRetriable(code);
 }
 
 /**
@@ -238,7 +242,7 @@ export function parseHttpError(
       return makeError({
         code,
         message,
-        retriable: env.retriable ?? httpRetriableDefault(code, httpStatus),
+        retriable: env.retriable ?? defaultRetriable(code, httpStatus),
         details: env.details,
         httpStatus,
         traceId: env.trace_id,
@@ -253,7 +257,7 @@ export function parseHttpError(
   return makeError({
     code: statusFallbackCode,
     message,
-    retriable: httpRetriableDefault(statusFallbackCode, httpStatus),
+    retriable: defaultRetriable(statusFallbackCode, httpStatus),
     httpStatus,
   });
 }

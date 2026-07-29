@@ -662,9 +662,8 @@ export class AletheiaClient {
    * `GET /schema` — node labels, edge types, and property keys with counts
    * (optional bi-temporal via `asOf*`).
    *
-   * Only the scalar token/byte budget is sent — `getSchema` is not one of the
-   * eight `priority_properties` GET reads, and its {@link GetSchemaOptions}
-   * type offers no `priorityProperties` (see {@link schemaBudgetQuery}).
+   * One of the nine budgetable GET reads: the full #3353 budget rides here,
+   * `priorityProperties` included (see {@link budgetQuery}).
    */
   getSchema(opts: GetSchemaOptions = {}): Promise<SchemaResponse> {
     return this.transport.request<SchemaResponse>({
@@ -673,7 +672,7 @@ export class AletheiaClient {
       query: {
         as_of_valid_time: optTime(opts.asOfValidTime),
         as_of_transaction_time: optTime(opts.asOfTransactionTime),
-        ...schemaBudgetQuery(opts),
+        ...budgetQuery(opts),
       },
     });
   }
@@ -775,19 +774,15 @@ function joinPriority(priorityProperties?: string[]): string | undefined {
 }
 
 /**
- * Build the #3353 budget query fragment (query-string form) for the eight
+ * Build the #3353 budget query fragment (query-string form) for the nine
  * budgetable GET reads (`getNode`, `listNodes`, `getEdge`, `listEdges`,
- * `traverse`, `getNodeHistory`, and the two adjacency reads via
+ * `traverse`, `getNodeHistory`, `getSchema`, and the two adjacency reads via
  * {@link adjacencyQuery}).
  *
  * Emits the scalar `max_response_tokens` / `max_response_bytes` (`u64`) and,
  * since server PR #3638, the comma-joined `priority_properties` (see
  * {@link joinPriority}). The POST-body reads (`findNodesAtTime`, `findSimilar`,
  * `hybridQuery`) carry the raw array instead — see {@link budgetBody}.
- *
- * Note: `getSchema` uses the scalar-only {@link schemaBudgetQuery} and is NOT
- * one of the eight — its bespoke options type never offers
- * `priorityProperties`.
  */
 function budgetQuery(opts: {
   maxResponseTokens?: number;
@@ -798,24 +793,6 @@ function budgetQuery(opts: {
     max_response_tokens: opts.maxResponseTokens,
     max_response_bytes: opts.maxResponseBytes,
     priority_properties: joinPriority(opts.priorityProperties),
-  };
-}
-
-/**
- * Build the scalar-only budget query fragment for `GET /schema`.
- *
- * `getSchema` is deliberately excluded from the eight `priority_properties`
- * GET reads: its {@link GetSchemaOptions} type offers no `priorityProperties`,
- * so this fragment carries only the scalar token/byte budget and never a
- * `priority_properties` key.
- */
-function schemaBudgetQuery(opts: {
-  maxResponseTokens?: number;
-  maxResponseBytes?: number;
-}): Record<string, number | undefined> {
-  return {
-    max_response_tokens: opts.maxResponseTokens,
-    max_response_bytes: opts.maxResponseBytes,
   };
 }
 

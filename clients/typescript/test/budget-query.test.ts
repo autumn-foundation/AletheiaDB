@@ -8,7 +8,7 @@ import { edgeFixture, mockFetch, nodeFixture, type RecordedRequest } from './fix
  * The server's GET routes now accept `priority_properties` as a single,
  * **comma-separated** query param (they split on `,` server-side), so the SDK
  * serializes the `priorityProperties: string[]` option comma-joined onto the
- * query string of the eight budgetable GET reads. This mirrors the POST-body
+ * query string of the nine budgetable GET reads. This mirrors the POST-body
  * reads, whose JSON body already carries the raw array.
  *
  * Notes on encoding:
@@ -18,8 +18,8 @@ import { edgeFixture, mockFetch, nodeFixture, type RecordedRequest } from './fix
  *    the server sees a single comma-separated string, never a `Vec` from
  *    repeated keys (which `serde_urlencoded` still cannot decode).
  *  - An empty array is omitted entirely (no bare `?priority_properties=`).
- *  - `getSchema` uses a bespoke scalar-only options type and is deliberately
- *    NOT one of the eight — it never emits `priority_properties`.
+ *  - `getSchema` is one of the nine: its `GetSchemaQuery` carries the same
+ *    `de_priority_properties` comma-split as the other GET reads.
  */
 async function capture(
   responseBody: unknown,
@@ -41,7 +41,7 @@ const nodeList = { nodes: [], count: 0 };
 const edgeList = { edges: [], count: 0 };
 const traverseBody = { results: [], count: 0 };
 
-describe('priority_properties is comma-joined onto the eight budgetable GET reads (#3638)', () => {
+describe('priority_properties is comma-joined onto the nine budgetable GET reads (#3638)', () => {
   const getReads: Array<[string, (db: AletheiaClient) => Promise<unknown>, unknown]> = [
     ['getNode', (db) => db.getNode(1, budget), nodeFixture(1, 'Doc', {})],
     ['listNodes', (db) => db.listNodes({ label: 'Doc', ...budget }), nodeList],
@@ -51,6 +51,10 @@ describe('priority_properties is comma-joined onto the eight budgetable GET read
     ['getOutgoingEdges', (db) => db.getOutgoingEdges(1, budget), edgeList],
     ['getIncomingEdges', (db) => db.getIncomingEdges(1, budget), edgeList],
     ['getNodeHistory', (db) => db.getNodeHistory(1, budget), { node_id: 1, results: [] }],
+    // `GET /schema` is budgetable too (#3353 `BUDGETABLE_READ_TOOLS`) and its
+    // `GetSchemaQuery` carries the same `de_priority_properties` comma-split
+    // (crates/aletheia-server/src/schema_batch_tools.rs).
+    ['getSchema', (db) => db.getSchema(budget), { node_labels: [], edge_types: [] }],
   ];
 
   for (const [name, run, body] of getReads) {
@@ -98,11 +102,9 @@ describe('priority_properties GET serialization — edge cases', () => {
     expect(req.query.get('priority_properties')).toBe('a b,c&d');
   });
 
-  it('getSchema is NOT one of the eight — never emits priority_properties', async () => {
-    // getSchema's typed options omit priorityProperties; even if a caller forces
-    // one through at runtime, the scalar-only schema query drops it.
+  it('getSchema omits priority_properties when the caller does not supply it', async () => {
     const req = await capture({ node_labels: [], edge_types: [] }, (db) =>
-      db.getSchema({ maxResponseTokens: 1000, priorityProperties: ['x'] } as never),
+      db.getSchema({ maxResponseTokens: 1000 }),
     );
     expect(req.query.has('priority_properties')).toBe(false);
     expect(req.query.get('max_response_tokens')).toBe('1000');

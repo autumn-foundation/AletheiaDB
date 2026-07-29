@@ -154,3 +154,32 @@ export function httpError(
   if (traceId !== undefined) body['trace_id'] = traceId;
   return { status, body };
 }
+
+/**
+ * The **legacy flat** HTTP error envelope: `{ success: false, error: "<msg>",
+ * code?, retriable?, details?, trace_id? }`.
+ *
+ * @deprecated No current AletheiaDB server emits this shape — Issue #3629
+ * replaced it with the nested {@link httpError} envelope, byte-shape-identical
+ * to the MCP surface (#3234). This helper exists **only** to exercise the
+ * SDK's retained backward-compatibility branch in `parseHttpError`, so a caller
+ * pinned against a pre-#3629 server still gets a typed error rather than a bare
+ * `HTTP <status>`. Use {@link httpError} for every fixture that models the
+ * current server; a test using this helper is asserting back-compat, nothing
+ * else.
+ */
+export function legacyFlatHttpError(
+  status: number,
+  message: string,
+  code?: string,
+  retriable?: boolean,
+  details?: Record<string, unknown>,
+  traceId?: string,
+): CannedResponse {
+  const body: Record<string, unknown> = { success: false, error: message };
+  if (code !== undefined) body['code'] = code;
+  if (retriable !== undefined) body['retriable'] = retriable;
+  if (details !== undefined) body['details'] = details;
+  if (traceId !== undefined) body['trace_id'] = traceId;
+  return { status, body };
+}
