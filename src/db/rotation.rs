@@ -882,9 +882,27 @@ impl AletheiaDB {
     /// forward. Requires a rotation to be pending
     /// ([`RotationError::NotInProgress`] otherwise).
     ///
+    /// # Arbitrary version transitions (Issue #3680)
+    ///
+    /// The generation to roll BACK to is derived from the pending ledger
+    /// ([`RotationLedger::rotation_old_version`]), not assumed to be the base
+    /// version. Cancelling the *second* (or n-th) rotation of a database — a
+    /// `v2 → v3` pass, say — therefore rolls back to `v2`, the same authority
+    /// [`resolve_provisioned_key_version`] uses to provision the startup keyring.
+    /// Previously this was hard-coded to the base version, so any rotation other
+    /// than the first `v1 → v2` cancelled into a keyring holding the wrong
+    /// generation number: the un-migrated old-key files (stamped `v2`) matched no
+    /// live generation and the reverse pass failed to decrypt them.
+    ///
+    /// An `enable` / `disable` migration ledger is NOT a rotation and is refused
+    /// with [`RotationError::NotInProgress`] — its `new_version` does not mean
+    /// `old + 1` (see [`RotationDirection::Disable`]), so driving it through the
+    /// reverse rotation pass would target a bogus generation.
+    ///
     /// # Errors
     ///
-    /// * no rotation is pending;
+    /// * no rotation is pending (including when only an enable/disable migration
+    ///   ledger is present);
     /// * the breadcrumb is corrupt or its recorded key source cannot be sourced;
     /// * a filesystem or decryption error occurs during the reverse pass.
     pub fn cancel_pending_rotation(&self) -> Result<RotationReport> {
@@ -897,6 +915,15 @@ impl AletheiaDB {
         let Some(pending) = read_rotation_state(&manager)? else {
             return Err(rotation_err(RotationError::NotInProgress));
         };
+        // An enable/disable migration ledger rides the same file but is NOT a
+        // rotation (its `new_version` is not `old + 1`), so it has no old
+        // generation to roll back to. Refuse rather than cancel it as a rotation.
+        if matches!(
+            pending.direction,
+            RotationDirection::Enable | RotationDirection::Disable
+        ) {
+            return Err(rotation_err(RotationError::NotInProgress));
+        }
 
         let started = Instant::now();
         let keyring = manager
@@ -907,7 +934,10 @@ impl AletheiaDB {
         let old_dek = derive_index_dek(load_mek(&enc_cfg.key_provider).map_err(rotation_err)?)
             .map_err(rotation_err)?;
         let old_cipher: Arc<dyn Cipher> = Arc::from(create_cipher(enc_cfg.algorithm, &old_dek));
-        let old_version = ENC_INDEX_KEY_VERSION_V1;
+        // Issue #3680: the generation being rolled back TO comes from the ledger,
+        // never a hard-coded base version — a `vN → vN+1` rotation cancels back to
+        // `vN` for any N, not just `v1`.
+        let old_version = pending.rotation_old_version();
 
         let new_dek = derive_index_dek(load_mek(&pending.new_source).map_err(rotation_err)?)
             .map_err(rotation_err)?;
@@ -1461,6 +1491,37 @@ struct RotationLedger {
 }
 
 impl RotationLedger {
+    /// The OLD (pre-rotation) key generation a `forward` / `cancel` ledger is
+    /// rotating away from — the single authority both the cancel driver
+    /// ([`AletheiaDB::cancel_pending_rotation`]) and startup keyring provisioning
+    /// ([`resolve_provisioned_key_version`]) resolve it from (Issue #3680).
+    ///
+    /// A forward rotation always targets `new_version = old_version + 1`
+    /// (`run_rotation`), and the currently CONFIGURED key still corresponds to the
+    /// OLD generation while a rotation is pending (the provider switch happens
+    /// only after a rotation COMPLETES). So the old generation is `new_version - 1`
+    /// for ANY rotation of the database, not only the first `v1 → v2` one. Floored
+    /// at the base version so a malformed/legacy `target_version=0` ledger can
+    /// never resolve to a nonexistent generation.
+    ///
+    /// Only meaningful for `Forward` / `Cancel`. An `Enable` ledger records
+    /// `new_version == BASE` (no prior generation) and a `Disable` ledger records
+    /// the CURRENT to-be-retired version verbatim (see
+    /// [`RotationDirection::Disable`]) — neither is `old + 1`, so callers must
+    /// screen those directions out first (both do).
+    fn rotation_old_version(&self) -> u32 {
+        debug_assert!(
+            matches!(
+                self.direction,
+                RotationDirection::Forward | RotationDirection::Cancel
+            ),
+            "rotation_old_version is only defined for forward/cancel ledgers",
+        );
+        self.new_version
+            .saturating_sub(1)
+            .max(ENC_INDEX_KEY_VERSION_V1)
+    }
+
     /// The default PR1 cross-layer plan: index and checkpoint re-key through
     /// the index engine (checkpoints ride the index DEK), while WAL and cold
     /// are out of scope and recorded `Skipped`.
@@ -2059,9 +2120,9 @@ pub(crate) fn resolve_provisioned_key_version(
     let ledger_path = rotation_state_dir.join("rotation.state");
     if let Some(ledger) = read_rotation_state_at(&ledger_path)? {
         let version = match ledger.direction {
-            RotationDirection::Forward | RotationDirection::Cancel => {
-                ledger.new_version.saturating_sub(1).max(BASE)
-            }
+            // Issue #3680: shared with the cancel driver so the two can never
+            // disagree about which generation a pending rotation came from.
+            RotationDirection::Forward | RotationDirection::Cancel => ledger.rotation_old_version(),
             // A disable ledger's `new_version` is the CURRENT (to-be-retired)
             // key version protecting on-disk ciphertext, not `old + 1`; an
             // enable ledger's is `BASE`. Both provision to `new_version` as-is.
@@ -4497,6 +4558,175 @@ mod tests {
         // Cancel with no pending rotation is NotInProgress.
         let err = db.cancel_pending_rotation().unwrap_err();
         assert!(err.to_string().contains("no key rotation is in progress"));
+    }
+
+    // ── Issue #3680: cancel generalizes to arbitrary version transitions ──
+
+    /// The pure version arithmetic: a `vN → vN+1` ledger resolves its old
+    /// generation to `vN` for ANY N, and a degenerate `target_version` can never
+    /// resolve below the base generation.
+    #[test]
+    fn rotation_old_version_generalizes_beyond_v1() {
+        let source = KeyProviderConfig::File {
+            path: "/nonexistent/new.key".into(),
+        };
+        for target in 2u32..=8 {
+            let forward = super::RotationLedger::index_scope(
+                RotationDirection::Forward,
+                target,
+                source.clone(),
+            );
+            assert_eq!(
+                forward.rotation_old_version(),
+                target - 1,
+                "a v{} → v{target} rotation rolls back to v{}",
+                target - 1,
+                target - 1,
+            );
+            let cancel = super::RotationLedger::index_scope(
+                RotationDirection::Cancel,
+                target,
+                source.clone(),
+            );
+            assert_eq!(cancel.rotation_old_version(), target - 1);
+        }
+        // Degenerate/legacy target versions floor at the base generation rather
+        // than underflowing to a nonexistent one.
+        for target in [0u32, 1] {
+            let ledger = super::RotationLedger::index_scope(
+                RotationDirection::Forward,
+                target,
+                source.clone(),
+            );
+            assert_eq!(ledger.rotation_old_version(), ENC_INDEX_KEY_VERSION_V1);
+        }
+    }
+
+    /// A cancel of the SECOND rotation (`v2 → v3`) must roll back to `v2`, not to
+    /// the base `v1`. Before Issue #3680 the old generation was hard-coded to the
+    /// base version, so the un-migrated `v2` files matched no live keyring
+    /// generation and the reverse pass could not put the dataset back.
+    #[test]
+    fn cancel_pending_rotation_rolls_back_to_the_ledgers_old_generation_not_v1() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let key_a = root.join("a.key");
+        let key_b = root.join("b.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&key_a).unwrap();
+        crate::encryption::FileKeyProvider::generate_key_file(&key_b).unwrap();
+        let indexes_dir = root.join("data").join("indexes");
+
+        let db = build_db_index_only(root, &key_a);
+        seed(&db);
+        let manager = db.persistence_manager.clone().unwrap();
+        let keyring = manager.keyring().unwrap();
+        let cipher_a = std::sync::Arc::clone(
+            EncryptionManager::from_config(&EncryptionConfig::file_based(&key_a))
+                .unwrap()
+                .index_cipher(),
+        );
+        let cipher_b = std::sync::Arc::clone(
+            EncryptionManager::from_config(&EncryptionConfig::file_based(&key_b))
+                .unwrap()
+                .index_cipher(),
+        );
+
+        // Put the database in the state a FIRST completed rotation leaves behind:
+        // every index file stamped v2, the keyring current at v2. (Re-stamped
+        // under the same key A, which is what `enc_cfg` still names — exactly the
+        // post-rotation, pre-provider-switch state the cancel path sees.)
+        keyring.add_generation(2, std::sync::Arc::clone(&cipher_a));
+        let to_v2 = IndexKeyRotation::new(
+            manager.indexes_path(),
+            keyring.clone(),
+            1,
+            std::sync::Arc::clone(&cipher_a),
+            2,
+            std::sync::Arc::clone(&cipher_a),
+        );
+        to_v2.re_encrypt(&mut |_| true).unwrap();
+        to_v2.complete().unwrap();
+        assert_eq!(keyring.current_version(), 2);
+        assert!(assert_all_at_version(&indexes_dir, 2) > 0);
+
+        // Now interrupt a SECOND rotation, v2 → v3, to key B: migrate some files
+        // and leave the rest at v2, with a durable forward ledger.
+        keyring.add_generation(3, std::sync::Arc::clone(&cipher_b));
+        let to_v3 = IndexKeyRotation::new(
+            manager.indexes_path(),
+            keyring.clone(),
+            2,
+            std::sync::Arc::clone(&cipher_a),
+            3,
+            std::sync::Arc::clone(&cipher_b),
+        );
+        let mut n = 0;
+        to_v3
+            .re_encrypt(&mut |_| {
+                n += 1;
+                n < 2
+            })
+            .unwrap();
+        super::write_rotation_state(
+            &manager,
+            3,
+            &KeyProviderConfig::File {
+                path: key_b.clone(),
+            },
+            super::RotationDirection::Forward,
+        )
+        .unwrap();
+
+        let report = db.cancel_pending_rotation().expect("cancel must succeed");
+        assert_eq!(report.old_version, 3, "cancel retires the v3 generation");
+        assert_eq!(
+            report.new_version, 2,
+            "cancel rolls back to the ledger's old generation (v2), not the base v1",
+        );
+        assert!(!root.join("data").join("rotation.state").exists());
+        // The whole dataset is uniformly back at v2 — no file stranded at v3, and
+        // none wrongly re-stamped down to v1.
+        assert!(assert_all_at_version(&indexes_dir, 2) > 0);
+        assert_eq!(
+            keyring.current_version(),
+            2,
+            "the new generation is retired from the live keyring",
+        );
+    }
+
+    /// An enable/disable migration ledger rides the same file but is NOT a
+    /// rotation — its `new_version` is not `old + 1`, so cancelling it as one
+    /// would target a bogus generation. It is refused instead.
+    #[test]
+    fn cancel_pending_rotation_refuses_enable_and_disable_ledgers() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let key = root.join("k.key");
+        crate::encryption::FileKeyProvider::generate_key_file(&key).unwrap();
+        let db = build_db_index_only(root, &key);
+        seed(&db);
+        let manager = db.persistence_manager.clone().unwrap();
+
+        for direction in [
+            super::RotationDirection::Enable,
+            super::RotationDirection::Disable,
+        ] {
+            super::write_rotation_state(
+                &manager,
+                4,
+                &KeyProviderConfig::File { path: key.clone() },
+                direction,
+            )
+            .unwrap();
+            let err = db.cancel_pending_rotation().unwrap_err();
+            assert!(
+                err.to_string().contains("no key rotation is in progress"),
+                "a {direction:?} ledger must not be cancelled as a rotation, got: {err}",
+            );
+            // Refused, and the migration ledger is left intact for its own engine.
+            assert!(root.join("data").join("rotation.state").exists());
+        }
+        super::clear_rotation_state(&manager);
     }
 
     // ── P2.2: audit failure carries a category, not raw error text ────
