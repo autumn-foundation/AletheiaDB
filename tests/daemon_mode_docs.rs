@@ -51,84 +51,93 @@ fn daemon_guide_has_a_windows_codex_setup() {
     );
 }
 
-/// The client-configuration blocks must be **correct**, not merely present:
-/// they are copy-pasted verbatim, and a wrong env-var name silently leaves every
-/// client in embedded mode — the divergent-database failure this feature exists
-/// to retire. Parsed and checked against the constants the binary actually reads.
-#[test]
-fn the_documented_client_config_names_the_env_var_the_binary_reads() {
-    let content = guide();
+/// Checks that need the proxy's own constants, so they can only compile when the
+/// MCP surface is. Gated as a module (rather than as `#![cfg]` on the file) so
+/// the feature-independent documentation assertions above keep running in every
+/// build — including the `just check-features` matrix that caught this.
+#[cfg(feature = "mcp-server")]
+mod proxy_constants {
+    use super::guide;
 
-    let blocks: Vec<String> = fenced_block(&content, "json")
-        .into_iter()
-        .filter(|block| block.contains("mcpServers"))
-        .collect();
-    assert!(
-        !blocks.is_empty(),
-        "the guide has at least one JSON mcpServers block"
-    );
+    /// The client-configuration blocks must be **correct**, not merely present:
+    /// they are copy-pasted verbatim, and a wrong env-var name silently leaves every
+    /// client in embedded mode — the divergent-database failure this feature exists
+    /// to retire. Parsed and checked against the constants the binary actually reads.
+    #[test]
+    fn the_documented_client_config_names_the_env_var_the_binary_reads() {
+        let content = guide();
 
-    // EVERY documented block must be correct — a reader copies whichever one
-    // they reach first.
-    for block in &blocks {
-        let parsed: serde_json::Value = serde_json::from_str(block).unwrap_or_else(|e| {
-            panic!("a documented client config is not valid JSON ({e}): {block}")
-        });
-        let server = find_mcp_server(&parsed)
-            .unwrap_or_else(|| panic!("no mcpServers.aletheiadb entry in: {parsed}"));
+        let blocks: Vec<String> = fenced_block(&content, "json")
+            .into_iter()
+            .filter(|block| block.contains("mcpServers"))
+            .collect();
         assert!(
-            server["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("aletheia-mcp")),
-            "the documented command runs the proxy binary: {parsed}"
+            !blocks.is_empty(),
+            "the guide has at least one JSON mcpServers block"
         );
+
+        // EVERY documented block must be correct — a reader copies whichever one
+        // they reach first.
+        for block in &blocks {
+            let parsed: serde_json::Value = serde_json::from_str(block).unwrap_or_else(|e| {
+                panic!("a documented client config is not valid JSON ({e}): {block}")
+            });
+            let server = find_mcp_server(&parsed)
+                .unwrap_or_else(|| panic!("no mcpServers.aletheiadb entry in: {parsed}"));
+            assert!(
+                server["command"]
+                    .as_str()
+                    .is_some_and(|command| command.contains("aletheia-mcp")),
+                "the documented command runs the proxy binary: {parsed}"
+            );
+            assert!(
+                server["env"]
+                    .get(aletheiadb::mcp::proxy::DAEMON_URL_ENV)
+                    .is_some(),
+                "the documented config sets {} — the variable the binary reads: {parsed}",
+                aletheiadb::mcp::proxy::DAEMON_URL_ENV
+            );
+        }
+
+        // The Codex block is TOML, checked the same way by key presence.
+        let toml_block = fenced_block(&content, "toml")
+            .into_iter()
+            .find(|block| block.contains("mcp_servers"))
+            .expect("the guide has a Codex TOML block");
         assert!(
-            server["env"]
-                .get(aletheiadb::mcp::proxy::DAEMON_URL_ENV)
-                .is_some(),
-            "the documented config sets {} — the variable the binary reads: {parsed}",
+            toml_block.contains(aletheiadb::mcp::proxy::DAEMON_URL_ENV),
+            "the Codex config sets {}: {toml_block}",
             aletheiadb::mcp::proxy::DAEMON_URL_ENV
         );
     }
 
-    // The Codex block is TOML, checked the same way by key presence.
-    let toml_block = fenced_block(&content, "toml")
-        .into_iter()
-        .find(|block| block.contains("mcp_servers"))
-        .expect("the guide has a Codex TOML block");
-    assert!(
-        toml_block.contains(aletheiadb::mcp::proxy::DAEMON_URL_ENV),
-        "the Codex config sets {}: {toml_block}",
-        aletheiadb::mcp::proxy::DAEMON_URL_ENV
-    );
-}
-
-/// Locate the `mcpServers.aletheiadb` entry, at the document root or nested
-/// under `mcp_client_config` (the shape `aletheia daemon status --json` emits).
-fn find_mcp_server(value: &serde_json::Value) -> Option<&serde_json::Value> {
-    value
-        .get("mcpServers")
-        .or_else(|| value.get("mcp_client_config")?.get("mcpServers"))?
-        .get("aletheiadb")
-}
-
-/// Extract the bodies of fenced code blocks with the given language tag.
-fn fenced_block(content: &str, language: &str) -> Vec<String> {
-    let fence = format!("```{language}");
-    let mut blocks = Vec::new();
-    let mut rest = content;
-    while let Some(start) = rest.find(&fence) {
-        let after = &rest[start + fence.len()..];
-        let after = after.strip_prefix('\n').unwrap_or(after);
-        match after.find("```") {
-            Some(end) => {
-                blocks.push(after[..end].to_string());
-                rest = &after[end + 3..];
-            }
-            None => break,
-        }
+    /// Locate the `mcpServers.aletheiadb` entry, at the document root or nested
+    /// under `mcp_client_config` (the shape `aletheia daemon status --json` emits).
+    fn find_mcp_server(value: &serde_json::Value) -> Option<&serde_json::Value> {
+        value
+            .get("mcpServers")
+            .or_else(|| value.get("mcp_client_config")?.get("mcpServers"))?
+            .get("aletheiadb")
     }
-    blocks
+
+    /// Extract the bodies of fenced code blocks with the given language tag.
+    fn fenced_block(content: &str, language: &str) -> Vec<String> {
+        let fence = format!("```{language}");
+        let mut blocks = Vec::new();
+        let mut rest = content;
+        while let Some(start) = rest.find(&fence) {
+            let after = &rest[start + fence.len()..];
+            let after = after.strip_prefix('\n').unwrap_or(after);
+            match after.find("```") {
+                Some(end) => {
+                    blocks.push(after[..end].to_string());
+                    rest = &after[end + 3..];
+                }
+                None => break,
+            }
+        }
+        blocks
+    }
 }
 
 /// Shutdown semantics are explicit (an acceptance criterion in its own right).
