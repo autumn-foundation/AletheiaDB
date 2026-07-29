@@ -420,17 +420,40 @@ mod tests {
     }
 
     /// A process that stays alive long enough to act as a lock owner.
+    ///
+    /// Windows uses `ping`, not `timeout`: `timeout` refuses to run when stdin
+    /// is not a console ("ERROR: Input redirection is not supported") and exits
+    /// immediately, so under a test harness it yields an already-dead pid — which
+    /// makes every liveness assertion here fail while pointing the blame at the
+    /// lock. `ping -n` sleeps between echoes and needs no console.
     fn spawn_live_process() -> std::process::Child {
         let (program, args): (&str, Vec<&str>) = if cfg!(windows) {
-            ("cmd", vec!["/C", "timeout", "/T", "30"])
+            // 31 echoes, ~1s apart => ~30s of life.
+            ("ping", vec!["-n", "31", "127.0.0.1"])
         } else {
             ("sleep", vec!["30"])
         };
-        std::process::Command::new(program)
+        let mut child = std::process::Command::new(program)
             .args(args)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .expect("spawn a live process")
+            .unwrap_or_else(|e| panic!("spawn `{program}` as a live lock owner: {e}"));
+
+        // Confirm the helper is actually running before any test depends on it.
+        // Checked with `try_wait` rather than `pid_is_alive` so this stays
+        // independent of the function under test: if a future platform quirk
+        // kills the helper on startup, the failure says so instead of being
+        // misread as a broken lock.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        match child.try_wait() {
+            Ok(None) => child,
+            Ok(Some(status)) => panic!(
+                "the `{program}` test helper exited immediately with {status}; it cannot \
+                 stand in for a live lock owner on this platform"
+            ),
+            Err(e) => panic!("cannot determine whether the `{program}` helper is running: {e}"),
+        }
     }
 }
