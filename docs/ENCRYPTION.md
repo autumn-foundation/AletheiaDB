@@ -666,6 +666,16 @@ aletheia keys rotate --cancel
 A successful start prints an old→new key-version summary and per-file counts;
 progress is written to **stderr** so it can be separated from the report.
 
+`--cancel` rolls the dataset back to the key generation the interrupted
+rotation *started from*, read out of the durable rotation ledger — so it is
+correct for the second, third, or n-th rotation of a database (a `v2 → v3`
+rotation cancels back to `v2`), not just the first `v1 → v2` one (Issue #3680).
+Cancelling reports the retired and surviving key versions in the same old→new
+summary. A pending `enable`/`disable` **encryption migration** is not a
+rotation and is not cancellable this way — `--cancel` reports `no key rotation
+is in progress` and leaves the migration ledger untouched for its own
+resume path.
+
 > **Important — cross-layer refusal.** The shipped engine performs an
 > *index-only* rotation and **safely refuses** while any *other* at-rest layer
 > (WAL, cold storage, checkpoint) is encrypted under the same master key —
