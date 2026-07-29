@@ -265,6 +265,107 @@ impl axum::extract::FromRequestParts<AutumnAppState> for ServerSecurityState {
     }
 }
 
+/// The subset of the app-builder surface [`apply_security`] needs, implemented
+/// by both the [`TestApp`] proving ground and autumn's production
+/// [`AppBuilder`](autumn_web::app::AppBuilder).
+///
+/// autumn exposes the same method *names* on both types but they share no
+/// trait, so the security stack could otherwise only be applied to one of them.
+/// Routing it through this trait means the daemon (Issue #2905) and the parity
+/// suite mount **the identical layer stack** — a security gate that only the
+/// test harness applies would be worse than no abstraction at all.
+pub trait SecurableApp: Sized {
+    /// Gate the whole `/mcp` endpoint with `layer` (autumn's `secure_mcp`).
+    #[must_use]
+    fn secure_mcp_endpoint<L>(self, layer: L) -> Self
+    where
+        L: tower::Layer<axum::routing::Route> + Clone + Send + Sync + 'static,
+        L::Service: tower::Service<
+                axum::http::Request<axum::body::Body>,
+                Response = axum::http::Response<axum::body::Body>,
+                Error = std::convert::Infallible,
+            > + Clone
+            + Send
+            + Sync
+            + 'static,
+        <L::Service as tower::Service<axum::http::Request<axum::body::Body>>>::Future:
+            Send + 'static;
+
+    /// Mount an app-wide tower layer.
+    #[must_use]
+    fn app_layer<L: autumn_web::app::IntoAppLayer>(self, layer: L) -> Self;
+
+    /// Apply the app-wide request-body cap.
+    ///
+    /// autumn mounts its own global `DefaultBodyLimit` from
+    /// `security.upload.max_request_size_bytes`, which overrides any outer
+    /// layer — so the cap must be set through *config*, not `.layer()`. The two
+    /// implementations differ only in how they reach that config.
+    #[must_use]
+    fn with_body_limit(self, max_request_body_bytes: usize) -> Self;
+}
+
+impl SecurableApp for TestApp {
+    fn secure_mcp_endpoint<L>(self, layer: L) -> Self
+    where
+        L: tower::Layer<axum::routing::Route> + Clone + Send + Sync + 'static,
+        L::Service: tower::Service<
+                axum::http::Request<axum::body::Body>,
+                Response = axum::http::Response<axum::body::Body>,
+                Error = std::convert::Infallible,
+            > + Clone
+            + Send
+            + Sync
+            + 'static,
+        <L::Service as tower::Service<axum::http::Request<axum::body::Body>>>::Future:
+            Send + 'static,
+    {
+        self.secure_mcp(layer)
+    }
+
+    fn app_layer<L: autumn_web::app::IntoAppLayer>(self, layer: L) -> Self {
+        self.layer(layer)
+    }
+
+    fn with_body_limit(self, max_request_body_bytes: usize) -> Self {
+        let mut autumn_cfg = AutumnConfig::default();
+        autumn_cfg.security.upload.max_request_size_bytes = max_request_body_bytes;
+        self.config(autumn_cfg)
+    }
+}
+
+impl SecurableApp for autumn_web::app::AppBuilder {
+    fn secure_mcp_endpoint<L>(self, layer: L) -> Self
+    where
+        L: tower::Layer<axum::routing::Route> + Clone + Send + Sync + 'static,
+        L::Service: tower::Service<
+                axum::http::Request<axum::body::Body>,
+                Response = axum::http::Response<axum::body::Body>,
+                Error = std::convert::Infallible,
+            > + Clone
+            + Send
+            + Sync
+            + 'static,
+        <L::Service as tower::Service<axum::http::Request<axum::body::Body>>>::Future:
+            Send + 'static,
+    {
+        self.secure_mcp(layer)
+    }
+
+    fn app_layer<L: autumn_web::app::IntoAppLayer>(self, layer: L) -> Self {
+        self.layer(layer)
+    }
+
+    fn with_body_limit(self, _max_request_body_bytes: usize) -> Self {
+        // The production builder resolves config through a `ConfigLoader`
+        // (`crate::daemon::DaemonConfigLoader`), which sets the upload cap
+        // alongside host/port and the actuator hardening. Applying a second,
+        // conflicting `AutumnConfig` here would silently discard the operator's
+        // TOML/env layers, so this is deliberately a no-op.
+        self
+    }
+}
+
 /// Apply the security layer stack to the app builder (B4 wiring).
 ///
 /// **Seam (Lane A calls, Lane B fills).** Two mounts:
@@ -289,8 +390,12 @@ impl axum::extract::FromRequestParts<AutumnAppState> for ServerSecurityState {
 /// The per-query resource caps, in-flight guard, and cursor primitives are
 /// **state**, not layers — [`init_state`] installs them for the handlers to
 /// enforce per-request.
+///
+/// Generic over [`SecurableApp`] so the production daemon
+/// ([`crate::daemon::run_server`]) and the parity-tested proving ground mount
+/// the **identical** stack (Issue #2905).
 #[must_use]
-pub fn apply_security(app: TestApp, cfg: &SecurityConfig) -> TestApp {
+pub fn apply_security<A: SecurableApp>(app: A, cfg: &SecurityConfig) -> A {
     // 1. Custom /mcp gate (both modes; branches on mode internally), optionally
     //    fronted by the MCP-over-HTTP session concurrency budget (AC5). When a
     //    budget is set, a global concurrency limit is composed OUTSIDE the gate
@@ -298,8 +403,10 @@ pub fn apply_security(app: TestApp, cfg: &SecurityConfig) -> TestApp {
     //    MCP requests are processed concurrently, back-pressuring the rest.
     let mcp_auth = McpSecurityLayer::new(cfg.store.clone(), cfg.mode);
     let app = match concurrency::mcp_session_layer(cfg) {
-        Some(budget) => app.secure_mcp(ServiceBuilder::new().layer(budget).layer(mcp_auth)),
-        None => app.secure_mcp(mcp_auth),
+        Some(budget) => {
+            app.secure_mcp_endpoint(ServiceBuilder::new().layer(budget).layer(mcp_auth))
+        }
+        None => app.secure_mcp_endpoint(mcp_auth),
     };
 
     // 2. App-wide request-body cap (AC3 / #3108): reject an over-limit body with
@@ -310,17 +417,17 @@ pub fn apply_security(app: TestApp, cfg: &SecurityConfig) -> TestApp {
     //    it from `max_request_body_bytes` so the operator-configurable cap
     //    actually takes effect on the assembled surface. (autumn merges `/mcp`
     //    after this middleware, so `/mcp` keeps its own built-in 2 MiB limit —
-    //    the gate buffers to that bound independently.)
-    let mut autumn_cfg = AutumnConfig::default();
-    autumn_cfg.security.upload.max_request_size_bytes = cfg.max_request_body_bytes;
-    let app = app.config(autumn_cfg);
+    //    the gate buffers to that bound independently.) The production builder
+    //    routes the same value through its `ConfigLoader` instead — see
+    //    [`SecurableApp::with_body_limit`].
+    let app = app.with_body_limit(cfg.max_request_body_bytes);
 
     // 3. App-wide HTTP concurrency budget (AC1), default-off. When enabled, a
     //    global concurrency limit back-pressures requests over the cap surface-
     //    wide (queue, not reject — the load-shedding 503 path is the separate
     //    per-query `InFlightLimiter`).
     let app = match concurrency::app_concurrency_layer(cfg) {
-        Some(layer) => app.layer(layer),
+        Some(layer) => app.app_layer(layer),
         None => app,
     };
 
@@ -333,7 +440,7 @@ pub fn apply_security(app: TestApp, cfg: &SecurityConfig) -> TestApp {
         Some(rl) => {
             let (layer, gc) = rl.into_parts();
             let _gc_task = rate_limit::spawn_gc_task(gc, rate_limit::RATE_LIMIT_GC_INTERVAL);
-            app.layer(layer)
+            app.app_layer(layer)
         }
         None => app,
     }

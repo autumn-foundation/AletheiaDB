@@ -24,15 +24,21 @@ cargo run --example demo
 ```
 
 Time-to-first-query is a few seconds (the one-time `cargo build` is separate).
-The three entry channels, each with its exact commands:
+The four entry channels, each with its exact commands:
 
 | Channel | Command | Server? | API key? |
 |---------|---------|---------|----------|
 | **Embedded (Rust)** | `cargo run --example demo` | No | No |
 | **MCP (agent-issued)** | `export ALETHEIADB_BOOTSTRAP_ADMIN_KEY="$(openssl rand -base64 32)"`<br>`cargo run --bin aletheia-mcp --features mcp-server` | Yes (stdio) | Yes |
 | **HTTP server** | `export ALETHEIADB_BOOTSTRAP_ADMIN_KEY="$(openssl rand -base64 32)"`<br>`cargo run --bin aletheia-server --features http-server` | Yes | Yes |
+| **Daemon (HTTP + MCP, one owner)** | `cargo install --path crates/aletheia-server`<br>`ALETHEIADB_DATA_DIR=~/.aletheiadb aletheia daemon start` | Yes | Yes |
 
-Authentication is **on by default** for both servers — see the
+Use the **daemon** when more than one agent session must share state: the
+embedded MCP channel above gives each client session its own database, whereas
+one daemon owns the files and every client — CLI, HTTP, MCP — talks to it. See
+the [daemon-mode guide](docs/guides/daemon-mode.md).
+
+Authentication is **on by default** for every server — see the
 [Security Quickstart](docs/guides/security-quickstart.md) for key setup and the
 explicit anonymous opt-in. Full walkthrough, sample output, and measured
 timings: **[60-Second Quickstart guide →](docs/guides/quickstart.md)**

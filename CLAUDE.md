@@ -308,6 +308,45 @@ ALETHEIADB_BOOTSTRAP_ADMIN_KEY="$(openssl rand -base64 32)" \
 ALETHEIADB_AUTH_MODE=anonymous cargo run --bin aletheia-mcp --features mcp-server
 ```
 
+**Daemon-owned mode (Issue #2905)**: AletheiaDB is single-writer, but MCP
+clients spawn one server process per session — so without a daemon each session
+either gets its own **ephemeral** database or several processes open the **same**
+data directory as unsupported concurrent writers (on Windows the live
+`aletheia-mcp.exe` handles also break `cargo install --force` with
+`Access is denied. (os error 5)`). `aletheia daemon start` makes **one**
+`aletheia-daemon` process the local owner of the WAL, indexes, and recovery,
+serving REST + **MCP over Streamable HTTP at `/mcp`** + OpenAPI + `/metrics` from
+one autumn-web app (the routes are shared with the parity-tested proving ground
+via `aletheia_server::all_routes`, and the same `/mcp` security gate applies:
+uniform `UNAUTHENTICATED` 401, per-tool RBAC 403, unknown tool names refused
+fail-closed). It claims `{data_dir}/daemon.lock`, so a second daemon on the same
+directory **refuses to start** (a lock from a crashed daemon is reclaimed by
+liveness, not deleted blindly). MCP clients that speak HTTP connect to `/mcp`
+directly; command-based clients run `aletheia-mcp` with `ALETHEIADB_DAEMON_URL`
+(or `--daemon-url`) set, which turns it into a **stdio↔HTTP relay** that forwards
+JSON-RPC frames verbatim and **never calls `open_from_env()` or opens local
+storage** — so N sessions share one database. The relay makes no access-control
+decisions (it forwards `ALETHEIADB_MCP_API_KEY` as `Authorization: Bearer`; the
+daemon decides), never silently falls back to an embedded database when the
+daemon is unreachable (it answers a JSON-RPC transport error naming
+`aletheia daemon status`), and exits 0 on stdin EOF when its client disconnects —
+the daemon is the long-lived process. Omitting the daemon URL preserves the
+**embedded** stdio mode exactly. `aletheia daemon start --surface legacy` keeps
+launching the older HTTP-only `aletheia-server`; `aletheia daemon status [--json]`
+reports liveness, the base URL, the `/mcp` endpoint, and a paste-ready
+`mcpServers` client config. Liveness/stop work on Windows (`tasklist` filtered on
+pid **and** image name and parsed by column, `taskkill`), Linux (`/proc`), and
+other Unix (`kill(pid,0)` + `ps`). The ownership claim is honored by every
+storage-opening process — the CLI, embedded `aletheia-mcp`, and `aletheia-server`
+all refuse a directory a live daemon owns — and is resolved from
+`ALETHEIADB_DATA_DIR` **or** an `ALETHEIADB_CONFIG` TOML's `persistence.data_dir`.
+It is advisory (pid-file based, exclusively created and ownership-checked on
+release), not OS-enforced. The daemon binary lives in the `aletheia-server`
+workspace member: `cargo install --path crates/aletheia-server`. Anonymous auth
+on a non-loopback bind is **refused** unless
+`ALETHEIADB_ALLOW_ANONYMOUS_NETWORK=1`. See
+[docs/guides/daemon-mode.md](docs/guides/daemon-mode.md).
+
 **Available Tools:**
 | Category | Tools |
 |----------|-------|
@@ -1564,6 +1603,7 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 - **[docs/guides/trust-propagation.md](docs/guides/trust-propagation.md)** - Computed confidence over lineage: combinators, per-label policy, trust_breakdown explainability, retraction/valid-time rules (Issue #3382)
 - **[docs/guides/namespaces-guide.md](docs/guides/namespaces-guide.md)** - Agent-scoped namespaces: shared knowledge base + private agent scratch, isolated-by-default read scoping (Issue #3349)
 - **[docs/guides/multi-tenancy.md](docs/guides/multi-tenancy.md)** - Multi-tenant isolation: one fully-separate `AletheiaDB` per tenant, per-tenant resource quotas + O(1) usage accounting, hard data isolation by construction (Issue #3365)
+- **[docs/guides/daemon-mode.md](docs/guides/daemon-mode.md)** - Daemon-owned database: one `aletheia-daemon` process serving REST + MCP-over-HTTP, `ALETHEIADB_DAEMON_URL` stdio relays, Windows/Codex client setup (Issue #2905)
 
 ### Architecture Decision Records (ADRs)
 See `docs/adr/` for all architectural decisions.

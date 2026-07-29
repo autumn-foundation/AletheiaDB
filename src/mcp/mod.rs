@@ -31,6 +31,7 @@ mod budget;
 mod cursor;
 mod error;
 mod limits;
+pub mod proxy;
 mod server;
 mod tools;
 
