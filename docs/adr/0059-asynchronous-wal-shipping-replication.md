@@ -65,6 +65,20 @@ crash recovery, and the reason this is a distinct wrapper
 (`src/storage/replication/apply.rs`) rather than a direct call into the
 recovery module.
 
+Frame *submission* alone does not deliver "never torn", because the replay
+engine walks a resolved frame operation by operation while current-state reads
+take no lock (Issue #3788). The applier therefore also opens a **publish
+window** on a per-replica current-state apply gate
+(`src/storage/current/apply_gate.rs`) around each batch's replay, so a
+concurrent point lookup resolves to the state before the batch or after it,
+never inside it. The gate is disarmed on a primary — a predictable branch, no
+lock, no write-path cost — and armed only by
+`start_replication`/`bootstrap_replica`; while armed it is a seqlock (reader
+loads only, no atomic read-modify-write) so a read-scale-out replica's reader
+fan-out still scales with cores. Bulk scans and iterators are deliberately left
+ungated: `DashMap` iteration was never a point-in-time snapshot even on a
+primary, and the bi-temporal reads already provide one.
+
 ### Manual promotion only
 
 `AletheiaDB::promote_to_primary()` stops the applier, seeds the local WAL's

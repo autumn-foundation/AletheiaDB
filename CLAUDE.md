@@ -1164,7 +1164,18 @@ read-only — every other write/admin surface rejects with a structured,
 non-retriable `FAILED_PRECONDITION`
 (`details: {node_role: "replica", reason: "read_only_replica"}`) — and apply
 only whole commit frames, so reads are always a consistent, possibly-stale
-(never torn) snapshot at transaction time ≤ the replica's applied LSN; RPO
+(never torn) snapshot at transaction time ≤ the replica's applied LSN. Whole-frame
+*submission* is only half of "never torn": the replay engine walks a frame
+operation by operation, so a replica also arms a **current-state apply gate**
+(Issue #3788) that the applier publishes each batch inside — a point lookup
+(`get_node`/`get_edge`, edge endpoint/label accessors, adjacency lookups,
+degrees) sees the state before the batch or after it, never mid-apply. The gate
+is disarmed on a primary (a predictable branch, no lock) and re-disarmed once
+`promote_to_primary()` joins the applier; while armed it is a seqlock (loads
+only, no atomic RMW) so replica reader fan-out still scales. Bulk scans and
+iterators are deliberately NOT gated (`DashMap` iteration was never a
+point-in-time snapshot even on a primary) — use the bi-temporal reads for a true
+snapshot. RPO
 under primary loss equals replication lag at failure, surfaced via
 `replication_progress()`/`database_stats`. Manual failover only — no
 automatic election or fencing (split-brain risk if an old primary is not

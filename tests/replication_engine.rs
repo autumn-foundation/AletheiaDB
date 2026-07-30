@@ -443,9 +443,17 @@ fn torn_frame_safety_never_exposes_a_partial_transaction() {
     while Instant::now() < deadline {
         let a_present = replica.get_node(a).is_ok();
         let b_present = replica.get_node(b).is_ok();
-        assert_eq!(
-            a_present, b_present,
-            "the two nodes of one atomic transaction must appear together, never one without the other"
+        // `a` is written before `b` inside the frame, and the two reads are two
+        // points in time, so exactly three outcomes are admissible:
+        // (false,false), (false,true) -- the apply landed between the reads --
+        // and (true,true). `(true,false)` is the one that cannot happen under an
+        // atomic apply: once `a` is visible the whole frame has been published,
+        // so `b`, read strictly later, must be visible too. Observing it means
+        // the reader saw real intermediate state (Issue #3788).
+        assert!(
+            !a_present || b_present,
+            "the two nodes of one atomic transaction must appear together: \
+             saw a_present={a_present} b_present={b_present}"
         );
         if a_present {
             // The edge map (a direct, lock-synchronized lookup -- unlike the
@@ -753,4 +761,122 @@ fn stats_report_entries_behind_while_pending_then_zero_once_converged() {
             .entries_behind,
         Some(0)
     );
+}
+
+// ---------------------------------------------------------------------------
+// 10. Torn-frame safety under sustained load (Issue #3788)
+// ---------------------------------------------------------------------------
+
+/// The single-transaction torn-frame test above observes one commit band. This
+/// one holds the same invariant under *sustained* concurrent load: a stream of
+/// multi-op transactions applying continuously while several reader threads
+/// hammer the replica's current-state surface.
+///
+/// The invariant is per-transaction atomicity of visibility. Every transaction
+/// writes node `a`, then node `b`, then the edge joining them. Because `a` is
+/// published first, seeing `a` implies the whole frame has been published, so
+/// `b` and the edge -- read strictly later -- must be visible too. `a` visible
+/// with `b` missing is the shape reported in #3788 and means the reader saw
+/// real intermediate state. The reverse (`b` visible, `a` not yet read as
+/// present) is ordinary staleness: the apply simply landed between two reads.
+#[test]
+fn torn_frame_safety_holds_under_sustained_concurrent_load() {
+    let (_primary_dir, primary) = build_durable_primary();
+    let primary = Arc::new(primary);
+
+    const PAIRS: usize = 60;
+
+    // Each transaction is a two-node + one-edge atomic unit.
+    let mut pairs = Vec::with_capacity(PAIRS);
+    for i in 0..PAIRS {
+        let mut tx = primary.write_transaction().expect("begin tx");
+        let a = tx
+            .create_node("Person", props(&format!("A{i}")))
+            .expect("buffer a");
+        let b = tx
+            .create_node("Person", props(&format!("B{i}")))
+            .expect("buffer b");
+        let e = tx
+            .create_edge(a, b, "KNOWS", PropertyMapBuilder::new().build())
+            .expect("buffer edge");
+        tx.commit().expect("commit multi-op tx");
+        pairs.push((a, b, e));
+    }
+
+    let replica = Arc::new(AletheiaDB::new().expect("create replica"));
+    // Cap fetches at 2 entries: every band is split across polls, so the
+    // applier is publishing near-continuously for the whole run.
+    let source = Box::new(TornBatchSource {
+        inner: InProcessSource::new(Arc::clone(&primary)),
+        cap: 2,
+    });
+    replica
+        .start_replication(source, fast_opts())
+        .expect("start replication");
+
+    let pairs = Arc::new(pairs);
+    let stop = Arc::new(AtomicBool::new(false));
+    let violations = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let readers: Vec<_> = (0..4)
+        .map(|reader| {
+            let (replica, pairs, stop, violations) = (
+                Arc::clone(&replica),
+                Arc::clone(&pairs),
+                Arc::clone(&stop),
+                Arc::clone(&violations),
+            );
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Acquire) {
+                    for (i, (a, b, e)) in pairs.iter().enumerate() {
+                        // Read in publish order: a, then b, then the edge.
+                        let a_present = replica.get_node(*a).is_ok();
+                        if !a_present {
+                            continue;
+                        }
+                        if replica.get_node(*b).is_err() {
+                            violations.lock().expect("lock").push(format!(
+                                "reader {reader}: pair {i} torn -- first node visible, \
+                                 second node missing"
+                            ));
+                            return;
+                        }
+                        if replica.get_edge(*e).is_err() {
+                            violations.lock().expect("lock").push(format!(
+                                "reader {reader}: pair {i} nodes visible but edge missing"
+                            ));
+                            return;
+                        }
+                    }
+                }
+            })
+        })
+        .collect();
+
+    let converged = wait_until(Duration::from_secs(30), || {
+        pairs
+            .last()
+            .is_some_and(|(_, b, _)| replica.get_node(*b).is_ok())
+    });
+    stop.store(true, Ordering::Release);
+    for reader in readers {
+        reader.join().expect("reader thread");
+    }
+
+    let violations = violations.lock().expect("lock");
+    assert!(
+        violations.is_empty(),
+        "a replica read observed a partially-applied transaction: {violations:#?}"
+    );
+    assert!(
+        converged,
+        "the replica must eventually converge on every transaction"
+    );
+
+    // And the end state is complete, not merely untorn.
+    for (a, b, e) in pairs.iter() {
+        assert!(replica.get_node(*a).is_ok());
+        assert!(replica.get_node(*b).is_ok());
+        assert!(replica.get_edge(*e).is_ok());
+    }
 }

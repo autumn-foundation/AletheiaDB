@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
-
 ## [0.2.0] - 2026-07-30
 
 First crates.io release since 0.1.1. This release ships the trunk work
@@ -447,6 +445,39 @@ pre-v13 WAL tail is now refused on open (see On-disk format below).
 
 ### Fixed
 
+- Replica reads could observe a partially-applied transaction (#3788): the
+  asynchronous-replication applier selected whole `[BeginTx .. CommitTx]`
+  frames, but the replay engine then applied the selected frame *operation by
+  operation* into current-state storage, which reads do not lock. A read
+  landing inside that window could see one node of a two-node commit — a
+  referentially inconsistent view (a node whose sibling or edge endpoint did
+  not exist yet) returned with no error. The `never torn` half of the
+  replication consistency guarantee therefore did not hold for reads concurrent
+  with an apply.
+
+  A replica now arms a **current-state apply gate**; the applier publishes each
+  batch inside a window, so a gated read sees the state from before the batch or
+  after it, never inside it. Point lookups (`get_node`, `get_edge`, edge
+  endpoint/label accessors, adjacency lookups, degrees) are atomic with respect
+  to an apply. The gate is **disarmed on a primary** (one predictable branch, no
+  lock), and is disarmed again after `promote_to_primary()` joins the applier;
+  while armed it uses a seqlock — loads only, no atomic read-modify-write — so
+  replica reader fan-out still scales across cores. Bulk scans and iterators are
+  deliberately not gated (`DashMap` iteration was never a point-in-time snapshot
+  even on a primary); use the bi-temporal reads for a true snapshot.
+
+  New coverage: `torn_frame_safety_holds_under_sustained_concurrent_load`
+  (`tests/replication_engine.rs`) holds the invariant under continuous apply with
+  concurrent readers, and `cargo bench --bench replication_apply_gate` quantifies
+  the read-path cost on both a primary and an idle replica. See
+  `docs/guides/replication-guide.md` (*Reader isolation during apply*).
+
+  `torn_frame_safety_never_exposes_a_partial_transaction`'s assertion was also
+  corrected: it compared the two nodes' presence for *equality*, which flags the
+  legitimate interleaving where the apply lands between the two reads (second
+  node visible, first not yet read as present). The invariant it should encode —
+  and now does — is one-directional: the *first*-written node visible with the
+  second missing is the torn shape; the reverse is ordinary staleness.
 - Multi-property temporal vector indexes now all receive write-path updates
   (Issue #450): with two or more temporal vector indexes enabled, node
   creates/updates index vectors into **every** matching property index,

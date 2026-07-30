@@ -779,6 +779,13 @@ harness = false
 path = "benches/derivation_lineage.rs"
 required-features = []
 
+# Replica apply gate (Issue #3788) - read-path cost of torn-read isolation
+[[bench]]
+name = "replication_apply_gate"
+harness = false
+path = "benches/replication_apply_gate.rs"
+required-features = []
+
 # Point-in-time restore (Issue #3374) - end-to-end PITR wall-clock (<30s metric)
 [[bench]]
 name = "pitr"
