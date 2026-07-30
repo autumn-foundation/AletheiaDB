@@ -125,6 +125,19 @@ pub(crate) fn apply_replica_batch(
     let initial_version_id = handles.version_id_gen.current();
     {
         let mut hist = handles.historical.write();
+        // Issue #3788: whole-frame SUBMISSION (the boundary search above) is
+        // not reader ISOLATION during apply. The replay below walks the frame
+        // operation by operation, and current-state reads take no lock, so
+        // without this gate a concurrent `get_node`/`get_edge` could observe
+        // one node of a two-node commit. The publish window makes every
+        // current-state mutation in this batch land atomically from a gated
+        // reader's point of view: they see the batch entirely or not at all.
+        //
+        // Lock order: taken strictly INSIDE `historical.write()`, and no gated
+        // reader ever acquires `historical`, so this adds no cycle. The gate is
+        // re-entrant for this thread, which matters because the replay engine's
+        // #3419 idempotency guards read current state from inside the window.
+        let _publish = handles.current.begin_apply_publish();
         // Detach the live temporal indexes before replaying, so the
         // "close previous version" hooks `replay_entries_into_storage_with_constraints`
         // triggers are no-ops during this pass -- exactly like startup replay
