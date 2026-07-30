@@ -62,6 +62,38 @@ pub enum RotationError {
         /// Comma-separated names of the still-encrypted layers (e.g. "wal").
         layers: String,
     },
+    /// A cancel (reverse) pass was requested for a rotation whose durable ledger
+    /// records one or more NON-index layers — the WAL, the cold (redb) tier, or
+    /// the crypto-shred subject keyring — as in flight or already re-keyed
+    /// (Issue #3783).
+    ///
+    /// The cancel driver only reverses the index/checkpoint tree; it has no
+    /// counterpart to the forward path's WAL / cold / subject-keyring passes. So
+    /// cancelling from such a ledger would roll the index back to the OLD key
+    /// while leaving those layers on the NEW one — a **split-key** database — and
+    /// then report success, telling the operator the new key was never adopted
+    /// and can be discarded. Discarding it would make every new-DEK WAL segment,
+    /// every re-wrapped cold value, and every re-wrapped per-subject DEK
+    /// permanently undecryptable.
+    ///
+    /// Refusing turns that silent corruption into a loud, actionable failure:
+    /// roll FORWARD with `keys rotate --resume` (the forward pass IS symmetric
+    /// and idempotent across every layer), keeping the old key available until it
+    /// completes. Mirrors the shape of
+    /// [`UnsupportedWhileEncryptedLayersPresent`](RotationError::UnsupportedWhileEncryptedLayersPresent).
+    #[error(
+        "cannot cancel this key rotation: it already moved other encrypted-at-rest \
+         layer(s) onto the new key ({layers}), and the cancel pass only rolls back \
+         the index/checkpoint layer — rolling back now would leave the database \
+         split-key (index on the old key, those layers on the new one). Roll \
+         FORWARD instead with `keys rotate --resume`, and keep the old key \
+         available until it completes; do NOT discard the new key"
+    )]
+    UnsupportedCancelWithRekeyedLayers {
+        /// Comma-separated `layer=status` pairs naming the layers that block the
+        /// cancel (e.g. `"wal=complete, cold=pending"`). Never key material.
+        layers: String,
+    },
     /// A rotation is already in progress.
     #[error("a key rotation is already in progress")]
     AlreadyInProgress,
