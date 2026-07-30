@@ -157,13 +157,24 @@ pre-v13 WAL tail is now refused on open (see On-disk format below).
   configured by `[replication]` / `ReplicationConfigBuilder`.
 - Replicas are strictly read-only: every write/admin surface rejects with a
   non-retriable `FAILED_PRECONDITION`
-  (`details: {node_role: "replica", reason: "read_only_replica"}`), and only
-  whole commit frames are applied, so reads are always a consistent
-  (possibly stale, never torn) snapshot. Manual failover via
+  (`details: {node_role: "replica", reason: "read_only_replica"}`). Only
+  **whole commit frames** are submitted for apply, so a replica never durably
+  stops mid-transaction and its state after each batch is a consistent,
+  possibly-stale snapshot. Manual failover via
   `promote_to_primary()` / `POST /admin/promote`; lag and RPO are surfaced by
   `replication_progress()` / `database_stats`. No automatic election or
   fencing. See [docs/guides/replication-guide.md](docs/guides/replication-guide.md)
   and [docs/guides/promotion-runbook.md](docs/guides/promotion-runbook.md).
+
+  **Known issue:** whole-frame submission is not the same as reader isolation
+  *during* an apply. `apply_replica_batch` replays a complete frame into the
+  current-state storage entry by entry while holding only the `historical`
+  write lock, which current-state reads do not take — so a read concurrent
+  with an in-progress apply can observe part of a transaction (one node of a
+  two-node commit). The window is microseconds and rarely observed, but
+  `torn_frame_safety_never_exposes_a_partial_transaction` does catch it
+  intermittently under CI load. Reads on an idle replica, and all durability
+  and post-promotion guarantees, are unaffected.
 
 #### Semantic analysis over bi-temporal history
 
