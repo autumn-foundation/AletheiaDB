@@ -7,70 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- Replica reads could observe a partially-applied transaction (#3788): the
-  asynchronous-replication applier selected whole `[BeginTx .. CommitTx]`
-  frames, but the replay engine then applied the selected frame *operation by
-  operation* into current-state storage, which reads do not lock. A read
-  landing inside that window could see one node of a two-node commit — a
-  referentially inconsistent view (a node whose sibling or edge endpoint did
-  not exist yet) returned with no error. The `never torn` half of the
-  replication consistency guarantee therefore did not hold for reads concurrent
-  with an apply.
-
-  A replica now arms a **current-state apply gate**; the applier publishes each
-  batch inside a window, so a gated read sees the state from before the batch or
-  after it, never inside it. Point lookups (`get_node`, `get_edge`, edge
-  endpoint/label accessors, adjacency lookups, degrees) are atomic with respect
-  to an apply. The gate is **disarmed on a primary** (one predictable branch, no
-  lock), and is disarmed again after `promote_to_primary()` joins the applier;
-  while armed it uses a seqlock — loads only, no atomic read-modify-write — so
-  replica reader fan-out still scales across cores. Bulk scans and iterators are
-  deliberately not gated (`DashMap` iteration was never a point-in-time snapshot
-  even on a primary); use the bi-temporal reads for a true snapshot.
-
-  New coverage: `torn_frame_safety_holds_under_sustained_concurrent_load`
-  (`tests/replication_engine.rs`) holds the invariant under continuous apply with
-  concurrent readers, and `cargo bench --bench replication_apply_gate` quantifies
-  the read-path cost on both a primary and an idle replica. See
-  `docs/guides/replication-guide.md` (*Reader isolation during apply*).
-
-  `torn_frame_safety_never_exposes_a_partial_transaction`'s assertion was also
-  corrected: it compared the two nodes' presence for *equality*, which flags the
-  legitimate interleaving where the apply lands between the two reads (second
-  node visible, first not yet read as present). The invariant it should encode —
-  and now does — is one-directional: the *first*-written node visible with the
-  second missing is the torn shape; the reverse is ordinary staleness.
-
-### Added
-
-- Daemon-owned database for MCP clients (#2905): a new `aletheia-daemon` binary
-  makes one process the local owner of the WAL, indexes, and recovery, serving
-  REST + **MCP over Streamable HTTP (`/mcp`)** + OpenAPI + `/metrics` from a
-  single autumn-web app, and claiming `{data_dir}/daemon.lock` so a second
-  daemon on the same directory refuses to start. `aletheia daemon start` launches
-  it by default (`--surface legacy` keeps the previous HTTP-only
-  `aletheia-server`), and `aletheia daemon status [--json]` reports the base URL,
-  the MCP endpoint, and a paste-ready MCP client configuration. `aletheia-mcp`
-  gains a **daemon-client mode** (`ALETHEIADB_DAEMON_URL` / `--daemon-url`): a
-  stdio↔HTTP JSON-RPC relay that never opens local storage, so many MCP client
-  sessions share one database instead of each opening (or inventing) their own.
-  Embedded stdio mode is unchanged when no daemon URL is configured. The
-  ownership claim is honored by every storage-opening process (the CLI, embedded
-  `aletheia-mcp`, `aletheia-server`), so a misconfigured client refuses to start
-  rather than silently becoming a second writer. Daemon liveness and stop now
-  work on Windows and on Unix systems without `/proc` (macOS), not only Linux.
-  Install the daemon with `cargo install --path crates/aletheia-server`.
-  See `docs/guides/daemon-mode.md`.
-
-- Valid-time-aware trust evaluation (#3382 follow-up): new public
-  `AletheiaDB::computed_confidence_as_of_bitemporal` plus
-  `TrustOptions::as_of_valid_time` / `TrustOptions::with_as_of_valid_time`, so
-  computed confidence over lineage can be evaluated at a caller-supplied
-  valid-time coordinate (defaulting to wallclock now when unscoped).
-
-## [0.2.0] - 2026-07-18
+## [0.2.0] - 2026-07-30
 
 First crates.io release since 0.1.1. This release ships the trunk work
 accumulated since 0.1.1 as 0.2.0. Under 0.x SemVer, any breaking public-API
@@ -79,6 +16,8 @@ so a minor bump off 0.1.x is mandatory. MSRV: Rust 1.92, edition 2024. License:
 MIT OR Apache-2.0.
 
 **Upgrading from 0.1.x?** See the [0.1 → 0.2 migration guide](docs/guides/migration-0.1-to-0.2.md).
+**Drain your WAL before upgrading** — a 0.1.x data directory with an unreplayed
+pre-v13 WAL tail is now refused on open (see On-disk format below).
 
 ### ⚠️ Breaking changes
 
@@ -98,7 +37,10 @@ MIT OR Apache-2.0.
   and `Error::Namespace`/`Provenance`/`Lineage`/`Constraint`/`Backup`/
   `FailedPrecondition` (#3349/#3371/#3378/#3351) were added to the top-level
   `Error` and its siblings (`StorageError`, `TransactionError`,
-  `ConstraintError`).
+  `ConstraintError`). Late in the cycle the top-level `Error` further gained
+  `Tenant` (#3365), `ResourceExhausted` (#3368/#3365), `ReadOnlyReplica`
+  (#3355), `PreV13WalTailRequiresMigration` (#3746), `FenceTooLow` (#3755),
+  and `IndexKeyringAlreadyInstalled`/`ColdKeyringAlreadyInstalled` (#3708).
 - `PersistenceConfig` gained a public field `max_interned_strings: usize`
   (Issue #3716). Struct-literal constructors that name every field break;
   use `..Default::default()`.
@@ -119,6 +61,16 @@ MIT OR Apache-2.0.
   was **removed** (Issue #3234) — a wire break for HTTP clients. HTTP and MCP
   error bodies are now byte-shape-identical; success responses
   (`{"success": true, "data": ...}`) are unchanged.
+- Opening a 0.1.x data directory that still holds an **unreplayed pre-v13 WAL
+  tail** is now **refused** (`Error::PreV13WalTailRequiresMigration`,
+  `FAILED_PRECONDITION`, Issue #3746) instead of succeeding. This replaces
+  silent data corruption: pre-v13 segments store labels as raw process-local
+  interner ids, which 0.2.0 rebuilds in a different order, so replaying such a
+  tail resolved labels to unrelated strings. Migration: drain the WAL under
+  0.1.x (clean shutdown / checkpoint) before upgrading — a cleanly-checkpointed
+  0.1.x directory opens under 0.2.0 with full integrity. See "Before you
+  upgrade (data safety)" in the
+  [migration guide](docs/guides/migration-0.1-to-0.2.md).
 
 ### On-disk format
 
@@ -130,12 +82,126 @@ MIT OR Apache-2.0.
 - Encryption-at-rest on-disk **state v2** plus keyring / crypto-shred
   designation registry (Issue #3616/#3359) — new persisted structures with no
   0.1.1 equivalent, present only when the `encryption` feature is in use.
-- WAL v5 (plaintext) / v6 (encrypted), index-persistence manifest v3, and
-  cold-storage record tag v3 were bumped **backward-compatibly** to carry
-  `provenance.principal` (Issue #3350). Older artifacts still load, with
-  `principal: None`.
+- WAL segment format **v13** (plaintext) / **v14** (encrypted) carry node and
+  edge labels as strings rather than raw interner ids (Issue #3506), which is
+  what makes replay correct under any interner layout. A separate
+  variable-length `KEYVERSIONED` container (**v16**) carries a per-segment
+  `key_version` so full-MEK rotation can write new appends under a new WAL DEK
+  while legacy segments still replay under the old one (Issue #3617). Older
+  binaries reject these versions cleanly rather than misparsing them; 0.2.0
+  still *reads* ≤v12 segments, but refuses to *replay* a pre-v13 tail (see
+  Breaking changes).
+- WAL commit **and abort** framing (`[BeginTx, ..ops.., CommitTx]` /
+  `AbortTx`, Issue #3413): a transaction whose frame is durably fsync'd and is
+  *then* rejected at the commit guard is no longer re-applied by crash
+  recovery. Previously such a runtime-refused write could be resurrected on
+  replay (a lost CAS/lease claim, a stale fence, an orphaning delete).
+- Index-persistence manifest v3 and cold-storage record tag v3 were bumped
+  **backward-compatibly** to carry `provenance.principal` (Issue #3350). Older
+  artifacts still load, with `principal: None`.
 
 ### Added
+
+#### Daemon-owned database (Issue #2905)
+
+- A new `aletheia-daemon` binary makes one process the local owner of the WAL,
+  indexes, and recovery, serving REST + **MCP over Streamable HTTP (`/mcp`)** +
+  OpenAPI + `/metrics` from a single autumn-web app, and claiming
+  `{data_dir}/daemon.lock` so a second
+  daemon on the same directory refuses to start. `aletheia daemon start` launches
+  it by default (`--surface legacy` keeps the previous HTTP-only
+  `aletheia-server`), and `aletheia daemon status [--json]` reports the base URL,
+  the MCP endpoint, and a paste-ready MCP client configuration. `aletheia-mcp`
+  gains a **daemon-client mode** (`ALETHEIADB_DAEMON_URL` / `--daemon-url`): a
+  stdio↔HTTP JSON-RPC relay that never opens local storage, so many MCP client
+  sessions share one database instead of each opening (or inventing) their own.
+  Embedded stdio mode is unchanged when no daemon URL is configured. The
+  ownership claim is honored by every storage-opening process (the CLI, embedded
+  `aletheia-mcp`, `aletheia-server`), so a misconfigured client refuses to start
+  rather than silently becoming a second writer. Daemon liveness and stop now
+  work on Windows and on Unix systems without `/proc` (macOS), not only Linux.
+  Install the daemon with `cargo install --path crates/aletheia-server`.
+  See `docs/guides/daemon-mode.md`.
+
+#### Multi-tenant isolation (Issue #3365)
+
+- `TenantManager` serves many isolated logical databases from one process,
+  owning **one fully-separate `AletheiaDB` per tenant** — so hard data
+  isolation, per-tenant history/indexes/constraints/schema, independent
+  `.albk` backup/restore, and blast-radius containment fall out by
+  construction rather than from leak-prone per-query filtering. Lifecycle
+  (`create_tenant`/`get_tenant`/`list_tenants`/`delete_tenant`/
+  `restore_tenant`), a session-binding `TenantHandle` (including a
+  tenant-scoped `mcp_server()`), and O(1) `TenantUsage` accounting.
+- Adjustable `TenantQuota`s: `max_nodes`/`max_edges` enforced **precisely**
+  via an atomic reserve-before-write / release-on-failure (never a partial
+  write, never a race past the cap); `max_vector_index_bytes`/
+  `max_storage_bytes` enforced best-effort against O(1) estimators. A breach
+  is `RESOURCE_EXHAUSTED` with `details: {tenant, dimension, current, limit}`
+  on both the MCP and HTTP envelopes.
+- Tenant ids are lowercase-only (`[a-z0-9._-]`) so a case-insensitive
+  filesystem cannot collide two tenants onto one WAL. The single-tenant
+  default (`AletheiaDB::new()`/`open()`) is untouched, zero overhead.
+  See [docs/guides/multi-tenancy.md](docs/guides/multi-tenancy.md).
+
+#### Asynchronous replication (Issue #3355)
+
+- Single-primary, asynchronous, pull-based replication: a replica polls the
+  primary's feed for durable (already-fsynced) WAL entries and applies them
+  through the same recovery replay engine crash recovery uses, giving read
+  scale-out and a warm standby with effectively zero primary write-path
+  overhead. Entry points `AletheiaDB::start_replication` and
+  `bootstrap_replica` (snapshot-bootstrap via `.albk`, then stream),
+  configured by `[replication]` / `ReplicationConfigBuilder`.
+- Replicas are strictly read-only: every write/admin surface rejects with a
+  non-retriable `FAILED_PRECONDITION`
+  (`details: {node_role: "replica", reason: "read_only_replica"}`). Only
+  **whole commit frames** are submitted for apply, so a replica never durably
+  stops mid-transaction and its state after each batch is a consistent,
+  possibly-stale snapshot. Manual failover via
+  `promote_to_primary()` / `POST /admin/promote`; lag and RPO are surfaced by
+  `replication_progress()` / `database_stats`. No automatic election or
+  fencing. See [docs/guides/replication-guide.md](docs/guides/replication-guide.md)
+  and [docs/guides/promotion-runbook.md](docs/guides/promotion-runbook.md).
+
+  **Known issue:** whole-frame submission is not the same as reader isolation
+  *during* an apply. `apply_replica_batch` replays a complete frame into the
+  current-state storage entry by entry while holding only the `historical`
+  write lock, which current-state reads do not take — so a read concurrent
+  with an in-progress apply can observe part of a transaction (one node of a
+  two-node commit). The window is microseconds and rarely observed, but
+  `torn_frame_safety_never_exposes_a_partial_transaction` does catch it
+  intermittently under CI load. Reads on an idle replica, and all durability
+  and post-promotion guarantees, are unaffected.
+
+#### Semantic analysis over bi-temporal history
+
+- Temporal semantic drift alarms (Issue #3367): declare monitors and the
+  database watches its own embedding evolution, firing durable, queryable,
+  changefeed-delivered alarms when meaning drifts past a threshold — instead
+  of drift being visible only when a human thinks to ask afterwards.
+  (`semantic-temporal`.)
+- Contradiction genealogy (Issue #3352): reconstruct how conflicting claims
+  about a fact evolved across bi-temporal history and provenance, plus a
+  `find_contradictions` scan for entity/property contradictions.
+  (`semantic-temporal`.)
+- Counterfactual exclusion replay (Issue #3357): materialize a **read-only**
+  counterfactual view that excludes one source's writes and report the blast
+  radius. The real database is never mutated; responses carry a
+  `counterfactual: true` marker. (`semantic-temporal`.)
+- Trust propagation over derivation lineage (Issue #3382): computed
+  confidence as a tree over a fact's derivation lineage, with per-label
+  policy and a `trust_breakdown` explainability surface.
+  (`semantic-reasoning`.)
+- Valid-time-aware trust evaluation (#3382 follow-up): new public
+  `AletheiaDB::computed_confidence_as_of_bitemporal` plus
+  `TrustOptions::as_of_valid_time` / `TrustOptions::with_as_of_valid_time`, so
+  computed confidence over lineage can be evaluated at a caller-supplied
+  valid-time coordinate (defaulting to wallclock now when unscoped).
+- Knowledge half-life analytics (Issue #3377): read-only survival analysis
+  over bi-temporal version history, measuring how long facts of a given kind
+  stay true — so an agent can refresh volatile facts and stop over-refreshing
+  stable ones.
 
 #### Encryption suite
 
@@ -196,10 +262,21 @@ MIT OR Apache-2.0.
   optional `DISTINCT`) with openCypher implicit grouping (Issue #558).
 - Cypher `OPTIONAL MATCH` left-outer patterns (Issue #557).
 - Cypher variable-depth traversal `-[:REL*min..max]->` (Issue #548).
+- `USE` / `IN NAMESPACE` read-scope grammar in both the AQL and the Cypher
+  parser, surfaced through the MCP `query` tool so a namespace can be selected
+  in-query rather than only via a tool parameter (Issue #3349).
 
 #### MCP / HTTP surface (Issues #3234, #3368, #3561, #3629, #3353, #3360)
 
-- The MCP tool registry now exposes **63 tools**.
+- The MCP tool registry now exposes **74 tools**. The final wave (#3775)
+  registered the ten tools whose Rust APIs had landed with their MCP surfaces
+  deferred — `create_drift_monitor`, `list_drift_monitors`,
+  `delete_drift_monitor`, `query_drift_alarms`, `resolve_drift_alarm` (#3367),
+  `contradiction_genealogy`, `find_contradictions` (#3352),
+  `counterfactual_replay` (#3357), and `trust_breakdown`,
+  `list_trust_policies` (#3382) — and enrolled `get_belief_revisions` in the
+  #3353 token budget. Each returns `FAILED_PRECONDITION` with
+  `required_feature` when its experimental cohort is not compiled in.
 - Structured error codes with a `retriable` flag and per-code `details`
   metadata (Issue #3234).
 - Token-budget-aware responses: `max_response_tokens` / `max_response_bytes` /
@@ -209,6 +286,17 @@ MIT OR Apache-2.0.
   gap-free paging on the bounded read tools (Issue #3360).
 - Per-query resource limits (wall-clock timeout + result-byte cap) extended to
   the read tools, including a default-off memory-budget dimension (Issue #3368).
+- Engine-lane per-query resource limits (Issue #3368): the executor now
+  enforces limits **cooperatively** inside its pull-based iterator pipeline via
+  a row-granular `ResourceGuardIterator` that aborts the scan rather than
+  orphaning a background thread. Adds a public Rust builder API
+  (`QueryBuilder::with_timeout`/`with_max_rows`/`with_memory_budget`),
+  `AletheiaDBConfig::query_limits`, a structured
+  `QueryError::ResourceExhausted { dimension, limit, consumed, retriable }`,
+  and per-dimension counters via `AletheiaDB::query_limit_counters()`. The
+  guard is skipped entirely under a fully-unlimited config, so the
+  current-state/temporal hot paths (and the <1µs single-hop target) are
+  unaffected.
 - Inbound HTTP and MCP-over-HTTP concurrency budgets and body cap, rate-limit
   mounting, and timeout→429 mapping (Issue #3561).
 - Constraint / precondition / conflict classification on the legacy JSON-RPC
@@ -279,6 +367,36 @@ MIT OR Apache-2.0.
   create/update node/edge paths of both surfaces. See
   [docs/guides/security-quickstart.md](docs/guides/security-quickstart.md).
 
+#### Performance & indexing
+
+- Secondary property (equality) index for `find_nodes_by_property` (Issue
+  #3774): a `(label, property)` pair can be opted into a secondary index,
+  replacing the O(nodes-per-label) scan-and-compare with a direct lookup. The
+  namespace-scoped variant no longer scans then post-filters.
+
+#### Durable workflows (DBOS phases, Issues #3755, #3759)
+
+- Workflow journal schema convention with exactly-once step recording, so an
+  agent running a multi-step process across a crash can tell which steps
+  already happened instead of repeating a side effect (Phase 3a).
+- A safe multi-executor fencing primitive: CAS/lease extensions that close the
+  stale-fence collision where two executors stealing an expired lease could
+  both stamp the same fence, plus `apply_batch` integration and the new
+  `Error::FenceTooLow` (Phase 3e).
+
+#### Tooling & platform
+
+- Shell completions for bash/zsh/fish via `clap_complete` (Issue #3619).
+- WebAssembly compatibility groundwork (Issues #3772, #3776): the seven
+  non-optional wasm-hostile dependencies moved behind a
+  `cfg(not(target_arch = "wasm32"))` target table (Phase 1), and the
+  source-level use-sites of the vector and persistence subsystems gated so
+  `cargo check` for `wasm32-unknown-unknown` core is green (Phase 2). No
+  supported wasm build is shipped yet — this is dependency- and
+  compile-layer only.
+- LDBC-style benchmark suite with a self-hosted execution path and SF1 /
+  large-vector scaling (Issue #3628, `crates/aletheia-bench-ldbc`).
+
 #### Other
 
 - Configurable string-interner cap `max_interned_strings` on
@@ -286,6 +404,10 @@ MIT OR Apache-2.0.
   retry loop (Issue #3716).
 - The #3218 unique-constraint registry is now included in `.albk` backups
   (Issue #3663).
+- Runtime-installable keyring seams for the index tier (Issue #3708),
+  completing the set alongside the merged WAL (#3669) and cold (#3733) seams,
+  plus the hot-live `encryption enable` driver that flips a live plaintext
+  instance to encrypted without reopening the database.
 
 ### Changed
 
@@ -314,9 +436,48 @@ MIT OR Apache-2.0.
 - Several breaking behavioral changes are cross-referenced under
   **Breaking changes** above (`PersistenceConfig::default()` no longer enables
   index persistence, #3388; `ReadOps` edge getters now return `Result`, #359).
+- `aletheia-server` and the autumn migration spike moved to autumn-web 0.6.0
+  (Issue #3761). Both are `publish = false` workspace members, so this does
+  not affect the published `aletheiadb` crate.
+- The TypeScript client (`@aletheiadb/client`, published separately on npm)
+  tracks the unified error envelope and gained `priority_properties` support
+  on `GET /schema` (Issue #3679).
 
 ### Fixed
 
+- Replica reads could observe a partially-applied transaction (#3788): the
+  asynchronous-replication applier selected whole `[BeginTx .. CommitTx]`
+  frames, but the replay engine then applied the selected frame *operation by
+  operation* into current-state storage, which reads do not lock. A read
+  landing inside that window could see one node of a two-node commit — a
+  referentially inconsistent view (a node whose sibling or edge endpoint did
+  not exist yet) returned with no error. The `never torn` half of the
+  replication consistency guarantee therefore did not hold for reads concurrent
+  with an apply.
+
+  A replica now arms a **current-state apply gate**; the applier publishes each
+  batch inside a window, so a gated read sees the state from before the batch or
+  after it, never inside it. Point lookups (`get_node`, `get_edge`, edge
+  endpoint/label accessors, adjacency lookups, degrees) are atomic with respect
+  to an apply. The gate is **disarmed on a primary** (one predictable branch, no
+  lock), and is disarmed again after `promote_to_primary()` joins the applier;
+  while armed it uses a seqlock — loads only, no atomic read-modify-write — so
+  replica reader fan-out still scales across cores. Bulk scans and iterators are
+  deliberately not gated (`DashMap` iteration was never a point-in-time snapshot
+  even on a primary); use the bi-temporal reads for a true snapshot.
+
+  New coverage: `torn_frame_safety_holds_under_sustained_concurrent_load`
+  (`tests/replication_engine.rs`) holds the invariant under continuous apply with
+  concurrent readers, and `cargo bench --bench replication_apply_gate` quantifies
+  the read-path cost on both a primary and an idle replica. See
+  `docs/guides/replication-guide.md` (*Reader isolation during apply*).
+
+  `torn_frame_safety_never_exposes_a_partial_transaction`'s assertion was also
+  corrected: it compared the two nodes' presence for *equality*, which flags the
+  legitimate interleaving where the apply lands between the two reads (second
+  node visible, first not yet read as present). The invariant it should encode —
+  and now does — is one-directional: the *first*-written node visible with the
+  second missing is the torn shape; the reverse is ordinary staleness.
 - Multi-property temporal vector indexes now all receive write-path updates
   (Issue #450): with two or more temporal vector indexes enabled, node
   creates/updates index vectors into **every** matching property index,
@@ -342,6 +503,37 @@ MIT OR Apache-2.0.
 - Backup restore no longer calls the process-global `GLOBAL_INTERNER.clear()`
   (Issue #3713), which could corrupt string labels in a concurrently-open
   database sharing the process.
+- Recovery refuses a pre-v13 WAL tail instead of corrupting labels (Issue
+  #3746). Opening a 0.1.x directory with an unreplayed pre-v13 tail previously
+  *succeeded* while silently resolving labels to unrelated interned strings.
+  See Breaking changes.
+- Key rotation can be cancelled from any generation, not only `v1→v2` (Issue
+  #3680). `cancel_pending_rotation` hard-coded the rollback target as the base
+  key version, so cancelling an interrupted second (or n-th) rotation
+  installed a keyring that could not decrypt the un-migrated files, leaving
+  the dataset unrecoverable to its pre-rotation state. The old generation now
+  comes from the pending ledger. A pending `enable`/`disable` encryption
+  migration is additionally refused rather than driven through the reverse
+  rotation pass.
+- Cancelling a rotation that would leave the database **split-key** is now
+  refused (Issue #3783). `cancel_pending_rotation` drives only the index
+  reverse pass, but a full-MEK rotation also re-keys the WAL, cold tier, and
+  subject keyring — none of which has a reverse pass. The cancel nevertheless
+  cleared the ledger and reported success, so an operator told "the new key
+  was never adopted" could discard a key that was still required, making
+  new-DEK WAL segments, re-wrapped cold values, and wrapped per-subject DEKs
+  permanently undecryptable. It now fails closed with
+  `RotationError::UnsupportedCancelWithRekeyedLayers`, naming the offending
+  layers and directing the operator to roll **forward** with
+  `keys rotate --resume`; the pending ledger is left byte-identical and the
+  refusal is audited as `key.rotation.failed`, never `completed`.
+- PITR: the vocabulary-drift guard is WAL-version-aware (Issue #3745), so a
+  legitimate point-in-time restore whose window crosses a post-backup
+  vocabulary change (a new label or property key) succeeds instead of being
+  refused with `WindowCrossesVocabularyChange`. A follow-up (Issue #3764)
+  narrowed the guard from a whole-archive boolean to per-entry raw-label
+  tagging, so a **mixed** archive (out-of-band ≤v12 segments plus a fully-v13
+  replay window) restores instead of being conservatively false-rejected.
 
 ## [0.1.1] - 2026-05-12
 

@@ -14,8 +14,57 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Gate every other job on the checks that are cheap, local, and always
+  # correct: the tag must agree with Cargo.toml, and release notes must exist.
+  # A mismatch here would publish the wrong version, which cannot be undone.
+  #
+  # Deliberately NOT checked here: the crates.io token. 0.1.0 and 0.1.1 were
+  # both published by hand shortly BEFORE their tags were pushed, so the
+  # publish job is not on the critical path and a missing token must not
+  # abort the GitHub release and binary assets, which do work today.
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Verify the tag matches the crate version
+        run: |
+          TAG="${{ github.event.inputs.version || github.ref_name }}"
+          TAG_VERSION="${TAG#v}"
+          # Read the [package] version directly so this gate needs no toolchain.
+          CRATE_VERSION=$(awk '
+            /^\[package\]/ { in_pkg = 1; next }
+            /^\[/          { in_pkg = 0 }
+            in_pkg && /^version[[:space:]]*=/ {
+              gsub(/^version[[:space:]]*=[[:space:]]*"|"[[:space:]]*$/, "")
+              print; exit
+            }' Cargo.toml)
+          echo "tag=$TAG_VERSION crate=$CRATE_VERSION"
+          if [ -z "$CRATE_VERSION" ]; then
+            echo "::error::Could not read the package version from Cargo.toml."
+            exit 1
+          fi
+          if [ "$TAG_VERSION" != "$CRATE_VERSION" ]; then
+            echo "::error::Tag $TAG implies version $TAG_VERSION but Cargo.toml declares $CRATE_VERSION." \
+                 "Bump Cargo.toml (and CHANGELOG.md) to match the tag, or retag."
+            exit 1
+          fi
+
+      - name: Verify the release notes cover this version
+        run: |
+          TAG="${{ github.event.inputs.version || github.ref_name }}"
+          TAG_VERSION="${TAG#v}"
+          if ! grep -q "^## \[${TAG_VERSION}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [${TAG_VERSION}]' section." \
+                 "Release notes must be written before tagging."
+            exit 1
+          fi
+
   generate-changelog:
     name: Generate Changelog
+    needs: preflight
     runs-on: ubuntu-latest
     outputs:
       changelog: ${{ steps.changelog.outputs.changelog }}
@@ -126,5 +175,37 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # Distinguish the two failure modes up front, because they look nothing
+      # alike and need different fixes:
+      #
+      #   * secret absent/empty  -> `cargo publish --token "$EMPTY"` dies
+      #     instantly with the clap usage error "a value is required for
+      #     '--token <TOKEN>' but none was supplied". This is what both the
+      #     v0.1.0 and v0.1.1 runs hit (0-second failures, before packaging).
+      #   * secret present but expired/revoked -> cargo packages and verifies
+      #     the crate (minutes), then the upload is rejected with a 401/403
+      #     from crates.io.
+      #
+      # Naming the empty case explicitly means a future run never has to be
+      # re-diagnosed from a clap error that says nothing about secrets.
+      - name: Check for the crates.io token
+        id: token
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::The CARGO_REGISTRY_TOKEN repository secret is empty or unset." \
+                 "Add it under Settings -> Secrets and variables -> Actions." \
+                 "(An EXPIRED token fails differently: the upload is rejected with a 401" \
+                 "after packaging, not an empty-argument error before it.)"
+            exit 1
+          fi
+
+      # Pass the token via the environment rather than `--token <expansion>`:
+      # an unset secret expands to an empty argument, producing the misleading
+      # usage error above. The env form also keeps the token off the process
+      # command line.
       - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked

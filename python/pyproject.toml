@@ -3,7 +3,12 @@ requires = ["maturin>=1.5,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "aletheiadb"
+# PyPI DISTRIBUTION name. Deliberately not "aletheiadb": that name on PyPI is
+# held by an unrelated project (first uploaded 2026-06-01), so uploading under
+# it returns 403 regardless of how the trusted publisher is configured. The
+# IMPORT name is unaffected and remains `aletheiadb` (see [tool.maturin]
+# module-name below) -- `pip install aletheiadatabase` then `import aletheiadb`.
+name = "aletheiadatabase"
 version = "0.1.3"
 description = "Python SDK for AletheiaDB — a high-performance bi-temporal graph database for LLM integration"
 readme = "README.md"
