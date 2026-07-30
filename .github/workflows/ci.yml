@@ -70,6 +70,14 @@ jobs:
       - name: Run tests
         run: cargo test --verbose --features "config-toml,mcp-server,sharding-rpc,simulation,cypher"
 
+      # The workspace is `default-members = ["."]`, so the root `cargo test`
+      # above never reaches the production server crate — which is where the
+      # daemon (Issue #2905) and the autumn-web 0.6 parity suite live. Without
+      # this step they run only under the coverage job's llvm-cov
+      # instrumentation, the slowest environment there is.
+      - name: Run server crate tests
+        run: cargo test --verbose -p aletheia-server
+
       - name: Run doc tests
         run: cargo test --doc --verbose
 

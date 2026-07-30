@@ -1,9 +1,21 @@
 # Security Quickstart: Authentication & RBAC
 
 How to go from an open development database to an authenticated,
-multi-role AletheiaDB deployment (Issue #3350). Covers both serving
-surfaces: the HTTP server (`aletheia-server`) and the MCP server
-(`aletheia-mcp`).
+multi-role AletheiaDB deployment (Issue #3350). Covers the serving
+surfaces: the HTTP server (`aletheia-server`), the MCP server
+(`aletheia-mcp`), and the daemon (`aletheia-daemon`, Issue #2905), which
+serves HTTP **and** MCP from one process.
+
+Everything below applies to the daemon unchanged: it reads the same
+`ALETHEIADB_AUTH_MODE` / `ALETHEIADB_BOOTSTRAP_ADMIN_KEY`, persists keys to
+the same `{data_dir}/auth/keys.json`, serves the same `/admin/keys*`
+endpoints, and applies the same role matrix to its `/mcp` endpoint. Two
+daemon-specific rules: it binds **loopback** by default, and it **refuses**
+to serve anonymously on a non-loopback address unless
+`ALETHEIADB_ALLOW_ANONYMOUS_NETWORK=1` is set. An `aletheia-mcp` relay in
+daemon-client mode makes no access-control decisions of its own — it
+forwards `ALETHEIADB_MCP_API_KEY` as a bearer token and the daemon decides.
+See [daemon-mode.md](daemon-mode.md).
 
 The per-operation authorization matrix (which role may call which
 endpoint/tool) lives in

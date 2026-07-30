@@ -58,6 +58,7 @@
 pub mod api;
 pub mod config;
 pub mod core;
+pub mod daemon_lock;
 pub mod db;
 /// Encryption at rest (ADR-0028).
 pub mod encryption;

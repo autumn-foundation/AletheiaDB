@@ -113,6 +113,24 @@ cargo build --release --features mcp-server
 
 The server communicates over stdin/stdout using the Model Context Protocol. Configure it in your MCP host as a stdio server pointing to the binary.
 
+In this **embedded** mode the process owns a database of its own, so each MCP
+client session gets a separate one unless they all point at the same data
+directory (which AletheiaDB, being single-writer, does not support). When more
+than one session must see the same state, run the **daemon** instead and point
+clients at it:
+
+```bash
+# The daemon lives in the aletheia-server workspace member:
+cargo install --path crates/aletheia-server        # installs `aletheia-daemon`
+
+ALETHEIADB_DATA_DIR=~/.aletheiadb aletheia daemon start
+aletheia daemon status --json                      # prints a paste-ready client config
+```
+
+Clients then run `aletheia-mcp` with `ALETHEIADB_DAEMON_URL` set (a stdio relay
+that opens no storage), or connect straight to `http://127.0.0.1:1963/mcp` if
+they speak HTTP. See [daemon-mode.md](daemon-mode.md).
+
 ---
 
 ## Running the CLI
@@ -124,9 +142,18 @@ cargo run --bin aletheia -- --help
 
 # Example operations
 cargo run --bin aletheia -- node create Person --properties '{"name":"Alice"}'
+
+# Daemon management. `daemon start` launches `aletheia-daemon`, which is built
+# from the `aletheia-server` workspace member — `cargo build` alone does not
+# produce it:
+cargo build -p aletheia-server                     # builds `aletheia-daemon`
 cargo run --bin aletheia -- daemon start --host 127.0.0.1 --port 1963
 cargo run --bin aletheia -- daemon status
 ```
+
+Note: while a daemon owns a data directory, CLI commands against that same
+directory **refuse to run** rather than becoming a second writer. Use the
+daemon's HTTP/MCP surface, or `aletheia daemon stop` first.
 
 ---
 

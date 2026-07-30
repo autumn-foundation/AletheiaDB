@@ -88,6 +88,12 @@ smallvec = "1.13"
 chrono = "0.4"
 arbitrary = { version = "1.4", features = ["derive"], optional = true }
 
+# Concurrent JSON-RPC relaying in the `aletheia-mcp` daemon-client proxy
+# (Issue #2905): `FuturesUnordered` lets one stdio session have several frames in
+# flight without `tokio::spawn`'s `'static` bound, so a long-running tool call
+# (e.g. `await_changes`) cannot block the whole session.
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["std"] }
+
 # Pin native-tls only when features that pull reqwest are active.
 # Kept optional so the Python SDK build (no reqwest features) has no OpenSSL dep.
 native-tls = { version = "=0.2.18", optional = true }
@@ -399,7 +405,21 @@ embeddings = [
 embeddings-onnx = ["embeddings", "embed_anything/ort"]
 
 # MCP server support (exposes the audit_export tool, so it implies audit-export)
-mcp-server = ["dep:rmcp", "dep:tokio", "serde", "dep:base64", "audit-export"]
+# `dep:reqwest` powers the daemon-client (proxy) mode of `aletheia-mcp`
+# (Issue #2905): with `ALETHEIADB_DAEMON_URL` set, the binary relays JSON-RPC to
+# a daemon's `/mcp` endpoint instead of opening local storage. Bundled into
+# `mcp-server` (rather than a separate flag) so every shipped `aletheia-mcp`
+# can be pointed at a daemon — a mode that exists only in some builds would be
+# worse than none, since MCP client configs are copy-pasted between machines.
+mcp-server = [
+    "dep:rmcp",
+    "dep:tokio",
+    "serde",
+    "dep:base64",
+    "audit-export",
+    "dep:reqwest",
+    "dep:futures-util",
+]
 
 # Sharding RPC client support (uses blocking reqwest)
 sharding-rpc = ["dep:reqwest", "serde", "dep:native-tls"]

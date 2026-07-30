@@ -38,12 +38,125 @@ mod native_cli {
     const DEFAULT_LOG_FILE: &str = ".aletheia/daemon.log";
     const DEFAULT_HOST: &str = "127.0.0.1";
     const DEFAULT_PORT: u16 = 1963;
-    const SERVER_BIN_NAME: &str = "aletheia-server";
+    /// The legacy HTTP-only server (autumn-web 0.4): `/status`, `POST /query`,
+    /// `/admin/keys*`. No MCP endpoint.
+    const LEGACY_SERVER_BIN_NAME: &str = "aletheia-server";
+    /// The unified daemon (Issue #2905): REST + MCP-over-HTTP (`/mcp`) +
+    /// OpenAPI from one process that owns the database.
+    const DAEMON_BIN_NAME: &str = "aletheia-daemon";
+    /// The stdio proxy MCP clients run in daemon-client mode.
+    const MCP_PROXY_BIN_NAME: &str = "aletheia-mcp";
+    /// The daemon's single-owner lock inside the data directory. Must match
+    /// `aletheia_server::daemon::LOCK_FILE_NAME`; the CLI cannot depend on that
+    /// crate (it would be a dependency cycle), so the name is duplicated here
+    /// and pinned by a test.
+    const DAEMON_LOCK_FILE_NAME: &str = "daemon.lock";
 
+    /// Which server binary the daemon runs.
+    ///
+    /// `unified` is the default because Issue #2905's whole point is that the
+    /// daemon owns MCP too; `legacy` remains available for deployments that
+    /// depend on the older polymorphic `POST /query` HTTP surface.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum DaemonSurface {
+        /// `aletheia-daemon` — REST + `/mcp` + OpenAPI.
+        Unified,
+        /// `aletheia-server` — the legacy HTTP-only surface.
+        Legacy,
+    }
+
+    impl DaemonSurface {
+        fn as_str(self) -> &'static str {
+            match self {
+                Self::Unified => "unified",
+                Self::Legacy => "legacy",
+            }
+        }
+
+        fn binary_name(self) -> &'static str {
+            match self {
+                Self::Unified => DAEMON_BIN_NAME,
+                Self::Legacy => LEGACY_SERVER_BIN_NAME,
+            }
+        }
+
+        /// Whether this surface serves the MCP endpoint.
+        fn serves_mcp(self) -> bool {
+            matches!(self, Self::Unified)
+        }
+
+        fn parse(raw: &str) -> Result<Self, String> {
+            match raw {
+                "unified" => Ok(Self::Unified),
+                "legacy" => Ok(Self::Legacy),
+                other => Err(format!(
+                    "invalid --surface '{other}', expected unified|legacy"
+                )),
+            }
+        }
+
+        /// Infer the surface from a recorded executable path, for pid files
+        /// written before the surface was recorded.
+        fn from_exe(exe: &Path) -> Self {
+            let name = exe
+                .file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            if name.starts_with(DAEMON_BIN_NAME) {
+                Self::Unified
+            } else {
+                Self::Legacy
+            }
+        }
+    }
+
+    /// What `daemon start` recorded about the process it launched.
+    ///
+    /// `host`/`port`/`surface` are `Option`al so a pid file written by an older
+    /// release (pid + executable only) still loads: `daemon status` then reports
+    /// liveness without a URL rather than failing outright.
     #[derive(Debug, Clone)]
     struct DaemonMetadata {
         pid: u32,
         server_exe: PathBuf,
+        host: Option<String>,
+        port: Option<u16>,
+        surface: Option<DaemonSurface>,
+    }
+
+    impl DaemonMetadata {
+        /// The surface, inferred from the executable name when not recorded.
+        fn surface(&self) -> DaemonSurface {
+            self.surface
+                .unwrap_or_else(|| DaemonSurface::from_exe(&self.server_exe))
+        }
+
+        /// The base URL clients should use, when the pid file records one.
+        ///
+        /// A wildcard bind address is advertised as loopback: `0.0.0.0` is not a
+        /// dialable target, and printing it would send operators to a URL that
+        /// does not connect.
+        fn base_url(&self) -> Option<String> {
+            let (host, port) = (self.host.as_deref()?, self.port?);
+            Some(format!("http://{}:{port}", displayable_host(host)))
+        }
+
+        /// The MCP endpoint, when this surface serves one.
+        fn mcp_endpoint(&self) -> Option<String> {
+            self.surface()
+                .serves_mcp()
+                .then(|| self.base_url().map(|url| format!("{url}/mcp")))
+                .flatten()
+        }
+    }
+
+    /// Render a bind address as something a client can actually dial.
+    fn displayable_host(host: &str) -> String {
+        match host.parse::<std::net::IpAddr>() {
+            Ok(ip) if ip.is_unspecified() => "127.0.0.1".to_string(),
+            Ok(std::net::IpAddr::V6(ip)) => format!("[{ip}]"),
+            _ => host.to_string(),
+        }
     }
 
     /// The main entry point for the AletheiaDB CLI.
@@ -128,9 +241,9 @@ Usage:\n\
   aletheia edge create <source_id> <target_id> <label> [--properties '{{\"k\":\"v\"}}']\n\
   aletheia edge get <edge_id>\n\
   aletheia traverse <start_node_id> <edge_label> [--direction outgoing|incoming|both]\n\
-  aletheia daemon start [--pid-file PATH] [--log-file PATH] [--host HOST] [--port PORT]\n\
+  aletheia daemon start [--surface unified|legacy] [--pid-file PATH] [--log-file PATH] [--host HOST] [--port PORT]\n\
   aletheia daemon stop [--pid-file PATH]\n\
-  aletheia daemon status [--pid-file PATH]\n\
+  aletheia daemon status [--pid-file PATH] [--json]\n\
   aletheia backup <output_path>\n\
   aletheia restore <input_path>\n\
   aletheia restore <input_path> --wal-archive <dir> [--as-of <iso8601|micros> | --lsn <n> | --latest] [--dry-run]\n\
@@ -346,10 +459,11 @@ Usage:\n\
             )
             .subcommand(
                 Command::new("daemon")
-                    .about("Manage the background HTTP server process")
+                    .about("Manage the daemon that owns the local database (HTTP + MCP)")
                     .subcommand(
                         Command::new("start")
                             .about("Start the daemon")
+                            .arg(Arg::new("surface").long("surface"))
                             .arg(Arg::new("pid-file").long("pid-file"))
                             .arg(Arg::new("log-file").long("log-file"))
                             .arg(Arg::new("host").long("host"))
@@ -362,8 +476,13 @@ Usage:\n\
                     )
                     .subcommand(
                         Command::new("status")
-                            .about("Report daemon status")
-                            .arg(Arg::new("pid-file").long("pid-file")),
+                            .about("Report daemon status, URLs, and MCP client config")
+                            .arg(Arg::new("pid-file").long("pid-file"))
+                            .arg(
+                                Arg::new("json")
+                                    .long("json")
+                                    .action(clap::ArgAction::SetTrue),
+                            ),
                     ),
             )
             .subcommand(
@@ -2285,8 +2404,69 @@ Usage:\n\
     /// (canonical durable layout). With neither set the database is ephemeral.
     ///
     /// Converts underlying database errors into a clean string for CLI output.
+    ///
+    /// Refuses when a **live daemon owns the data directory** (Issue #2905):
+    /// AletheiaDB is single-writer, so opening a directory a daemon holds would
+    /// make this command a second writer — the exact configuration the daemon
+    /// exists to prevent. Talk to the daemon's HTTP/MCP surface instead, or stop
+    /// it first.
     fn open_db() -> Result<AletheiaDB, String> {
+        if let Some(dir) = aletheiadb::config::data_dir_from_env()
+            && let Some(pid) = live_daemon_owner(&dir)
+        {
+            return Err(format!(
+                "data directory '{}' is owned by a running AletheiaDB daemon (pid {pid}). \
+                 Opening it here would make this command a second writer. Use the daemon's \
+                 HTTP or MCP surface (`aletheia daemon status` shows the URLs), or stop it \
+                 first with `aletheia daemon stop`.",
+                dir.display()
+            ));
+        }
         AletheiaDB::open_from_env().map_err(|e| format!("failed to initialize database: {e}"))
+    }
+
+    /// The pid of a **live** daemon owning `data_dir`, if any.
+    ///
+    /// Returns `None` for an absent, unreadable, malformed, or stale lock file:
+    /// a lock left behind by a crashed daemon must never brick the CLI, so
+    /// liveness is checked rather than mere file existence.
+    fn live_daemon_owner(data_dir: &Path) -> Option<u32> {
+        let raw = fs::read_to_string(data_dir.join(DAEMON_LOCK_FILE_NAME)).ok()?;
+        let pid = raw.trim().parse::<u32>().ok()?;
+        (pid != std::process::id() && pid_is_alive(pid)).then_some(pid)
+    }
+
+    /// Whether a process id currently exists.
+    ///
+    /// `kill(pid, 0)` delivers no signal; it performs only the existence and
+    /// permission check, and unlike `/proc` it works on every Unix.
+    #[cfg(unix)]
+    fn pid_is_alive(pid: u32) -> bool {
+        // SAFETY: `libc::kill` with signal 0 accesses no memory (both arguments
+        // are plain integers) and delivers no signal. A nonexistent pid returns
+        // -1 with ESRCH, which maps to `false`.
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+            return true;
+        }
+        // EPERM means the process exists but is owned by another user.
+        io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
+    /// Windows counterpart of [`pid_is_alive`] — there is no `/proc` and no
+    /// `kill`, so the task list is the available existence check.
+    #[cfg(windows)]
+    fn pid_is_alive(pid: u32) -> bool {
+        Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn pid_is_alive(_pid: u32) -> bool {
+        // Unknown platform: assume the recorded owner is live, so the guard
+        // fails closed rather than admitting a second writer.
+        true
     }
 
     /// Handles all subcommands under `aletheia node`.
@@ -2434,11 +2614,15 @@ Usage:\n\
         }
     }
 
-    /// Starts the AletheiaDB background server daemon.
+    /// Starts the AletheiaDB daemon: the one local process that owns the
+    /// database files and serves every local consumer (Issue #2905).
     ///
-    /// 1. Checks if it's already running.
-    /// 2. Spawns the `aletheia-server` process in the background.
-    /// 3. Writes the PID and executable path to `.aletheia/daemon.pid`.
+    /// 1. Rejects the request if a daemon is already running.
+    /// 2. Spawns the selected server binary in the background, inheriting the
+    ///    `ALETHEIADB_*` environment so the daemon opens the database the
+    ///    operator configured.
+    /// 3. Records pid, executable, host, port, and surface in the pid file so
+    ///    `status`/`stop` can act without re-deriving any of it.
     fn daemon_start(args: &[String]) -> Result<(), String> {
         let pid_file = PathBuf::from(
             arg_value(args, "--pid-file").unwrap_or_else(|| DEFAULT_PID_FILE.to_string()),
@@ -2454,6 +2638,12 @@ Usage:\n\
             })
             .transpose()?
             .unwrap_or(DEFAULT_PORT);
+        // Validated BEFORE any side effect, so a typo never leaves a pid file
+        // behind pointing at a process that was never started.
+        let surface = arg_value(args, "--surface")
+            .map(|raw| DaemonSurface::parse(&raw))
+            .transpose()?
+            .unwrap_or(DaemonSurface::Unified);
 
         if let Some(meta) = read_daemon_metadata(&pid_file)?
             && is_expected_daemon_running(&meta)
@@ -2468,7 +2658,7 @@ Usage:\n\
         ensure_parent_dir(&pid_file)?;
         ensure_parent_dir(&log_file)?;
 
-        let server_exe = resolve_server_executable()?;
+        let server_exe = resolve_server_executable(surface)?;
 
         let log = fs::OpenOptions::new()
             .create(true)
@@ -2483,35 +2673,140 @@ Usage:\n\
             .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
             .stderr(Stdio::from(log));
 
-        let child = cmd.spawn().map_err(|e| {
+        let mut child = cmd.spawn().map_err(|e| {
             format!(
                 "failed to launch daemon process '{}': {e}",
                 server_exe.display()
             )
         })?;
 
+        // Wait until the daemon is actually SERVING before claiming success.
+        //
+        // A timer alone is not enough: the daemon opens (and replays) the
+        // database before it binds, and recovery is budgeted in seconds — so a
+        // port conflict or a refused data directory can surface long after a
+        // short window closes. Reporting "daemon started" for a process that
+        // then dies leaves a pid file pointing at nothing, and an MCP client
+        // configured from that output talks to a different database.
+        if let Err(message) = wait_until_serving(&mut child, &host, port) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "{message}; see '{}' for details",
+                log_file.display()
+            ));
+        }
+
         let metadata = DaemonMetadata {
             pid: child.id(),
             server_exe,
+            host: Some(host.clone()),
+            port: Some(port),
+            surface: Some(surface),
         };
 
-        write_daemon_metadata(&pid_file, &metadata)?;
+        // A daemon is running now, so a failure to record it would orphan the
+        // process: `daemon stop` would report "not running" while the port and
+        // the data directory stayed claimed. Stop what we started instead.
+        if let Err(message) = write_daemon_metadata(&pid_file, &metadata) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(message);
+        }
 
         println!(
-            "daemon started (pid={}, host={}, port={}, exe={}, log={})",
+            "daemon started (pid={}, surface={}, exe={}, log={})",
             metadata.pid,
-            host,
-            port,
+            surface.as_str(),
             metadata.server_exe.display(),
             log_file.display()
         );
+        if let Some(url) = metadata.base_url() {
+            println!("  HTTP {url}");
+        }
+        match metadata.mcp_endpoint() {
+            Some(endpoint) => {
+                println!("  MCP  {endpoint}");
+                println!(
+                    "  Point MCP clients at this daemon with ALETHEIADB_DAEMON_URL={}",
+                    metadata.base_url().unwrap_or_default()
+                );
+            }
+            None => println!(
+                "  MCP  (not served by the legacy surface; \
+                 start with --surface unified for MCP)"
+            ),
+        }
         Ok(())
     }
 
-    /// Stops the running AletheiaDB background server daemon.
+    /// Wait until a freshly-spawned daemon accepts connections, or fails.
     ///
-    /// Reads the PID from the pid-file, verifies the process is still the expected
-    /// server executable, and sends a kill signal. Cleans up the pid-file afterwards.
+    /// Polls two things in one loop: whether the child has exited (a refused
+    /// configuration — data directory owned, no credentials, bad exposure —
+    /// which surfaces immediately), and whether the port answers (which only
+    /// happens after the database has been opened and recovery replayed). The
+    /// deadline is generous because that recovery is budgeted in seconds for a
+    /// medium dataset.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the daemon exits during startup or does not begin
+    /// serving before the deadline.
+    fn wait_until_serving(
+        child: &mut std::process::Child,
+        host: &str,
+        port: u16,
+    ) -> Result<(), String> {
+        const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+        const POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+        // A wildcard bind is not a dialable target; probe loopback instead.
+        let probe_host = displayable_host(host);
+        let probe_host = probe_host
+            .trim_matches(|c| c == '[' || c == ']')
+            .to_string();
+        let deadline = std::time::Instant::now() + DEADLINE;
+
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return Err(format!("daemon exited during startup ({status})"));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    // Cannot observe the child; fall back to the port probe
+                    // rather than failing a start that may have succeeded.
+                    eprintln!("warning: could not poll the daemon process: {e}");
+                }
+            }
+
+            if std::net::TcpStream::connect_timeout(
+                &format!("{probe_host}:{port}")
+                    .parse()
+                    .map_err(|e| format!("invalid probe address '{probe_host}:{port}': {e}"))?,
+                POLL,
+            )
+            .is_ok()
+            {
+                return Ok(());
+            }
+
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "daemon did not start serving on {probe_host}:{port} within {}s",
+                    DEADLINE.as_secs()
+                ));
+            }
+            std::thread::sleep(POLL);
+        }
+    }
+
+    /// Stops the running AletheiaDB daemon.
+    ///
+    /// Reads the pid file, verifies the process is still the expected server
+    /// executable (so a reused pid can never make this kill an unrelated
+    /// process), signals it, and removes the pid file.
     fn daemon_stop(args: &[String]) -> Result<(), String> {
         let pid_file = PathBuf::from(
             arg_value(args, "--pid-file").unwrap_or_else(|| DEFAULT_PID_FILE.to_string()),
@@ -2531,14 +2826,7 @@ Usage:\n\
             ));
         }
 
-        let status = Command::new("kill")
-            .arg(meta.pid.to_string())
-            .status()
-            .map_err(|e| format!("failed to invoke kill: {e}"))?;
-
-        if !status.success() {
-            return Err(format!("failed to stop daemon process {}", meta.pid));
-        }
+        terminate_process(meta.pid)?;
 
         fs::remove_file(&pid_file)
             .map_err(|e| format!("failed to remove pid file '{}': {e}", pid_file.display()))?;
@@ -2547,22 +2835,69 @@ Usage:\n\
         Ok(())
     }
 
-    /// Checks and prints the status of the background server daemon.
+    /// Ask the OS to terminate `pid`.
     ///
-    /// Verifies whether the process ID in the pid-file is actively running and
-    /// matches the expected server executable.
+    /// Unix sends SIGTERM so autumn's graceful-shutdown hook runs (indexes are
+    /// flushed); Windows has no signals, so `taskkill` without `/F` posts the
+    /// close request the process can still handle.
+    #[cfg(unix)]
+    fn terminate_process(pid: u32) -> Result<(), String> {
+        let status = Command::new("kill")
+            .arg(pid.to_string())
+            .status()
+            .map_err(|e| format!("failed to invoke kill: {e}"))?;
+        if !status.success() {
+            return Err(format!("failed to stop daemon process {pid}"));
+        }
+        Ok(())
+    }
+
+    /// Windows counterpart of [`terminate_process`] — there is no `kill`.
+    #[cfg(windows)]
+    fn terminate_process(pid: u32) -> Result<(), String> {
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T"])
+            .status()
+            .map_err(|e| format!("failed to invoke taskkill: {e}"))?;
+        if !status.success() {
+            return Err(format!("failed to stop daemon process {pid}"));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn terminate_process(pid: u32) -> Result<(), String> {
+        Err(format!(
+            "stopping daemon process {pid} is not supported on this platform"
+        ))
+    }
+
+    /// Reports daemon status: liveness, the base URL, and the MCP endpoint.
+    ///
+    /// `--json` emits a machine-readable block including a paste-ready MCP
+    /// client configuration, so configuring an agent never requires an operator
+    /// to reconstruct the URL by hand.
     fn daemon_status(args: &[String]) -> Result<(), String> {
         let pid_file = PathBuf::from(
             arg_value(args, "--pid-file").unwrap_or_else(|| DEFAULT_PID_FILE.to_string()),
         );
-        match read_daemon_metadata(&pid_file)? {
-            Some(meta) if is_expected_daemon_running(&meta) => {
+        let json = args.iter().any(|arg| arg == "--json");
+        let meta = read_daemon_metadata(&pid_file)?;
+        let running = meta.as_ref().is_some_and(is_expected_daemon_running);
+
+        if json {
+            return print_json_pretty(&daemon_status_json(meta.as_ref(), running, &pid_file));
+        }
+
+        match meta {
+            Some(meta) if running => {
                 println!(
-                    "daemon is running (pid={}, exe={})",
+                    "daemon is running (pid={}, surface={}, exe={})",
                     meta.pid,
+                    meta.surface().as_str(),
                     meta.server_exe.display()
                 );
-                Ok(())
+                print_daemon_endpoints(&meta);
             }
             Some(meta) => {
                 println!(
@@ -2570,73 +2905,254 @@ Usage:\n\
                     meta.pid,
                     meta.server_exe.display()
                 );
-                Ok(())
+                print_daemon_endpoints(&meta);
             }
-            None => {
-                println!("daemon is not running (no pid file)");
-                Ok(())
-            }
+            None => println!("daemon is not running (no pid file)"),
+        }
+        Ok(())
+    }
+
+    /// Print the URLs recorded for a daemon, if its pid file carries them.
+    fn print_daemon_endpoints(meta: &DaemonMetadata) {
+        if let Some(url) = meta.base_url() {
+            println!("  HTTP {url}");
+        }
+        if let Some(endpoint) = meta.mcp_endpoint() {
+            println!("  MCP  {endpoint}");
         }
     }
 
-    /// Resolves the absolute path to the `aletheia-server` executable.
-    ///
-    /// Assumes the server binary is located in the same directory as this CLI binary.
-    fn resolve_server_executable() -> Result<PathBuf, String> {
-        let mut exe_path = env::current_exe()
-            .map_err(|e| format!("failed to get current executable path: {e}"))?;
+    /// Build the `daemon status --json` payload.
+    fn daemon_status_json(
+        meta: Option<&DaemonMetadata>,
+        running: bool,
+        pid_file: &Path,
+    ) -> serde_json::Value {
+        let mut payload = serde_json::json!({
+            "running": running,
+            "pid_file": pid_file.display().to_string(),
+        });
 
-        exe_path.pop();
-        let server_exe = exe_path.join(SERVER_BIN_NAME);
+        let Some(meta) = meta else {
+            return payload;
+        };
 
-        if server_exe.is_file() {
-            return Ok(server_exe);
+        payload["pid"] = serde_json::json!(meta.pid);
+        payload["executable"] = serde_json::json!(meta.server_exe.display().to_string());
+        payload["surface"] = serde_json::json!(meta.surface().as_str());
+        if let Some(url) = meta.base_url() {
+            payload["url"] = serde_json::json!(url);
         }
-
-        #[cfg(windows)]
-        {
-            let server_exe_win = exe_path.join(format!("{}.exe", SERVER_BIN_NAME));
-            if server_exe_win.is_file() {
-                return Ok(server_exe_win);
-            }
+        if let Some(endpoint) = meta.mcp_endpoint() {
+            payload["mcp_endpoint"] = serde_json::json!(endpoint);
         }
-
-        Err(format!(
-            "could not find '{}' next to CLI binary at '{}'",
-            SERVER_BIN_NAME,
-            exe_path.display()
-        ))
+        if let Some(config) = mcp_client_config(meta) {
+            payload["mcp_client_config"] = config;
+        }
+        payload
     }
 
-    /// Checks if the process defined in `meta` is currently running and is the correct binary.
+    /// The MCP client configuration block for this daemon, ready to paste into
+    /// a Claude Desktop / Codex / Cursor config.
     ///
-    /// Uses `/proc/<pid>` on Unix systems to verify the process executable. This prevents
-    /// accidentally killing unrelated processes if a PID is reused by the OS after a crash.
+    /// Emitted only for a surface that actually serves MCP — advertising a
+    /// client config for the legacy HTTP-only surface would produce agents that
+    /// fail to connect.
+    fn mcp_client_config(meta: &DaemonMetadata) -> Option<serde_json::Value> {
+        let url = meta.base_url()?;
+        if !meta.surface().serves_mcp() {
+            return None;
+        }
+        let command = resolve_sibling_executable(MCP_PROXY_BIN_NAME)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| MCP_PROXY_BIN_NAME.to_string());
+        Some(serde_json::json!({
+            "mcpServers": {
+                "aletheiadb": {
+                    "command": command,
+                    "args": [],
+                    "env": {
+                        "ALETHEIADB_DAEMON_URL": url,
+                        "ALETHEIADB_MCP_API_KEY": "<your-api-key>",
+                    }
+                }
+            }
+        }))
+    }
+
+    /// Resolves the absolute path to the server executable for `surface`.
+    ///
+    /// Both binaries are installed alongside this CLI, so the search is
+    /// deliberately limited to that directory rather than `PATH`: picking up a
+    /// same-named binary from elsewhere is exactly the kind of surprise a
+    /// database owner should not have.
+    fn resolve_server_executable(surface: DaemonSurface) -> Result<PathBuf, String> {
+        let name = surface.binary_name();
+        resolve_sibling_executable(name).ok_or_else(|| {
+            let dir = env::current_exe()
+                .ok()
+                .map(|mut p| {
+                    p.pop();
+                    p.display().to_string()
+                })
+                .unwrap_or_else(|| "<unknown>".to_string());
+            match surface {
+                // The daemon lives in the `aletheia-server` workspace member, so
+                // it is NOT produced by `cargo install --path .` — naming the
+                // wrong path here is what sends an operator in circles.
+                DaemonSurface::Unified => format!(
+                    "could not find '{name}' next to CLI binary at '{dir}'. Install it with \
+                     `cargo install --path crates/aletheia-server`, or start the legacy \
+                     HTTP-only surface with `aletheia daemon start --surface legacy` \
+                     (which does not serve MCP)."
+                ),
+                DaemonSurface::Legacy => format!(
+                    "could not find '{name}' next to CLI binary at '{dir}'. Install it with \
+                     `cargo install --path . --features http-server --bin {name}`."
+                ),
+            }
+        })
+    }
+
+    /// Locate an executable installed next to this CLI binary.
+    fn resolve_sibling_executable(name: &str) -> Option<PathBuf> {
+        let mut dir = env::current_exe().ok()?;
+        dir.pop();
+
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        let windows_candidate = dir.join(format!("{name}.exe"));
+        if windows_candidate.is_file() {
+            return Some(windows_candidate);
+        }
+        None
+    }
+
+    /// Whether the process recorded in `meta` is running *and* is still the
+    /// expected daemon binary.
+    ///
+    /// Verifying the executable (not just the pid) is what keeps `daemon stop`
+    /// from signalling an unrelated process that inherited a recycled pid. Where
+    /// the executable cannot be determined, this reports **not running** rather
+    /// than guessing: a false "running" makes `stop` kill a stranger, while a
+    /// false "not running" only makes the operator stop it by hand.
+    #[cfg(unix)]
     fn is_expected_daemon_running(meta: &DaemonMetadata) -> bool {
-        let proc_dir = PathBuf::from(format!("/proc/{}", meta.pid));
-        if !proc_dir.exists() {
+        if !aletheiadb::daemon_lock::pid_is_alive(meta.pid) {
             return false;
         }
 
-        let exe_path = proc_dir.join("exe");
-        if let Ok(current_exe) = fs::read_link(&exe_path) {
+        // Linux: `/proc/<pid>/exe` is the authoritative identity check.
+        let exe_link = PathBuf::from(format!("/proc/{}/exe", meta.pid));
+        if let Ok(current_exe) = fs::read_link(&exe_link) {
             return current_exe == meta.server_exe;
         }
+        if exe_link.exists() {
+            // The pid is live and /proc exists, but the link is unreadable —
+            // the process belongs to another user, so it is not ours.
+            return false;
+        }
 
-        let cmdline_path = proc_dir.join("cmdline");
-        let cmdline = fs::read(cmdline_path).unwrap_or_default();
-        let joined = String::from_utf8_lossy(&cmdline).replace('\0', " ");
-        joined.contains(SERVER_BIN_NAME)
+        // No /proc (macOS, BSD): ask `ps` for the process's executable. Without
+        // this the whole Unix branch collapses to "not running" on macOS,
+        // leaving a healthy daemon unstoppable through the CLI.
+        ps_reports_executable(meta.pid, &meta.server_exe)
     }
 
-    /// Writes the daemon's PID and executable path to the specified pid-file.
+    /// Whether `ps` reports `pid` running `expected_exe`.
+    ///
+    /// Compares what `ps -o comm=` prints — the executable, not the command
+    /// line. Matching anywhere in the command line would judge
+    /// `tail -f aletheia-daemon.log` to be the daemon.
+    #[cfg(unix)]
+    fn ps_reports_executable(pid: u32, expected_exe: &Path) -> bool {
+        let Ok(output) = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output()
+        else {
+            return false;
+        };
+        let reported = String::from_utf8_lossy(&output.stdout);
+        let reported = reported.trim();
+        if reported.is_empty() {
+            return false;
+        }
+        // `ps -o comm=` prints the full path on macOS and the basename on some
+        // systems; accept either form of the SAME executable.
+        reported == expected_exe.to_string_lossy()
+            || Path::new(reported).file_name() == expected_exe.file_name()
+    }
+
+    /// Windows counterpart of [`is_expected_daemon_running`].
+    ///
+    /// Windows has no `/proc`, so `tasklist`'s pid + image-name filter is the
+    /// identity check. Without it the Unix implementation reports "not running"
+    /// for every live daemon on Windows and `daemon stop` refuses forever — the
+    /// platform the originating issue was reported on.
+    ///
+    /// The image name comes from the **known binary set**, never verbatim from
+    /// the pid file: a pid file naming `*` as the image would otherwise turn the
+    /// filter into "any process" and let `daemon stop` terminate an arbitrary
+    /// process tree.
+    #[cfg(windows)]
+    fn is_expected_daemon_running(meta: &DaemonMetadata) -> bool {
+        let image = format!("{}.exe", meta.surface().binary_name());
+        let Ok(output) = Command::new(aletheiadb::daemon_lock::system32_tool("tasklist.exe"))
+            .args([
+                "/FI",
+                &format!("PID eq {}", meta.pid),
+                "/FI",
+                &format!("IMAGENAME eq {image}"),
+                "/FO",
+                "CSV",
+                "/NH",
+            ])
+            .output()
+        else {
+            return false;
+        };
+        // `tasklist` exits 0 with an informational (non-CSV) line when the
+        // filter matches nothing, so the pid must appear in the pid COLUMN — a
+        // substring match would also hit session ids and memory figures.
+        aletheiadb::daemon_lock::tasklist_reports_pid(
+            &String::from_utf8_lossy(&output.stdout),
+            meta.pid,
+        )
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn is_expected_daemon_running(_meta: &DaemonMetadata) -> bool {
+        false
+    }
+
+    /// Writes the daemon's pid, executable, bind address, and surface to the
+    /// pid file.
+    ///
+    /// The format is line-oriented and **append-only by convention**: readers
+    /// take the first two lines as pid + executable (the historic format) and
+    /// treat everything after as optional, so a pid file written by a newer
+    /// release stays readable by an older one and vice versa.
     fn write_daemon_metadata(path: &Path, meta: &DaemonMetadata) -> Result<(), String> {
-        let content = format!("{}\n{}\n", meta.pid, meta.server_exe.display());
+        let content = format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            meta.pid,
+            meta.server_exe.display(),
+            meta.host.as_deref().unwrap_or(DEFAULT_HOST),
+            meta.port.unwrap_or(DEFAULT_PORT),
+            meta.surface.unwrap_or(DaemonSurface::Unified).as_str(),
+        );
         fs::write(path, content)
             .map_err(|e| format!("failed to write pid file '{}': {e}", path.display()))
     }
 
-    /// Reads the daemon's PID and executable path from the specified pid-file.
+    /// Reads daemon metadata from a pid file.
+    ///
+    /// Only the first two lines are required: a pid file written before the
+    /// bind address and surface were recorded still loads, with those fields
+    /// `None`. An unparseable host/port/surface is likewise treated as absent
+    /// rather than fatal — `status` should always be able to report liveness.
     fn read_daemon_metadata(path: &Path) -> Result<Option<DaemonMetadata>, String> {
         if !path.exists() {
             return Ok(None);
@@ -2657,9 +3173,24 @@ Usage:\n\
             .parse::<u32>()
             .map_err(|e| format!("invalid pid in '{}': {e}", path.display()))?;
 
+        let host = lines
+            .next()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned);
+        let port = lines
+            .next()
+            .and_then(|line| line.trim().parse::<u16>().ok());
+        let surface = lines
+            .next()
+            .and_then(|line| DaemonSurface::parse(line.trim()).ok());
+
         Ok(Some(DaemonMetadata {
             pid,
             server_exe: PathBuf::from(exe_line),
+            host,
+            port,
+            surface,
         }))
     }
 

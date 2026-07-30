@@ -7,8 +7,27 @@ default:
     @just --list
 
 # Run all tests
+#
+# Feature list mirrors CI's test job: a bare `cargo test` compiles the
+# feature-gated suites (e.g. the daemon-client proxy tests, which are
+# `#![cfg(feature = "mcp-server")]`) to ZERO tests, so a developer following the
+# documented pre-commit workflow would get green on a broken proxy.
 test:
-    cargo test
+    cargo test --features "config-toml,mcp-server,sharding-rpc,simulation,cypher"
+    cargo test -p aletheia-server
+
+# Build the daemon (`aletheia-daemon`).
+#
+# It lives in the `aletheia-server` workspace member, and `default-members = ["."]`
+# means a bare `cargo build` does NOT produce it — so `aletheia daemon start`
+# would fail to find it on a stock checkout.
+daemon-build:
+    cargo build -p aletheia-server --bin aletheia-daemon
+
+# Install the daemon + the CLI + the MCP proxy.
+daemon-install:
+    cargo install --path . --features mcp-server --force
+    cargo install --path crates/aletheia-server --force
 
 # Run tests with output
 test-verbose:

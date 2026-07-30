@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Daemon-owned database for MCP clients (#2905): a new `aletheia-daemon` binary
+  makes one process the local owner of the WAL, indexes, and recovery, serving
+  REST + **MCP over Streamable HTTP (`/mcp`)** + OpenAPI + `/metrics` from a
+  single autumn-web app, and claiming `{data_dir}/daemon.lock` so a second
+  daemon on the same directory refuses to start. `aletheia daemon start` launches
+  it by default (`--surface legacy` keeps the previous HTTP-only
+  `aletheia-server`), and `aletheia daemon status [--json]` reports the base URL,
+  the MCP endpoint, and a paste-ready MCP client configuration. `aletheia-mcp`
+  gains a **daemon-client mode** (`ALETHEIADB_DAEMON_URL` / `--daemon-url`): a
+  stdio↔HTTP JSON-RPC relay that never opens local storage, so many MCP client
+  sessions share one database instead of each opening (or inventing) their own.
+  Embedded stdio mode is unchanged when no daemon URL is configured. The
+  ownership claim is honored by every storage-opening process (the CLI, embedded
+  `aletheia-mcp`, `aletheia-server`), so a misconfigured client refuses to start
+  rather than silently becoming a second writer. Daemon liveness and stop now
+  work on Windows and on Unix systems without `/proc` (macOS), not only Linux.
+  Install the daemon with `cargo install --path crates/aletheia-server`.
+  See `docs/guides/daemon-mode.md`.
+
 - Valid-time-aware trust evaluation (#3382 follow-up): new public
   `AletheiaDB::computed_confidence_as_of_bitemporal` plus
   `TrustOptions::as_of_valid_time` / `TrustOptions::with_as_of_valid_time`, so

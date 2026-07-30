@@ -68,6 +68,19 @@ zeroize = "1"
 # `spawn_blocking` recv loop feeds into the `Sse<impl Stream>` response body.
 tokio-stream = "0.1"
 
+
+# Daemon single-owner lock liveness (Issue #2905): `kill(pid, 0)` is the only
+# portable Unix existence probe (macOS has no `/proc`). Windows uses `tasklist`,
+# so this is a Unix-only dependency.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The daemon: one process owning the local database, serving HTTP + MCP + OpenAPI
+# (Issue #2905). `aletheia daemon start` launches this binary.
+[[bin]]
+name = "aletheia-daemon"
+path = "src/main.rs"
+
 [dev-dependencies]
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time"] }
 # `tower::ServiceExt::oneshot` drives the legacy 0.4 router in parity tests.
