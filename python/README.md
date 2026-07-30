@@ -5,7 +5,15 @@ Native Python bindings for [AletheiaDB](https://github.com/autumn-foundation/Ale
 ## Install
 
 ```bash
-pip install aletheiadb
+pip install aletheiadatabase
+```
+
+> **Note:** the PyPI distribution is named **`aletheiadatabase`**, but the import
+> name is `aletheiadb`. Install the former, import the latter. The unrelated
+> `aletheiadb` package on PyPI is **not** this project.
+
+```python
+import aletheiadb  # correct after `pip install aletheiadatabase`
 ```
 
 Pre-built wheels are published for Linux (x86_64, aarch64), macOS (x86_64, arm64), and Windows (x86_64) on Python 3.9 – 3.13. No Rust toolchain required.
