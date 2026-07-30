@@ -13,6 +13,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write
+
+
 jobs:
   # Gate every other job on the checks that are cheap, local, and always
   # correct: the tag must agree with Cargo.toml, and release notes must exist.
