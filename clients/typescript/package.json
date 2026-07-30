@@ -5,6 +5,9 @@
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=18"
   },
@@ -59,7 +62,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/madmax983/AletheiaDB.git",
+    "url": "https://github.com/autumn-foundation/AletheiaDB.git",
     "directory": "clients/typescript"
   }
 }
