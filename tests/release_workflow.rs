@@ -33,11 +33,11 @@ fn release_workflow_does_not_mask_publish_failure() {
 
 /// Both prior releases (v0.1.0, v0.1.1) failed at `cargo publish` with
 /// "a value is required for '--token <TOKEN>'" — the secret expanded to an
-/// empty argument, and only after a public GitHub release had already been
-/// created. The token must therefore travel via the environment, and the
-/// workflow must check for it before anything irreversible happens.
+/// empty argument. The token must therefore travel via the environment, and
+/// the empty case must be named explicitly so it is never re-diagnosed from a
+/// clap error that says nothing about secrets.
 #[test]
-fn release_workflow_preflights_the_crates_io_token() {
+fn release_workflow_diagnoses_a_missing_crates_io_token() {
     let workflow = fs::read_to_string(".github/workflows/release.yml")
         .expect("release workflow should be readable");
 
@@ -52,21 +52,65 @@ fn release_workflow_preflights_the_crates_io_token() {
         "the publish step should receive the token via the environment"
     );
     assert!(
-        workflow.contains("Verify the crates.io token is configured"),
-        "the workflow should fail fast when CARGO_REGISTRY_TOKEN is unset, \
-         before building assets or creating a public release"
+        workflow.contains("Check for the crates.io token"),
+        "the publish job should name the empty-secret case explicitly"
     );
+}
+
+/// 0.1.0 and 0.1.1 were both published by hand shortly BEFORE their tags were
+/// pushed, so crates.io publishing is not on the release critical path. A
+/// missing or expired token must therefore fail only the publish job — it must
+/// not gate the GitHub release and binary assets, which do work today.
+#[test]
+fn missing_token_does_not_gate_the_github_release() {
+    let workflow = fs::read_to_string(".github/workflows/release.yml")
+        .expect("release workflow should be readable");
 
     let preflight = workflow
-        .find("preflight:")
+        .find("  preflight:")
+        .expect("release workflow should define a preflight job");
+    let publish = workflow
+        .find("  publish-crate:")
+        .expect("release workflow should define a publish-crate job");
+
+    // The token check must live in publish-crate, not in the gating preflight.
+    let token_check = workflow
+        .find("Check for the crates.io token")
+        .expect("the token check should exist");
+    assert!(
+        token_check > publish,
+        "the crates.io token check belongs in publish-crate; in preflight it \
+         would abort the whole pipeline — including the GitHub release and \
+         binary assets — on every tag whenever the secret is absent"
+    );
+
+    let preflight_block = &workflow[preflight..publish];
+    assert!(
+        !preflight_block.contains("CARGO_REGISTRY_TOKEN"),
+        "preflight must not reference CARGO_REGISTRY_TOKEN"
+    );
+}
+
+/// The preflight checks that remain must precede the public release.
+#[test]
+fn release_workflow_preflight_gates_the_public_release() {
+    let workflow = fs::read_to_string(".github/workflows/release.yml")
+        .expect("release workflow should be readable");
+
+    let preflight = workflow
+        .find("  preflight:")
         .expect("release workflow should define a preflight job");
     let create_release = workflow
-        .find("create-release:")
+        .find("  create-release:")
         .expect("release workflow should define a create-release job");
     assert!(
         preflight < create_release,
-        "preflight must be declared before create-release so the token and \
-         version checks gate the public release"
+        "preflight must be declared before create-release so the version and \
+         changelog checks gate the public release"
+    );
+    assert!(
+        workflow.contains("needs: preflight"),
+        "at least one job should depend on preflight, or it gates nothing"
     );
 }
 
