@@ -1553,7 +1553,9 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 
 - ✅ Sharding for horizontal scale (implemented)
 - ✅ Distributed transaction coordination with 2PC (implemented)
-- Replication for high availability (planned)
+- ✅ Asynchronous replication for read scale-out and manual failover
+  (implemented, Issue #3355 — see the Asynchronous Replication section above)
+- Automatic leader election / fencing (not planned; failover is manual)
 
 ### Query Language
 

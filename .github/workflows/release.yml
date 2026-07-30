@@ -14,8 +14,66 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Gate every other job. Both prior releases (v0.1.0, v0.1.1) built and
+  # published a public GitHub release with assets and only THEN failed at
+  # `cargo publish` with "a value is required for '--token <TOKEN>'", because
+  # the CARGO_REGISTRY_TOKEN secret was never set. Checking the release
+  # preconditions up front turns that into a ~10-second failure with an
+  # actionable message, before anything public or irreversible happens.
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Verify the tag matches the crate version
+        run: |
+          TAG="${{ github.event.inputs.version || github.ref_name }}"
+          TAG_VERSION="${TAG#v}"
+          # Read the [package] version directly so this gate needs no toolchain.
+          CRATE_VERSION=$(awk '
+            /^\[package\]/ { in_pkg = 1; next }
+            /^\[/          { in_pkg = 0 }
+            in_pkg && /^version[[:space:]]*=/ {
+              gsub(/^version[[:space:]]*=[[:space:]]*"|"[[:space:]]*$/, "")
+              print; exit
+            }' Cargo.toml)
+          echo "tag=$TAG_VERSION crate=$CRATE_VERSION"
+          if [ -z "$CRATE_VERSION" ]; then
+            echo "::error::Could not read the package version from Cargo.toml."
+            exit 1
+          fi
+          if [ "$TAG_VERSION" != "$CRATE_VERSION" ]; then
+            echo "::error::Tag $TAG implies version $TAG_VERSION but Cargo.toml declares $CRATE_VERSION." \
+                 "Bump Cargo.toml (and CHANGELOG.md) to match the tag, or retag."
+            exit 1
+          fi
+
+      - name: Verify the crates.io token is configured
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::The CARGO_REGISTRY_TOKEN repository secret is empty or unset," \
+                 "so the publish job cannot reach crates.io. Add it under" \
+                 "Settings -> Secrets and variables -> Actions before tagging a release."
+            exit 1
+          fi
+
+      - name: Verify the release notes cover this version
+        run: |
+          TAG="${{ github.event.inputs.version || github.ref_name }}"
+          TAG_VERSION="${TAG#v}"
+          if ! grep -q "^## \[${TAG_VERSION}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [${TAG_VERSION}]' section." \
+                 "Release notes must be written before tagging."
+            exit 1
+          fi
+
   generate-changelog:
     name: Generate Changelog
+    needs: preflight
     runs-on: ubuntu-latest
     outputs:
       changelog: ${{ steps.changelog.outputs.changelog }}
@@ -126,5 +184,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # Pass the token via the environment rather than `--token <expansion>`:
+      # an unset secret expands to an empty argument, which cargo rejects with
+      # a clap usage error that says nothing about the missing secret. The env
+      # form also keeps the token off the process command line.
       - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
