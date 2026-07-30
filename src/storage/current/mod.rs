@@ -19,10 +19,13 @@ use dashmap::mapref::entry::Entry;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+mod apply_gate;
 mod iterators;
 mod stats;
 mod vector;
 
+use apply_gate::ApplyGate;
+pub(crate) use apply_gate::PublishGuard;
 pub use iterators::*;
 pub use stats::CurrentStats;
 use stats::FilterStats;
@@ -71,6 +74,12 @@ pub struct CurrentStorage {
     filter_stats: DashMap<String, Arc<FilterStats>>,
     /// Lock to synchronize snapshot creation with concurrent writes
     pub(crate) snapshot_lock: RwLock<()>,
+    /// Atomic-publish gate for replica batch application (Issue #3788).
+    ///
+    /// Disarmed (and free) on a primary; armed when the owning database enters
+    /// replica mode, at which point point lookups become atomic with respect to
+    /// the applier's batch replay. See [`apply_gate`].
+    apply_gate: ApplyGate,
 }
 
 impl CurrentStorage {
@@ -85,7 +94,46 @@ impl CurrentStorage {
             temporal_vector_indexes: DashMap::new(),
             filter_stats: DashMap::new(),
             snapshot_lock: RwLock::new(()),
+            apply_gate: ApplyGate::new(),
         }
+    }
+
+    /// Arm the replica apply gate so current-state point lookups become atomic
+    /// with respect to [`Self::begin_apply_publish`] (Issue #3788).
+    ///
+    /// Called when the owning database enters replica mode, before the applier
+    /// thread is spawned. Idempotent.
+    pub(crate) fn arm_apply_gate(&self) {
+        self.apply_gate.arm();
+    }
+
+    /// Disarm the replica apply gate, restoring the ungated read fast path.
+    ///
+    /// Only valid once no applier can still publish -- `promote_to_primary`
+    /// stops and joins the applier thread first.
+    pub(crate) fn disarm_apply_gate(&self) {
+        self.apply_gate.disarm();
+    }
+
+    /// Whether current-state reads are currently gated (i.e. this storage backs
+    /// a replica). Exposed for tests and diagnostics.
+    #[cfg(test)]
+    pub(crate) fn apply_gate_armed(&self) -> bool {
+        self.apply_gate.is_armed()
+    }
+
+    /// Open an atomic publish window over current state.
+    ///
+    /// Every mutation applied until the returned guard is dropped becomes
+    /// visible to gated point lookups all at once, on drop. The replica applier
+    /// wraps a complete-frame batch replay in one of these so a concurrent read
+    /// can never observe a half-applied transaction (Issue #3788).
+    ///
+    /// Re-entrant for the publishing thread: the replay engine's idempotency
+    /// guards read current state from inside the window.
+    #[must_use = "the publish window closes when the guard is dropped"]
+    pub(crate) fn begin_apply_publish(&self) -> PublishGuard<'_> {
+        self.apply_gate.begin_publish()
     }
 
     /// Initialize the node ID generator with a specific starting value.
@@ -553,11 +601,17 @@ impl CurrentStorage {
     }
 
     /// Get a node by ID.
+    ///
+    /// On a replica this read is atomic with respect to the applier's batch
+    /// replay: it never observes a half-applied replicated transaction
+    /// (Issue #3788). On a primary the gate is disarmed and costs a branch.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node(&self, id: NodeId) -> Result<Node> {
-        self.indexes
-            .get_node(id)
-            .ok_or_else(|| StorageError::NodeNotFound(id).into())
+        self.apply_gate.read(|| {
+            self.indexes
+                .get_node(id)
+                .ok_or_else(|| StorageError::NodeNotFound(id).into())
+        })
     }
 
     /// Access a node without cloning, executing a closure on the node data.
@@ -583,17 +637,26 @@ impl CurrentStorage {
     where
         F: FnOnce(&Node) -> R,
     {
-        self.indexes
-            .with_node(id, f)
-            .ok_or_else(|| StorageError::NodeNotFound(id).into())
+        // `FnOnce` cannot be re-run, so on a replica this takes the apply
+        // gate's blocking fallback rather than its seqlock fast path
+        // (Issue #3788). Disarmed (primary) it is a branch, as before.
+        self.apply_gate.read_once(|| {
+            self.indexes
+                .with_node(id, f)
+                .ok_or_else(|| StorageError::NodeNotFound(id).into())
+        })
     }
 
     /// Get an edge by ID.
+    ///
+    /// Atomic with respect to a replica apply -- see [`Self::get_node`].
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge(&self, id: EdgeId) -> Result<Edge> {
-        self.indexes
-            .get_edge(id)
-            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        self.apply_gate.read(|| {
+            self.indexes
+                .get_edge(id)
+                .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        })
     }
 
     // ========================================================================
@@ -613,9 +676,11 @@ impl CurrentStorage {
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_target(&self, id: EdgeId) -> Result<NodeId> {
-        self.indexes
-            .get_edge_target(id)
-            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        self.apply_gate.read(|| {
+            self.indexes
+                .get_edge_target(id)
+                .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        })
     }
 
     /// Get the source node of an edge without cloning the entire edge.
@@ -627,9 +692,11 @@ impl CurrentStorage {
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_source(&self, id: EdgeId) -> Result<NodeId> {
-        self.indexes
-            .get_edge_source(id)
-            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        self.apply_gate.read(|| {
+            self.indexes
+                .get_edge_source(id)
+                .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        })
     }
 
     /// Get the endpoints (source, target) of an edge without cloning.
@@ -641,9 +708,11 @@ impl CurrentStorage {
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_endpoints(&self, id: EdgeId) -> Result<(NodeId, NodeId)> {
-        self.indexes
-            .get_edge_endpoints(id)
-            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        self.apply_gate.read(|| {
+            self.indexes
+                .get_edge_endpoints(id)
+                .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        })
     }
 
     /// Get the label of an edge without cloning the entire edge.
@@ -655,9 +724,11 @@ impl CurrentStorage {
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_label(&self, id: EdgeId) -> Result<InternedString> {
-        self.indexes
-            .get_edge_label(id)
-            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        self.apply_gate.read(|| {
+            self.indexes
+                .get_edge_label(id)
+                .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        })
     }
 
     /// Get the label of a node without cloning the entire node.
@@ -669,9 +740,11 @@ impl CurrentStorage {
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node_label(&self, id: NodeId) -> Result<InternedString> {
-        self.indexes
-            .get_node_label(id)
-            .ok_or_else(|| StorageError::NodeNotFound(id).into())
+        self.apply_gate.read(|| {
+            self.indexes
+                .get_node_label(id)
+                .ok_or_else(|| StorageError::NodeNotFound(id).into())
+        })
     }
 
     /// Delete a node.
@@ -936,21 +1009,23 @@ impl CurrentStorage {
     /// Uses frozen view (~8-14ns) when available, falls back to merged guard (~16-17ns).
     #[inline]
     pub fn get_outgoing_edges(&self, source: NodeId) -> Vec<EdgeId> {
-        // HOT PATH: Use frozen view for direct slice access when no delta/tombstones
-        if let Some(frozen) = self.indexes.frozen_outgoing_view() {
-            return frozen
-                .get_adjacency(source)
-                .iter()
-                .map(|entry| entry.edge_id)
-                .collect();
-        }
+        self.apply_gate.read(|| {
+            // HOT PATH: Use frozen view for direct slice access when no delta/tombstones
+            if let Some(frozen) = self.indexes.frozen_outgoing_view() {
+                return frozen
+                    .get_adjacency(source)
+                    .iter()
+                    .map(|entry| entry.edge_id)
+                    .collect();
+            }
 
-        // SLOW PATH: Use merged guard when delta/tombstones exist.
-        // Pre-allocate using capacity hint to avoid multiple reallocations.
-        let guard = self.indexes.get_outgoing(source);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(guard.iter().map(|entry| entry.edge_id));
-        result
+            // SLOW PATH: Use merged guard when delta/tombstones exist.
+            // Pre-allocate using capacity hint to avoid multiple reallocations.
+            let guard = self.indexes.get_outgoing(source);
+            let mut result = Vec::with_capacity(guard.capacity_hint());
+            result.extend(guard.iter().map(|entry| entry.edge_id));
+            result
+        })
     }
 
     /// Get all incoming edges to a node.
@@ -958,21 +1033,23 @@ impl CurrentStorage {
     /// Uses frozen view (~8-14ns) when available, falls back to merged guard (~16-17ns).
     #[inline]
     pub fn get_incoming_edges(&self, target: NodeId) -> Vec<EdgeId> {
-        // HOT PATH: Use frozen view for direct slice access when no delta/tombstones
-        if let Some(frozen) = self.indexes.frozen_incoming_view() {
-            return frozen
-                .get_adjacency(target)
-                .iter()
-                .map(|entry| entry.edge_id)
-                .collect();
-        }
+        self.apply_gate.read(|| {
+            // HOT PATH: Use frozen view for direct slice access when no delta/tombstones
+            if let Some(frozen) = self.indexes.frozen_incoming_view() {
+                return frozen
+                    .get_adjacency(target)
+                    .iter()
+                    .map(|entry| entry.edge_id)
+                    .collect();
+            }
 
-        // SLOW PATH: Use merged guard when delta/tombstones exist.
-        // Pre-allocate using capacity hint to avoid multiple reallocations.
-        let guard = self.indexes.get_incoming(target);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(guard.iter().map(|entry| entry.edge_id));
-        result
+            // SLOW PATH: Use merged guard when delta/tombstones exist.
+            // Pre-allocate using capacity hint to avoid multiple reallocations.
+            let guard = self.indexes.get_incoming(target);
+            let mut result = Vec::with_capacity(guard.capacity_hint());
+            result.extend(guard.iter().map(|entry| entry.edge_id));
+            result
+        })
     }
 
     /// Get outgoing edges with a specific label.
@@ -984,15 +1061,17 @@ impl CurrentStorage {
         };
 
         // Optimized to avoid intermediate Vec allocation and pre-allocate result
-        let guard = self.indexes.get_outgoing(source);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(
-            guard
-                .iter()
-                .filter(|entry| entry.label == label_id)
-                .map(|entry| entry.edge_id),
-        );
-        result
+        self.apply_gate.read(|| {
+            let guard = self.indexes.get_outgoing(source);
+            let mut result = Vec::with_capacity(guard.capacity_hint());
+            result.extend(
+                guard
+                    .iter()
+                    .filter(|entry| entry.label == label_id)
+                    .map(|entry| entry.edge_id),
+            );
+            result
+        })
     }
 
     /// Get incoming edges with a specific label.
@@ -1004,15 +1083,17 @@ impl CurrentStorage {
         };
 
         // Optimized to avoid intermediate Vec allocation and pre-allocate result
-        let guard = self.indexes.get_incoming(target);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(
-            guard
-                .iter()
-                .filter(|entry| entry.label == label_id)
-                .map(|entry| entry.edge_id),
-        );
-        result
+        self.apply_gate.read(|| {
+            let guard = self.indexes.get_incoming(target);
+            let mut result = Vec::with_capacity(guard.capacity_hint());
+            result.extend(
+                guard
+                    .iter()
+                    .filter(|entry| entry.label == label_id)
+                    .map(|entry| entry.edge_id),
+            );
+            result
+        })
     }
 
     /// Get all outgoing edges from a node as an iterator.
@@ -1234,10 +1315,11 @@ impl CurrentStorage {
         label_id: crate::core::interning::InternedString,
     ) -> bool {
         match NodeId::new(node_id) {
-            Ok(id) => self
-                .indexes
-                .get_node_header(id)
-                .is_some_and(|header| header.label == label_id),
+            Ok(id) => self.apply_gate.read(|| {
+                self.indexes
+                    .get_node_header(id)
+                    .is_some_and(|header| header.label == label_id)
+            }),
             Err(_) => false,
         }
     }
@@ -1253,7 +1335,9 @@ impl CurrentStorage {
     #[inline]
     pub fn contains_node(&self, node_id: u64) -> bool {
         match NodeId::new(node_id) {
-            Ok(id) => self.indexes.get_node_header(id).is_some(),
+            Ok(id) => self
+                .apply_gate
+                .read(|| self.indexes.get_node_header(id).is_some()),
             Err(_) => false,
         }
     }
@@ -1267,13 +1351,13 @@ impl CurrentStorage {
     /// Get the out-degree of a node.
     #[inline]
     pub fn out_degree(&self, node: NodeId) -> usize {
-        self.indexes.out_degree(node)
+        self.apply_gate.read(|| self.indexes.out_degree(node))
     }
 
     /// Get the in-degree of a node.
     #[inline]
     pub fn in_degree(&self, node: NodeId) -> usize {
-        self.indexes.in_degree(node)
+        self.apply_gate.read(|| self.indexes.in_degree(node))
     }
 
     /// Get the default property name for vector indexing.
@@ -2600,10 +2684,12 @@ impl CurrentStorage {
     ///
     /// Returns the target node IDs of all outgoing edges from the source node.
     pub fn get_outgoing_targets(&self, source: NodeId) -> Vec<NodeId> {
-        let guard = self.indexes.get_outgoing(source);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(guard.iter().map(|entry| entry.target));
-        result
+        self.apply_gate.read(|| {
+            let guard = self.indexes.get_outgoing(source);
+            let mut result = Vec::with_capacity(guard.capacity_hint());
+            result.extend(guard.iter().map(|entry| entry.target));
+            result
+        })
     }
 
     /// Get target node IDs from outgoing edges with a specific label.
@@ -2613,15 +2699,17 @@ impl CurrentStorage {
             None => return Vec::new(),
         };
         // Optimized to avoid intermediate Vec allocation and pre-allocate result
-        let guard = self.indexes.get_outgoing(source);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(
-            guard
-                .iter()
-                .filter(|entry| entry.label == label_id)
-                .map(|entry| entry.target),
-        );
-        result
+        self.apply_gate.read(|| {
+            let guard = self.indexes.get_outgoing(source);
+            let mut result = Vec::with_capacity(guard.capacity_hint());
+            result.extend(
+                guard
+                    .iter()
+                    .filter(|entry| entry.label == label_id)
+                    .map(|entry| entry.target),
+            );
+            result
+        })
     }
 
     /// Get source node IDs from incoming edges (used for traversal iterators).
@@ -2630,10 +2718,12 @@ impl CurrentStorage {
     /// Note: For incoming edges, the "target" field in AdjacencyEntry represents
     /// the source node (the node the edge is coming from).
     pub fn get_incoming_sources(&self, target: NodeId) -> Vec<NodeId> {
-        let guard = self.indexes.get_incoming(target);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(guard.iter().map(|entry| entry.target));
-        result
+        self.apply_gate.read(|| {
+            let guard = self.indexes.get_incoming(target);
+            let mut result = Vec::with_capacity(guard.capacity_hint());
+            result.extend(guard.iter().map(|entry| entry.target));
+            result
+        })
     }
 
     /// Get source node IDs from incoming edges with a specific label.
@@ -2643,15 +2733,17 @@ impl CurrentStorage {
             None => return Vec::new(),
         };
         // Optimized to avoid intermediate Vec allocation and pre-allocate result
-        let guard = self.indexes.get_incoming(target);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(
-            guard
-                .iter()
-                .filter(|entry| entry.label == label_id)
-                .map(|entry| entry.target),
-        );
-        result
+        self.apply_gate.read(|| {
+            let guard = self.indexes.get_incoming(target);
+            let mut result = Vec::with_capacity(guard.capacity_hint());
+            result.extend(
+                guard
+                    .iter()
+                    .filter(|entry| entry.label == label_id)
+                    .map(|entry| entry.target),
+            );
+            result
+        })
     }
 
     /// Get the number of vectors in the HNSW index.
@@ -2954,6 +3046,121 @@ impl Default for CurrentStorage {
 
 #[cfg(test)]
 mod tests;
+
+/// Issue #3788: the replica apply gate, exercised through `CurrentStorage`'s
+/// own surface rather than the gate primitive in isolation.
+#[cfg(test)]
+mod apply_gate_tests {
+    use super::*;
+    use crate::core::property::PropertyMapBuilder;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn node(id: u64, label: &str) -> Node {
+        Node::new(
+            NodeId::new(id).unwrap(),
+            GLOBAL_INTERNER.intern(label).unwrap(),
+            PropertyMapBuilder::new().insert("n", id as i64).build(),
+            VersionId::new(id).unwrap(),
+        )
+    }
+
+    #[test]
+    fn gate_starts_disarmed_and_arms_on_demand() {
+        let storage = CurrentStorage::new();
+        assert!(
+            !storage.apply_gate_armed(),
+            "a primary's current storage must not pay the gate"
+        );
+        storage.arm_apply_gate();
+        assert!(storage.apply_gate_armed());
+        storage.disarm_apply_gate();
+        assert!(!storage.apply_gate_armed());
+    }
+
+    #[test]
+    fn reads_still_work_inside_a_publish_window_on_the_publishing_thread() {
+        // The replay engine's #3419 idempotency guards call `get_node` from
+        // inside the window; without re-entrancy this would deadlock.
+        let storage = CurrentStorage::new();
+        storage.arm_apply_gate();
+
+        let _publish = storage.begin_apply_publish();
+        let ts = crate::core::temporal::time::now();
+        storage.insert_node_direct(node(1, "Person"), ts).unwrap();
+        assert!(storage.get_node(NodeId::new(1).unwrap()).is_ok());
+        assert!(storage.contains_node(1));
+    }
+
+    /// The failure this issue reports: a two-node "transaction" applied one
+    /// operation at a time must never be observed half-present.
+    ///
+    /// Writes are append-only (each round publishes a fresh pair), so presence
+    /// is monotone and the pair's two reads can be taken independently -- the
+    /// same shape the `torn_frame_safety_*` integration tests observe. Seeing
+    /// the *later* node of a pair without its *earlier* one means the reader
+    /// caught the publish mid-flight.
+    #[test]
+    fn concurrent_reads_never_observe_half_of_a_published_batch() {
+        const ROUNDS: u64 = 400;
+
+        let storage = Arc::new(CurrentStorage::new());
+        storage.arm_apply_gate();
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let publisher = {
+            let (storage, stop) = (Arc::clone(&storage), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let ts = crate::core::temporal::time::now();
+                for k in 0..ROUNDS {
+                    let _publish = storage.begin_apply_publish();
+                    storage
+                        .insert_node_direct(node(2 * k + 1, "Person"), ts)
+                        .unwrap();
+                    std::thread::yield_now();
+                    storage
+                        .insert_node_direct(node(2 * k + 2, "Person"), ts)
+                        .unwrap();
+                }
+                stop.store(true, Ordering::SeqCst);
+            })
+        };
+
+        let readers: Vec<_> = (0..3)
+            .map(|_| {
+                let (storage, stop) = (Arc::clone(&storage), Arc::clone(&stop));
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::SeqCst) {
+                        for k in 0..ROUNDS {
+                            // Read in PUBLISH order. Ungated, a reader landing
+                            // between the two inserts sees (true, false). Gated,
+                            // `first` can only be true once the whole window has
+                            // closed -- at which point `second`, read strictly
+                            // later, must be true as well.
+                            let first = storage.contains_node(2 * k + 1);
+                            let second = storage.contains_node(2 * k + 2);
+                            assert!(
+                                !first || second,
+                                "a gated read observed half of an atomically published batch \
+                                 (round {k}: first present, second missing)"
+                            );
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        publisher.join().expect("publisher");
+        for reader in readers {
+            reader.join().expect("reader");
+        }
+
+        for k in 0..ROUNDS {
+            assert!(storage.contains_node(2 * k + 1));
+            assert!(storage.contains_node(2 * k + 2));
+        }
+    }
+}
 
 #[cfg(test)]
 mod coverage_tests {

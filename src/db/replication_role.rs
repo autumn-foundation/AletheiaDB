@@ -209,6 +209,11 @@ impl AletheiaDB {
                 // Stops + joins the background thread.
                 drop(applier);
 
+                // Issue #3788: the applier is joined, so no publish can still
+                // be in flight -- disarming here restores the ungated
+                // current-state read fast path for the promoted primary.
+                self.current.disarm_apply_gate();
+
                 let applied_lsn = progress.last_applied_lsn();
                 report.last_applied_lsn = Some(applied_lsn);
 

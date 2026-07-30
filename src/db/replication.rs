@@ -51,6 +51,12 @@ impl AletheiaDB {
     ) -> Result<()> {
         self.enter_replica_mode();
 
+        // Issue #3788: arm the current-state apply gate BEFORE spawning the
+        // applier, so every batch this replica applies is published atomically
+        // with respect to concurrent reads. Thread spawn is a synchronization
+        // edge, so the applier is guaranteed to observe the armed gate.
+        self.current.arm_apply_gate();
+
         let resume_lsn = self.startup_manifest_lsn.load(Ordering::Relaxed);
         let start_from = if resume_lsn == 0 { 1 } else { resume_lsn };
 

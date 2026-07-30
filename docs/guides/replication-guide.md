@@ -33,7 +33,11 @@ to a segment file, so a replica can never apply data the primary could still
 lose on crash. The replica applies entries only in whole commit frames
 (`[BeginTx .. CommitTx]` bands) via the same replay engine crash recovery and
 point-in-time restore use — a transaction is either entirely applied or not
-yet applied, never torn.
+yet applied, never torn. Whole-frame *submission* is only half of that
+guarantee: the replay engine walks a frame operation by operation, so the
+applier also publishes each batch behind a **current-state apply gate** that
+concurrent readers respect, making the batch's writes visible to a reader all
+at once. See [Reader isolation during apply](#reader-isolation-during-apply).
 
 ```text
 ┌─────────────────────────┐                      ┌─────────────────────────┐
@@ -105,7 +109,8 @@ This is the part to internalize before relying on a replica for anything:
   every multi-operation transaction the primary committed is either fully
   visible on the replica or not visible at all — you will never observe half
   of a transaction's writes. This holds even under a transport that delivers
-  the frame's entries split across multiple polls.
+  the frame's entries split across multiple polls, **and for a read issued
+  while a batch is mid-apply** (see below).
 - **Bi-temporal reads are consistent-as-of the applied position.** A
   temporal query (`AS OF`, `get_node_at_time`, etc.) run against a replica at
   transaction time ≤ the replica's `last_applied_lsn` coordinate returns
@@ -137,6 +142,45 @@ This is the part to internalize before relying on a replica for anything:
   serve stale-but-moving data incorrectly, it serves a **frozen**,
   internally consistent snapshot at its last applied position until the
   connection resumes.
+
+### Reader isolation during apply
+
+Selecting whole commit frames guarantees an *incomplete* transaction is never
+handed to the replay engine. It does **not**, by itself, isolate readers from
+the replay: the engine applies a frame one operation at a time, and
+current-state reads take no lock, so a read landing mid-batch could once
+observe one node of a two-node commit (Issue #3788 — fixed).
+
+A replica therefore arms a **current-state apply gate** when
+`start_replication`/`bootstrap_replica` is called. The applier opens a publish
+window around each batch's replay; a gated read either sees the state from
+before the window or the state after it, never inside it. Concretely:
+
+| Property | Guarantee |
+|---|---|
+| Point lookups (`get_node`, `get_edge`, edge endpoints/labels, adjacency lookups, degrees) | Atomic with respect to a batch apply |
+| Primary (non-replica) read cost | Unchanged — the gate is disarmed, costing one predictable branch |
+| Replica read cost, no apply in flight | A seqlock: two loads of a read-mostly word, no atomic read-modify-write, so reader fan-out still scales across cores |
+| Replica read colliding with an apply | Retried, then parked until the window closes — bounded by one batch's replay |
+| After `promote_to_primary()` | Gate is disarmed once the applier thread is joined |
+
+Two caveats worth stating plainly:
+
+- **Per-operation, not per-session.** Each read is atomic with respect to an
+  apply. Two successive reads are still two points in time, so the *second* may
+  legitimately observe a batch the first did not. That is ordinary staleness,
+  not tearing — a transaction never goes from visible back to invisible.
+- **Bulk scans and iterators are not gated.** Iterating the current-state maps
+  was never a point-in-time snapshot even on a primary, so the gate does not
+  pretend otherwise. For a true snapshot use the bi-temporal reads
+  (`get_node_at_time`, `find_nodes_at_time`, `AS OF`), which resolve against
+  immutable history.
+
+Regression coverage: `torn_frame_safety_never_exposes_a_partial_transaction`
+and `torn_frame_safety_holds_under_sustained_concurrent_load`
+(`tests/replication_engine.rs`), plus the gate's own unit tests in
+`src/storage/current/apply_gate.rs`. The read-path cost is quantified by
+`cargo bench --bench replication_apply_gate`.
 
 ## Quick start
 
@@ -343,6 +387,12 @@ before failing over (see the [Promotion Runbook](promotion-runbook.md)).
   come back to a `resync_required` state and need a fresh bootstrap rather
   than resuming — see [Bootstrap & resume](#bootstrap--resume) above. Size
   your WAL retention window to your expected maximum replica outage.
+- **Apply-gate isolation is per point lookup, not per scan.** The gate that
+  makes a batch apply atomic for readers (see
+  [Reader isolation during apply](#reader-isolation-during-apply)) covers point
+  lookups and adjacency reads. Bulk scans and the borrowing iterator accessors
+  are not gated — they were never point-in-time snapshots on a primary either.
+  Use the bi-temporal reads when you need one.
 - **Server connection cap.** A `ReplicationServer` serves at most
   `MAX_CONCURRENT_CONNECTIONS` (16) connections concurrently; connections
   beyond that are refused immediately with no response. Frame payloads are

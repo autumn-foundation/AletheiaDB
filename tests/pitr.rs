@@ -65,6 +65,29 @@ struct Scenario {
     post: Vec<(NodeId, Timestamp)>,
 }
 
+/// Spin until the wallclock microsecond strictly advances.
+///
+/// The commit path derives its HLC as "if wallclock advances, reset logical;
+/// otherwise increment logical" (`src/api/transaction/write/mod.rs`). Two
+/// commits observing the same microsecond therefore differ only in the HLC's
+/// logical counter -- which a microseconds-only representation cannot carry.
+/// The CLI's `--as-of` is exactly such a representation: it parses to
+/// `Timestamp::from(micros)`, i.e. `(W, logical = 0)`. A test that truncates a
+/// real commit timestamp `(W, L)` to `W` and feeds it back would then compare
+/// `(W, L) <= (W, 0)` in `band_within` and silently drop that commit from the
+/// restored prefix -- one node short, intermittently, depending on how fast the
+/// host commits and how coarse its clock is.
+///
+/// Separating every fixture commit by at least one microsecond keeps each
+/// commit at logical 0, so the truncation is lossless and every restore
+/// boundary in this file is exact rather than probabilistic.
+fn wait_for_clock_tick() {
+    let start = aletheiadb::core::temporal::time::now().wallclock();
+    while aletheiadb::core::temporal::time::now().wallclock() <= start {
+        std::hint::spin_loop();
+    }
+}
+
 /// Build a scenario with `num_pre` pre-backup and `num_post` post-backup nodes,
 /// all using a fixed `Person`/`name`/`phase` vocabulary interned before the
 /// backup (so the WAL's interner ids resolve after restore).
@@ -85,6 +108,7 @@ fn build_scenario(num_pre: usize, num_post: usize) -> Scenario {
             )
             .unwrap();
         pre_ids.push(id);
+        wait_for_clock_tick();
     }
 
     let albk = tmp.path().join("base.albk");
@@ -103,6 +127,7 @@ fn build_scenario(num_pre: usize, num_post: usize) -> Scenario {
             .unwrap();
         let ts = db.get_node(id).unwrap().metadata.commit_timestamp.unwrap();
         post.push((id, ts));
+        wait_for_clock_tick();
     }
 
     let archive = tmp.path().join("archive");
