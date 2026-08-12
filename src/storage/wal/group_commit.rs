@@ -452,6 +452,7 @@ impl GroupCommitCoordinator {
         }
 
         // Wake all waiting transactions
+        drop(state);
         self.flush_complete.notify_all();
 
         Ok(())
@@ -985,5 +986,43 @@ mod tests {
             "Wait took {:?}, expected < 150ms",
             elapsed
         );
+    }
+}
+
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use std::sync::Arc;
+    use loom::thread;
+    use super::{GroupCommitCoordinator, GroupCommitConfig};
+
+    #[test]
+    fn test_group_commit_race() {
+        loom::model(|| {
+            let config = GroupCommitConfig {
+                max_delay_ms: 10,
+                max_batch_size: 100,
+                timeout_multiplier: 2,
+                timeout_base_ms: 10,
+                timeout_min_ms: 20,
+                timeout_max_ms: 100,
+                recent_errors_capacity: 1024,
+            };
+            let coord = Arc::new(GroupCommitCoordinator::with_config(config));
+
+            let coord_clone1 = coord.clone();
+            let thread1 = thread::spawn(move || {
+                let (epoch, _) = coord_clone1.register_transaction().unwrap();
+                let _ = coord_clone1.wait_for_flush(epoch);
+            });
+
+            let coord_clone2 = coord.clone();
+            let thread2 = thread::spawn(move || {
+                let epoch = coord_clone2.start_flush().unwrap();
+                let _ = coord_clone2.finish_flush(epoch, Ok(()));
+            });
+
+            thread1.join().unwrap();
+            thread2.join().unwrap();
+        });
     }
 }
