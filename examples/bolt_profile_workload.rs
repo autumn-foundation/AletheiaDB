@@ -34,8 +34,21 @@ const NODE_UPDATES: usize = 1_000;
 
 /// Isolate graph/storage cost from WAL fsync cost, matching the convention
 /// already used by `benches/aletheiadb.rs` and `benches/current_state.rs`.
+///
+/// `WalConfigBuilder::default()`'s `wal_dir` is the relative path
+/// `aletheiadb/wal` (not a tempdir), so without an explicit override here
+/// every run of this binary would append to the same on-disk WAL segments
+/// left by the previous run -- silently inflating startup LSN-recovery scan
+/// costs (and any accumulated-history costs) from one run to the next, which
+/// would make baseline/after profiling runs incomparable. Use a dedicated
+/// directory under the OS tempdir and wipe it before each run so every
+/// invocation starts from the same empty-WAL state.
 fn create_db() -> AletheiaDB {
+    let wal_dir = std::env::temp_dir().join("bolt_profile_workload_wal");
+    let _ = std::fs::remove_dir_all(&wal_dir);
+
     let wal_config = WalConfigBuilder::new()
+        .wal_dir(wal_dir)
         .durability_mode(DurabilityMode::Async {
             flush_interval_ms: 100,
         })
