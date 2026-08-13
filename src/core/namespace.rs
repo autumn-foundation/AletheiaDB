@@ -695,10 +695,13 @@ pub(crate) fn first_reserved_key(properties: &PropertyMap) -> Option<String> {
         return None;
     }
     for (key, _) in properties.iter() {
-        if let Some(name) = GLOBAL_INTERNER.resolve_with(*key, |s| s.to_string())
-            && is_reserved_property_key(&name)
-        {
-            return Some(name);
+        let reserved = GLOBAL_INTERNER
+            .resolve_with(*key, is_reserved_property_key)
+            .unwrap_or(false);
+        if reserved {
+            // Reserved keys are the rare/error case, so only pay for the
+            // owned String here -- the common case above never allocates.
+            return GLOBAL_INTERNER.resolve_with(*key, |s| s.to_string());
         }
     }
     None
