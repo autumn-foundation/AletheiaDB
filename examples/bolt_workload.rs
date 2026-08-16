@@ -43,6 +43,15 @@ fn main() {
 
     let db = AletheiaDB::new().expect("create ephemeral db");
 
+    // A caller issuing thousands of repeated property lookups (as this
+    // workload's read phase does) is exactly the case the equality index
+    // exists for; enabling it here reflects a realistically-configured
+    // deployment rather than pathologically forcing every lookup through
+    // the O(nodes-per-label) unindexed fallback scan.
+    db.property_index("Person", "category")
+        .enable()
+        .expect("enable_property_index");
+
     // --- Write phase: a social-graph-shaped dataset ---
     let mut node_ids = Vec::with_capacity(node_count);
     for i in 0..node_count {
