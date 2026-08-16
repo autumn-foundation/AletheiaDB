@@ -39,10 +39,16 @@
 //! map.insert(42, "meaning of life".to_string());
 //! ```
 
-use std::hash::Hasher;
+use std::hash::{BuildHasherDefault, Hasher};
 
 const FNV_PRIME: u64 = 0x100000001b3;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+
+/// [`BuildHasher`](std::hash::BuildHasher) for maps/sets keyed by internal,
+/// already-random ids (`NodeId`, `EdgeId`, `InternedString`, ...). Avoids
+/// SipHash overhead on hot-path point lookups; see [`IdentityHasher`]'s
+/// Safety Warning before using it for anything keyed by untrusted input.
+pub type IdHashBuilder = BuildHasherDefault<IdentityHasher>;
 
 /// A highly optimized hasher for pre-hashed or unique integer keys.
 ///
