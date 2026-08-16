@@ -23,6 +23,7 @@ use dashmap::DashMap;
 use dashmap::mapref::one::Ref;
 use smallvec::SmallVec;
 
+use crate::core::hasher::IdHashBuilder;
 use crate::core::id::{EdgeId, NodeId};
 use crate::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
 
@@ -38,10 +39,17 @@ pub struct IncrementalAdjacencyIndex {
 
     /// Delta buffer for recent insertions
     /// SmallVec<[_; 8]> keeps low-degree nodes on stack
-    delta: DashMap<NodeId, SmallVec<[AdjacencyEntry; 8]>>,
+    ///
+    /// Keyed by `NodeId`, an already-unique internal u64, so identity-hashed
+    /// via [`IdHashBuilder`] to avoid SipHash overhead on `get_adjacency`'s
+    /// non-empty-delta path.
+    delta: DashMap<NodeId, SmallVec<[AdjacencyEntry; 8]>, IdHashBuilder>,
 
     /// Pending deletions with temporal metadata
-    tombstones: DashMap<EdgeId, Tombstone>,
+    ///
+    /// Identity-hashed for the same reason as `delta` — `EdgeId` is already a
+    /// unique internal u64.
+    tombstones: DashMap<EdgeId, Tombstone, IdHashBuilder>,
 
     /// Statistics for compaction decisions
     stats: AdjacencyStats,
@@ -140,8 +148,8 @@ impl IncrementalAdjacencyIndex {
 
         Self {
             frozen: ArcSwap::from_pointee((*frozen).clone()),
-            delta: DashMap::new(),
-            tombstones: DashMap::new(),
+            delta: DashMap::with_hasher(IdHashBuilder::default()),
+            tombstones: DashMap::with_hasher(IdHashBuilder::default()),
             stats: AdjacencyStats {
                 frozen_edge_count: AtomicUsize::new(frozen_edge_count),
                 ..AdjacencyStats::new()
@@ -519,7 +527,7 @@ pub struct MergedAdjacencyGuard<'a> {
     node: NodeId,
     frozen: Guard<Arc<AdjacencyIndex>>,
     delta: Option<Ref<'a, NodeId, SmallVec<[AdjacencyEntry; 8]>>>,
-    tombstones: &'a DashMap<EdgeId, Tombstone>,
+    tombstones: &'a DashMap<EdgeId, Tombstone, IdHashBuilder>,
     /// Fast path flag: if true, skip per-edge tombstone checks (delta & tombstones are empty)
     fast_path: bool,
 }

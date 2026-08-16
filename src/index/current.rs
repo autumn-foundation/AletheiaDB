@@ -5,7 +5,7 @@
 //! that must be extremely fast.
 
 use crate::core::graph::{Edge, Node, NodeHeader};
-use crate::core::hasher::IdentityHasher;
+use crate::core::hasher::IdHashBuilder;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
 use crate::core::namespace::{Namespace, NamespaceId, intern_namespace, resolve_namespace_id};
@@ -18,11 +18,6 @@ use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
-
-/// Hasher builder for the [`NamespaceId`]-keyed membership index. The key is a
-/// `u32`, so identity hashing (Issue #3349, PR2) avoids SipHash overhead on the
-/// per-edge scoped-read probe.
-type NsHasher = BuildHasherDefault<IdentityHasher>;
 
 // Note: AdjacencyGuard was removed in favor of MergedAdjacencyGuard from incremental_adjacency.
 // The new guard supports merging frozen CSR + delta buffer on-the-fly.
@@ -53,15 +48,23 @@ type NsHasher = BuildHasherDefault<IdentityHasher>;
 /// - **Compaction**: Automatic in background, doesn't block operations
 pub struct CurrentIndexes {
     /// Node ID → Node (O(1) lookup, cold path with full PropertyMap)
-    nodes: DashMap<NodeId, Node>,
+    ///
+    /// Keyed by `NodeId`, an already-unique internal u64, so identity-hashed
+    /// via [`IdHashBuilder`] to avoid SipHash overhead on the point-lookup
+    /// hot path (`get_node`, `get_node_with`, ...).
+    nodes: DashMap<NodeId, Node, IdHashBuilder>,
     /// Node ID → NodeHeader (hot path for label filtering, 16 bytes per entry)
     ///
     /// Kept in sync with `nodes`: every `insert_node` writes a header and every
     /// `remove_node` removes it. Scanning this map for label matches touches far
-    /// less memory than scanning the full `nodes` map.
-    node_headers: DashMap<NodeId, NodeHeader>,
+    /// less memory than scanning the full `nodes` map. Identity-hashed for the
+    /// same reason as `nodes`.
+    node_headers: DashMap<NodeId, NodeHeader, IdHashBuilder>,
     /// Edge ID → Edge (O(1) lookup)
-    edges: DashMap<EdgeId, Edge>,
+    ///
+    /// Identity-hashed for the same reason as `nodes` — `EdgeId` is already a
+    /// unique internal u64.
+    edges: DashMap<EdgeId, Edge, IdHashBuilder>,
     /// Outgoing edges: source node → adjacency list (incremental with O(1) inserts)
     outgoing: Arc<IncrementalAdjacencyIndex>,
     /// Incoming edges: target node → adjacency list (incremental with O(1) inserts)
@@ -105,10 +108,10 @@ pub struct CurrentIndexes {
     /// a heap-string hash. The inner member set is likewise identity-hashed (its
     /// keys are `NodeId`s — already unique u64s), so the per-edge `contains`
     /// probe is a plain integer hash, not SipHash.
-    ns_nodes: DashMap<NamespaceId, DashSet<NodeId, NsHasher>, NsHasher>,
+    ns_nodes: DashMap<NamespaceId, DashSet<NodeId, IdHashBuilder>, IdHashBuilder>,
     /// Secondary namespace → member-edge membership index (Issue #3349, PR2).
     /// The edge counterpart of [`ns_nodes`](Self::ns_nodes); see its docs.
-    ns_edges: DashMap<NamespaceId, DashSet<EdgeId, NsHasher>, NsHasher>,
+    ns_edges: DashMap<NamespaceId, DashSet<EdgeId, IdHashBuilder>, IdHashBuilder>,
     /// Opt-in registry of `(label_id, prop_key_id)` pairs that have a secondary
     /// equality index enabled. Empty by default — the property-index maintenance
     /// hooks in `insert_node` / `remove_node` short-circuit on `is_empty()`, so a
@@ -132,7 +135,7 @@ pub struct CurrentIndexes {
     /// `insert_node`/`remove_node`, never calling back into `historical`, `wal`,
     /// or `current_timestamp`. The inner set is `NodeId`-keyed so it is
     /// identity-hashed, not SipHashed.
-    prop_index: DashMap<(InternedString, InternedString, ValueKey), DashSet<NodeId, NsHasher>>,
+    prop_index: DashMap<(InternedString, InternedString, ValueKey), DashSet<NodeId, IdHashBuilder>>,
 }
 
 impl CurrentIndexes {
@@ -142,9 +145,9 @@ impl CurrentIndexes {
     /// No background compaction - call `compact_adjacency()` manually when needed.
     pub fn new() -> Self {
         CurrentIndexes {
-            nodes: DashMap::new(),
-            node_headers: DashMap::new(),
-            edges: DashMap::new(),
+            nodes: DashMap::with_hasher(BuildHasherDefault::default()),
+            node_headers: DashMap::with_hasher(BuildHasherDefault::default()),
+            edges: DashMap::with_hasher(BuildHasherDefault::default()),
             outgoing: Arc::new(IncrementalAdjacencyIndex::new()),
             incoming: Arc::new(IncrementalAdjacencyIndex::new()),
             outgoing_compaction: None,
@@ -174,9 +177,9 @@ impl CurrentIndexes {
         let incoming_handle = incoming_scheduler.start();
 
         CurrentIndexes {
-            nodes: DashMap::new(),
-            node_headers: DashMap::new(),
-            edges: DashMap::new(),
+            nodes: DashMap::with_hasher(BuildHasherDefault::default()),
+            node_headers: DashMap::with_hasher(BuildHasherDefault::default()),
+            edges: DashMap::with_hasher(BuildHasherDefault::default()),
             outgoing,
             incoming,
             outgoing_compaction: Some((outgoing_scheduler, outgoing_handle)),
