@@ -312,6 +312,7 @@ impl IncrementalAdjacencyIndex {
                 delta: None,
                 tombstones: &self.tombstones,
                 fast_path: true, // Skip per-edge tombstone checks
+                tombstones_empty: true,
             };
         }
 
@@ -323,6 +324,15 @@ impl IncrementalAdjacencyIndex {
             delta: delta_guard,
             tombstones: &self.tombstones,
             fast_path: false,
+            // Delta may be non-empty (forcing the merged path below), but
+            // tombstones can independently still be globally empty -- e.g.
+            // a freshly-loaded or freshly-imported graph with fewer than
+            // `max_delta_edges` uncompacted edges and zero deletes ever
+            // issued. Tracking this separately from `fast_path` lets the
+            // per-edge tombstone DashMap lookup in `iter()` be skipped in
+            // that case instead of probing a provably-empty map on every
+            // edge of every traversal.
+            tombstones_empty,
         }
     }
 
@@ -528,33 +538,40 @@ pub struct MergedAdjacencyGuard<'a> {
     frozen: Guard<Arc<AdjacencyIndex>>,
     delta: Option<Ref<'a, NodeId, SmallVec<[AdjacencyEntry; 8]>>>,
     tombstones: &'a DashMap<EdgeId, Tombstone, IdHashBuilder>,
-    /// Fast path flag: if true, skip per-edge tombstone checks (delta & tombstones are empty)
+    /// True if both delta and tombstones are globally empty, allowing
+    /// `fast_len()` to return the frozen count in O(1) without iterating.
     fast_path: bool,
+    /// True if tombstones are globally empty, independent of `fast_path`
+    /// (which additionally requires delta to be empty). Lets `iter()` skip
+    /// the per-edge tombstone lookup even when the merged (non-frozen-view)
+    /// path is taken because delta has pending edges.
+    tombstones_empty: bool,
 }
 
 impl<'a> MergedAdjacencyGuard<'a> {
     /// Iterate over all adjacency entries (frozen + delta, excluding tombstones).
     ///
-    /// **Fast Path**: When `fast_path` is true (delta and tombstones globally empty),
-    /// skips per-edge tombstone DashMap lookups, providing near-zero overhead iteration.
+    /// **Fast Path**: skips the per-edge tombstone DashMap lookup whenever
+    /// tombstones are globally empty, even if delta is not (e.g. a graph
+    /// with pending uncompacted edges but zero deletes ever issued).
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &AdjacencyEntry> + '_ {
         let frozen_slice = self.frozen.get_adjacency(self.node);
-        let fast_path = self.fast_path;
+        let tombstones_empty = self.tombstones_empty;
 
-        // Fast path: no tombstone checks needed, delta is None
-        // This gives us near-native slice iteration performance
-        let frozen_iter = frozen_slice.iter().filter(move |e| {
-            // Skip tombstone check if fast_path (we know tombstones are empty)
-            fast_path || !self.tombstones.contains_key(&e.edge_id)
-        });
+        // Skip the per-edge tombstone lookup whenever tombstones are
+        // globally empty, regardless of whether delta is empty (delta
+        // emptiness only decides frozen-vs-merged iteration below).
+        let frozen_iter = frozen_slice
+            .iter()
+            .filter(move |e| tombstones_empty || !self.tombstones.contains_key(&e.edge_id));
 
         let delta_iter = self
             .delta
             .as_ref()
             .into_iter()
             .flat_map(|d| d.iter())
-            .filter(move |e| fast_path || !self.tombstones.contains_key(&e.edge_id));
+            .filter(move |e| tombstones_empty || !self.tombstones.contains_key(&e.edge_id));
 
         frozen_iter.chain(delta_iter)
     }
@@ -635,10 +652,11 @@ impl<'a> MergedAdjacencyGuard<'a> {
 
     /// Check if an edge has been tombstoned (deleted) (O(1)).
     ///
-    /// Returns `false` when in fast path (tombstones are known to be empty).
+    /// Returns `false` without a lookup when tombstones are known to be
+    /// globally empty.
     #[inline]
     pub fn is_tombstoned(&self, edge_id: EdgeId) -> bool {
-        !self.fast_path && self.tombstones.contains_key(&edge_id)
+        !self.tombstones_empty && self.tombstones.contains_key(&edge_id)
     }
 }
 
