@@ -26,6 +26,103 @@
 //!
 //! The flush thread uses `.expect()` to panic on lock poisoning because silent
 //! degradation is worse than fail-fast behavior for background infrastructure.
+//!
+//! # Lock-acquisition hardening and the #3798 audit
+//!
+//! Issue #3798 reported a multi-hour, zero-CPU stall with several threads
+//! parked in `std::sync::Mutex::lock`, and named **re-entrant acquisition of
+//! this coordinator's state mutex** as the leading hypothesis. That hypothesis
+//! is **falsified** — see the call-site audit below. The hardening in this
+//! module exists for a different reason: the reported stall could not be
+//! attributed from the available evidence, so every acquisition now converts
+//! *any* future stall of this class into a structured, forensic error instead
+//! of a silent, permanent park.
+//!
+//! ## The committed call-site audit
+//!
+//! - All **eight** acquisitions of the state mutex in this file route through
+//!   the single `lock_state` chokepoint: `register_transaction`,
+//!   `wait_for_flush`, `start_flush`, `finish_flush`, `current_batch_size`,
+//!   `current_epoch`, `flushed_epoch`, `should_flush`. There is no other
+//!   `state.lock()` anywhere in the crate.
+//! - **No critical section calls another coordinator method.** `mark_flushed`
+//!   is `start_flush` *then* `finish_flush`: the first guard dies at that
+//!   method's return, so the two acquisitions are strictly sequential, never
+//!   nested.
+//! - The **only external callers** of the coordinator are
+//!   `src/api/transaction/write/mod.rs` (`wait_for_flush`) and
+//!   `src/storage/wal/concurrent_system.rs` (`register_transaction`,
+//!   `current_batch_size`, `mark_flushed`) — each a complete call that returns
+//!   before the next begins.
+//! - The guard type (`StateGuard`) **never escapes this module**, and its
+//!   `Deref` target `GroupCommitState` keeps every field private, so no
+//!   caller — internal or downstream — can hold the guard across a call back
+//!   into the coordinator.
+//!
+//! Re-entrant acquisition was therefore **impossible in the audited source**.
+//! Relatedly, flush-thread death leaves this mutex *unlocked and unpoisoned*,
+//! so it cannot be the primitive threads were parked on.
+//!
+//! ## The two confirmed mechanisms the audit found instead
+//!
+//! 1. **Unbounded ring-buffer append under a held commit-path lock.**
+//!    `WalRingBuffer::append_blocking` (`src/storage/wal/ring_buffer.rs`)
+//!    looped with no deadline while the buffer was full and not closed, and is
+//!    reached from the commit path (`src/api/transaction/write/wal.rs` →
+//!    `concurrent.rs` → `stripe.rs`). If the background flusher stops
+//!    draining, the stripes fill and that loop never ends.
+//!    **Fixed:** the append is now bounded by
+//!    `ConcurrentWalSystemConfig::max_append_block_ms` and fails with a
+//!    structured "ring buffer full / the flusher may be dead" `WalError`, and
+//!    the flusher publishes a heartbeat that
+//!    `ConcurrentWalSystem::is_healthy` consults.
+//! 2. **Every-committer amplification via the commit-path `current_timestamp`
+//!    mutex**, held across append + durability wait + apply
+//!    (`src/api/transaction/write/mod.rs`). Any single indefinite block
+//!    underneath it becomes an untimed, zero-CPU convoy of every other
+//!    committing thread. **Mitigation deferred:** that hold is deliberate and
+//!    documented at the site, pending the WAL abort framing tracked as Issue
+//!    #3413. Out of scope here.
+//!
+//! ## Lock-leaf contract
+//!
+//! The state mutex is a **leaf**: while it is held this module acquires
+//! nothing else — no file I/O, no second lock, no channel operation, no
+//! callback or foreign trait impl. The only blocking construct inside a
+//! critical section is `Condvar::wait_timeout` on the coordinator's *own*
+//! `flush_complete`, which releases the mutex while parked. `lock_state`
+//! itself only ever *sleeps* (it never takes another lock), so a thread
+//! waiting here holds nothing another thread could need.
+//!
+//! Any future change that breaks this contract reintroduces exactly the
+//! deadlock class the audit ruled out.
+//!
+//! ## Acquire-deadline rationale
+//!
+//! [`GroupCommitConfig::acquire_timeout_ms`] bounds acquisition of the state
+//! mutex. Its default (120_000) is deliberately **strictly greater** than the
+//! `timeout_max_ms` default (60_000) so a stuck *flusher* is always reported
+//! by the `wait_for_flush` deadlock detector first, and this bound only ever
+//! fires for a genuinely stuck *mutex*. It is **deadlock detection, NOT a
+//! performance SLA** — the same contract `timeout_max_ms` carries. Setting it
+//! to `0` disables the bound and restores legacy unbounded `Mutex::lock`.
+//!
+//! ## Durability-unknown caveat
+//!
+//! An acquisition timeout at a **commit-path** site (`register_transaction`,
+//! `wait_for_flush`) says so in its message: the in-flight transaction's WAL
+//! frame may already have been appended, so it **may still become durable and
+//! replay at recovery**. Such a failure must not be reported to a client as a
+//! clean abort. There is no abort framing to make this precise until Issue
+//! #3413 lands. Observation sites wrote nothing and therefore make no
+//! durability claim.
+//!
+//! ## Escalation flag
+//!
+//! Setting `ALETHEIADB_WAL_REENTRANCY_PANIC=1` makes a detected re-entrant
+//! acquisition **panic** instead of returning an error. It is read once per
+//! process and intended for CI, where a latent lock-order bug should be
+//! un-ignorable rather than a handled `Result`.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::ops::{Deref, DerefMut};
@@ -301,8 +398,8 @@ pub(crate) struct StateGuard<'a> {
 impl<'a> StateGuard<'a> {
     /// Re-arm ownership tracking around an already-held raw `MutexGuard`.
     ///
-    /// Used both by [`GroupCommitCoordinator::lock_state`] and (in GREEN) by
-    /// `wait_for_flush` when `Condvar::wait_timeout` hands the guard back.
+    /// Used by [`GroupCommitCoordinator::lock_state`] and by `wait_for_flush`
+    /// when `Condvar::wait_timeout` hands the guard back.
     fn reassemble(
         coordinator: &'a GroupCommitCoordinator,
         site: LockSite,
@@ -689,6 +786,35 @@ impl GroupCommitCoordinator {
         })
     }
 
+    /// The `wait_for_flush` deadlock-detector error, spelled once.
+    ///
+    /// Both exits of the wait loop (deadline already past on entry, and
+    /// deadline reached after a condvar wake) must report the identical
+    /// wording, because that string is what an operator greps for.
+    fn flush_wait_timeout(epoch: u64, flushed_epoch: u64) -> Error {
+        Error::Storage(StorageError::WalError {
+            reason: format!(
+                "Group commit timeout waiting for epoch {} (current flushed: {})",
+                epoch, flushed_epoch
+            ),
+        })
+    }
+
+    /// Render the diagnostics mirrors as the trailing fragment shared by every
+    /// acquisition-failure payload.
+    ///
+    /// Sampled WITHOUT the mutex, so the three values need not be mutually
+    /// consistent — see the field docs: they are a triage lead, never an
+    /// authoritative read of coordinator state.
+    fn mirror_snapshot(&self) -> String {
+        format!(
+            "[state mirrors: current_epoch={}, flushed_epoch={}, batch_count={}]",
+            self.mirror_current_epoch.load(Ordering::Relaxed),
+            self.mirror_flushed_epoch.load(Ordering::Relaxed),
+            self.mirror_batch_count.load(Ordering::Relaxed),
+        )
+    }
+
     /// Count, log, and describe a refused re-entrant acquisition.
     ///
     /// Never blocks, never poisons the mutex: re-entrancy is a *caller* bug,
@@ -703,15 +829,11 @@ impl GroupCommitCoordinator {
              this thread (thread token {token}, name '{name}') already holds the guard, \
              taken at site '{holder_site}'. Blocking here would self-deadlock, so the \
              acquisition is refused instead. Fix the caller: release the guard before \
-             re-entering the coordinator. \
-             [state mirrors: current_epoch={current_epoch}, flushed_epoch={flushed_epoch}, \
-             batch_count={batch_count}]",
+             re-entering the coordinator. {mirrors}",
             site = site.as_str(),
             name = thread.name().unwrap_or("<unnamed>"),
             holder_site = LockSite::holder_name(self.owner_site.load(Ordering::Relaxed)),
-            current_epoch = self.mirror_current_epoch.load(Ordering::Relaxed),
-            flushed_epoch = self.mirror_flushed_epoch.load(Ordering::Relaxed),
-            batch_count = self.mirror_batch_count.load(Ordering::Relaxed),
+            mirrors = self.mirror_snapshot(),
         );
 
         log_lock_diagnostic(&reason);
@@ -748,16 +870,13 @@ impl GroupCommitCoordinator {
             "timed out acquiring group_commit_state at site '{site}': possible deadlock. \
              waited {waited}µs of the configured acquire_timeout_ms={budget_ms}; \
              holder thread token {holder} at site '{holder_site}'; waiters {waiters}. \
-             [state mirrors: current_epoch={current_epoch}, flushed_epoch={flushed_epoch}, \
-             batch_count={batch_count}].{durability}",
+             {mirrors}.{durability}",
             site = site.as_str(),
             waited = waited.as_micros(),
             holder = self.owner.load(Ordering::Relaxed),
             holder_site = LockSite::holder_name(self.owner_site.load(Ordering::Relaxed)),
             waiters = self.waiters.load(Ordering::Relaxed),
-            current_epoch = self.mirror_current_epoch.load(Ordering::Relaxed),
-            flushed_epoch = self.mirror_flushed_epoch.load(Ordering::Relaxed),
-            batch_count = self.mirror_batch_count.load(Ordering::Relaxed),
+            mirrors = self.mirror_snapshot(),
         );
 
         log_lock_diagnostic(&reason);
@@ -767,8 +886,8 @@ impl GroupCommitCoordinator {
 
     /// Number of re-entrant acquisitions refused since process start.
     ///
-    /// A non-zero value is always a bug in the caller: some code path holds a
-    /// [`StateGuard`] and calls back into the coordinator on the same thread.
+    /// A non-zero value is always a bug in the caller: some code path holds
+    /// the state guard and calls back into the coordinator on the same thread.
     /// It is exposed (rather than only logged) so a health check or soak test
     /// can assert it stays at zero.
     pub fn reentrancy_detections(&self) -> u64 {
@@ -899,12 +1018,7 @@ impl GroupCommitCoordinator {
             };
 
             if remaining.as_nanos() == 0 {
-                return Err(Error::Storage(StorageError::WalError {
-                    reason: format!(
-                        "Group commit timeout waiting for epoch {} (current flushed: {})",
-                        epoch, state.flushed_epoch
-                    ),
-                }));
+                return Err(Self::flush_wait_timeout(epoch, state.flushed_epoch));
             }
 
             // Hand the RAW guard to the condvar: a thread parked in
@@ -927,12 +1041,7 @@ impl GroupCommitCoordinator {
             if (timeout_result.timed_out() || std::time::Instant::now() >= deadline)
                 && state.flushed_epoch < epoch
             {
-                return Err(Error::Storage(StorageError::WalError {
-                    reason: format!(
-                        "Group commit timeout waiting for epoch {} (current flushed: {})",
-                        epoch, state.flushed_epoch
-                    ),
-                }));
+                return Err(Self::flush_wait_timeout(epoch, state.flushed_epoch));
             }
         }
 
@@ -1401,11 +1510,10 @@ mod tests {
 
     /// Heavy honest contention must never be mistaken for a deadlock.
     ///
-    /// NOTE: this test PASSES both before and after the fix, on purpose. Not
-    /// every test in a red phase should fail — this one is the negative guard
-    /// that keeps the fix from "detecting" deadlocks that are really just
-    /// eight threads doing their job, and would catch a green implementation
-    /// whose acquisition bound or owner bookkeeping is too eager.
+    /// NOTE: this test passed both before and after the #3798 hardening, on
+    /// purpose. It is the negative guard that keeps the bound from "detecting"
+    /// deadlocks that are really just eight threads doing their job, and would
+    /// catch an acquisition bound or owner bookkeeping that is too eager.
     #[test]
     fn test_no_false_reentrancy_or_timeout_under_concurrent_load() {
         const THREADS: usize = 8;
@@ -1545,11 +1653,10 @@ mod tests {
     /// The acquisition bound must never fire before the `wait_for_flush`
     /// deadlock detector.
     ///
-    /// NOTE: this test PASSES in the red phase — the field is scaffolded with
-    /// its final default. It is here to pin the ordering invariant so a later
-    /// "let's make the timeout snappier" tweak cannot silently make a stuck
-    /// flusher surface as an inscrutable lock error instead of the purpose-built
-    /// group-commit timeout.
+    /// It pins the ordering invariant so a later "let's make the timeout
+    /// snappier" tweak cannot silently make a stuck flusher surface as an
+    /// inscrutable lock error instead of the purpose-built group-commit
+    /// timeout.
     #[test]
     fn test_acquire_timeout_default_strictly_exceeds_wait_timeout_max() {
         let config = GroupCommitConfig::default();
@@ -1564,10 +1671,8 @@ mod tests {
     /// `acquire_timeout_ms = 0` is the documented escape hatch back to legacy
     /// unbounded blocking.
     ///
-    /// NOTE: this test PASSES in the red phase — unbounded blocking is exactly
-    /// what today's code does. It is here so the green implementation keeps the
-    /// opt-out honest: an operator who disables the bound must get blocking,
-    /// not a bound with a different number.
+    /// It keeps the opt-out honest: an operator who disables the bound must
+    /// get genuine blocking, not a bound with a different number.
     #[test]
     fn test_acquire_timeout_zero_restores_unbounded_blocking() {
         let coord = Arc::new(GroupCommitCoordinator::with_defaults());

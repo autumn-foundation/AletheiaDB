@@ -657,6 +657,10 @@ let config = ConcurrentWalSystemConfig {
     /// Background flush interval in ms (default: 10)
     flush_interval_ms: 10,
 
+    /// Bound on how long a writer blocks on a full ring buffer, in ms
+    /// (default: 30_000; `0` = unbounded/legacy). See "Stall Diagnosability".
+    max_append_block_ms: 30_000,
+
     /// Durability mode
     durability_mode: DurabilityMode::GroupCommit {
         max_batch_size: 200,
@@ -708,6 +712,131 @@ pub enum DurabilityMode {
 | `segment_size` | 64-128 MB | Balance rotation overhead vs recovery time |
 | `segments_to_retain` | 10-20 | Enough for recovery + debugging |
 | `durability_mode` | `GroupCommit` | Best balance of ACID + performance |
+| `max_append_block_ms` | 30_000 | Long enough that healthy backpressure never trips it |
+
+## Stall Diagnosability (Issue #3798)
+
+A WAL stall must be *diagnosable*, never a silent hang. Two failure modes used
+to present as an indefinite, zero-CPU park with nothing to alarm on: a writer
+blocking forever on a full ring buffer, and a background flush thread that died
+without anything noticing. Both are now bounded and observable.
+
+Everything in this section is **additive**. No public signature changed, the
+defaults preserve existing behavior for a healthy system, and lock poisoning
+still maps to `StorageError::LockPoisoned` exactly as before.
+
+### Bounded blocking append
+
+`ConcurrentWalSystemConfig::max_append_block_ms` (plumbed through to
+`ConcurrentWalConfig::max_append_block_ms`; default 30_000) caps how long a
+writer waits for space in a full stripe ring buffer. On expiry the append fails
+instead of parking:
+
+```rust
+let config = ConcurrentWalSystemConfig::new(wal_dir)
+    .with_max_append_block_ms(30_000); // 0 = unbounded (legacy behavior)
+```
+
+The new failure mode is a `StorageError::WalError` naming what filled up, how
+long the writer waited, which stripe, and where to look next:
+
+```text
+WAL append gave up after waiting 30.0s: stripe 7 ring buffer full and nothing
+drained it within the 30000 ms bound; the background flusher may be dead or
+wedged (check ConcurrentWalSystem::is_healthy)
+```
+
+A **closed** buffer still takes precedence over the deadline, even once the
+deadline has passed: "shut down" is a permanent, actionable answer, while
+"timed out" only reports that waiting did not help — so an orderly shutdown
+never surfaces as a spurious stall alarm. That path keeps its historical
+`"WAL buffer closed"` wording verbatim.
+
+Setting `max_append_block_ms: 0` restores the legacy unbounded block.
+
+### Flush-thread liveness
+
+The background flusher publishes a heartbeat once per **completed** cycle,
+before it parks for the next interval — so a flusher wedged inside its wait
+stops publishing while a healthy one advances every interval:
+
+```rust
+// Strictly increasing while the flush thread is alive and scheduling.
+println!("Heartbeat: {}", wal.flush_heartbeat());
+
+// Process-lifetime count of non-poison cycle errors survived (never resets).
+println!("Cycle errors: {}", wal.flush_cycle_errors());
+```
+
+`is_healthy()` now reports `false` on a stale heartbeat as well as on
+outstanding flush errors — a flusher that died or wedged raises no error at
+all, it just stops draining, so error counters alone can never see it:
+
+| Condition | `is_healthy()` |
+|-----------|----------------|
+| Flushing normally | `true` |
+| Consecutive flush errors outstanding | `false` |
+| Heartbeat stale | `false` |
+| No flush thread (e.g. `Synchronous`) | `true` — never stale |
+| Startup, before the first cycle | `true` — the heartbeat is seeded at construction, so the full staleness window is grace |
+
+Staleness threshold is `max(10 × flush_interval, 1s)`. `Synchronous` mode runs
+no background flusher (the write path flushes inline), so it has no heartbeat
+that *could* advance and is never judged stale.
+
+A transient, non-poison coordinator error no longer takes the flush thread
+down: the cycle is counted (`flush_cycle_errors`), logged, and retried on the
+next interval. Only a **poisoned** coordinator lock still fails fast. Flush-path
+logging goes through a non-panicking writer rather than `eprintln!`, because
+`eprintln!` panics when stderr is closed (EPIPE) — killing the flush thread is
+precisely the failure this path exists to report.
+
+### Bounded group-commit lock acquisition
+
+`GroupCommitConfig::acquire_timeout_ms` (default 120_000) bounds acquisition of
+the group-commit coordinator's state mutex, and every acquisition site first
+performs a non-blocking **re-entrancy check**: a thread that already holds the
+guard is refused immediately rather than blocking on a mutex it owns.
+
+The default is deliberately **strictly greater** than the `timeout_max_ms`
+default (60_000), so a stuck *flusher* is always reported by the
+`wait_for_flush` deadlock detector first and this bound only fires for a
+genuinely stuck *mutex*. It is **deadlock detection, not a performance SLA**;
+`0` disables it and restores unbounded `Mutex::lock`.
+
+Setting `ALETHEIADB_WAL_REENTRANCY_PANIC=1` escalates a detected re-entrant
+acquisition from an error to a panic. It is read once per process and intended
+for CI, where a latent lock-order bug should be un-ignorable.
+
+Both refusals are `StorageError::WalError` carrying a forensic payload sampled
+*without* the mutex (that is the point — the reporter could not take it), so
+the values are a triage lead rather than an authoritative read:
+
+| Field | Meaning |
+|-------|---------|
+| site | Coordinator method that could not acquire (e.g. `register_transaction`) |
+| waited / `acquire_timeout_ms` | Time actually spent, against the configured bound |
+| holder thread token, holder site | Which thread held the guard, and from which method |
+| waiters | Threads currently blocked on the mutex — how big the pile-up is |
+| state mirrors | `current_epoch`, `flushed_epoch`, `batch_count` |
+| durability disclosure | Commit-path sites only (see below) |
+
+Counters `GroupCommitCoordinator::reentrancy_detections()` and
+`acquire_timeouts()` expose both classes for health checks and soak tests; a
+non-zero `reentrancy_detections` is always a caller bug.
+
+> **Durability-unknown caveat.** An acquisition timeout at a *commit-path* site
+> (`register_transaction`, `wait_for_flush`) says so explicitly: the in-flight
+> transaction's WAL frame may already have been appended, so it **may still
+> become durable and replay at recovery**. Do not report such a failure to a
+> client as a clean abort. There is no abort framing to make this precise until
+> Issue #3413 lands. Observation sites wrote nothing and make no durability
+> claim.
+
+For the full call-site audit behind this hardening — including why re-entrant
+acquisition was *impossible* in the audited source, and which two mechanisms
+the audit confirmed instead — see the module documentation on
+`src/storage/wal/group_commit.rs`.
 
 ## Component Details
 

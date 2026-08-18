@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- WAL stall diagnosability (Issue #3798). Two additive config fields:
+  `ConcurrentWalSystemConfig::max_append_block_ms` /
+  `ConcurrentWalConfig::max_append_block_ms` (default 30_000; `0` = unbounded)
+  bounding how long a writer blocks on a full ring buffer, and
+  `GroupCommitConfig::acquire_timeout_ms` (default 120_000; `0` = unbounded)
+  bounding acquisition of the group-commit state mutex. Struct-literal
+  construction of these configs that names every field breaks; add
+  `..Default::default()`. Builder setters `with_max_append_block_ms` are
+  provided on both WAL config types.
+- `ConcurrentWalSystem::flush_heartbeat()` (completed background-flusher loop
+  iterations; strictly increasing while the flush thread is alive) and
+  `flush_cycle_errors()` (process-lifetime count of non-poison flush-cycle
+  errors survived instead of dying), Issue #3798.
+- `GroupCommitCoordinator::reentrancy_detections()` and `acquire_timeouts()`
+  counters, so a health check or soak test can assert both stay at zero
+  (Issue #3798). Re-entrancy detection is non-blocking and precedes every
+  acquisition; `ALETHEIADB_WAL_REENTRANCY_PANIC=1` (read once per process)
+  escalates a detection from an error to a panic for CI.
+
+### Changed
+
+- **BEHAVIORAL:** WAL appends can now fail instead of blocking indefinitely
+  (Issue #3798). When a stripe ring buffer stays full for
+  `max_append_block_ms` (default 30s), the append returns a structured
+  `StorageError::WalError` naming the stripe, the wait, the bound, and the
+  likely cause ("the background flusher may be dead or wedged") rather than
+  parking the writer forever. Buffer **closed** still takes precedence over the
+  deadline and keeps its historical `"WAL buffer closed"` wording. Set
+  `max_append_block_ms: 0` to restore the unbounded legacy behavior.
+- **BEHAVIORAL:** `ConcurrentWalSystem::is_healthy()` now reports `false` on a
+  stale flush heartbeat, not only on outstanding consecutive flush errors
+  (Issue #3798) — a flusher that died or wedged raises no error at all, so
+  error counters alone could never see it. Staleness threshold is
+  `max(10 × flush_interval, 1s)`; the heartbeat is seeded at construction so
+  startup is a grace period, and a durability mode with no background flusher
+  (e.g. `Synchronous`) is never stale. This value also feeds
+  `database_stats.wal.healthy`.
+- **BEHAVIORAL:** group-commit state-mutex acquisition is now bounded by
+  `acquire_timeout_ms` with non-blocking re-entrancy detection (Issue #3798).
+  Both refusals are `StorageError::WalError` (`INTERNAL`, non-retriable on the
+  MCP surface) carrying a forensic payload — acquiring site, time waited
+  against the bound, holder thread token and holder site, waiter count, and
+  `current_epoch`/`flushed_epoch`/`batch_count` mirrors — sampled without the
+  mutex, so it is a triage lead rather than an authoritative read. The default
+  (120_000) is strictly greater than the `timeout_max_ms` default (60_000) so
+  the `wait_for_flush` deadlock detector always fires first; this is deadlock
+  detection, not a performance SLA. `0` restores unbounded `Mutex::lock`.
+  Lock poisoning is unchanged and still maps to `StorageError::LockPoisoned`.
+- A transient (non-poison) group-commit coordinator error no longer kills the
+  background flush thread (Issue #3798): the cycle is counted, logged, and
+  retried on the next interval; only a poisoned coordinator lock still fails
+  fast. Flush-path logging no longer uses `eprintln!`, which panics when
+  stderr is closed (EPIPE) — killing the flush thread is precisely the failure
+  that path exists to report.
+
+### Fixed
+
+- Documented the durability-unknown caveat on commit-path acquisition timeouts
+  (Issue #3798): a timeout at `register_transaction` or `wait_for_flush` may
+  leave a WAL frame already appended, so the transaction **may still become
+  durable and replay at recovery** and must not be reported to a client as a
+  clean abort. Making this precise requires WAL abort framing, tracked as
+  Issue #3413. See [docs/WAL.md](docs/WAL.md) ("Stall Diagnosability") and the
+  module documentation on `src/storage/wal/group_commit.rs` for the full
+  call-site audit.
+
 ## [0.2.0] - 2026-07-30
 
 First crates.io release since 0.1.1. This release ships the trunk work
