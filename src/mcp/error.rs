@@ -688,6 +688,31 @@ mod tests {
     }
 
     #[test]
+    fn test_wal_error_classification_is_non_retriable_internal() {
+        // Issue #3798 AC11: the group-commit lock-acquisition failures (both the
+        // suspected-deadlock timeout and the re-entrancy refusal) reuse
+        // StorageError::WalError rather than adding a new StorageError variant,
+        // so this classification IS their MCP contract.
+        //
+        // This test PASSES today — it pins the assumption the #3798 fix depends
+        // on. Retriability matters here: an acquisition timeout on the commit
+        // path leaves durability UNKNOWN, so a client must never be told to just
+        // retry (which would risk a double-applied transaction) — it must
+        // escalate. Any future reclassification of WalError has to break this
+        // test rather than silently flip that advice.
+        let e: Error = crate::core::error::StorageError::WalError {
+            reason: "Group commit lock acquisition timed out after 120000ms at \
+                     group_commit_state site register_transaction (possible deadlock); \
+                     durability status UNKNOWN"
+                .to_string(),
+        }
+        .into();
+        let json = McpError::from_db_error(&e).to_json();
+        assert_eq!(json["code"], "INTERNAL");
+        assert_eq!(json["retriable"], false);
+    }
+
+    #[test]
     fn principal_quota_breach_is_resource_exhausted_retriable_with_details() {
         // Issue #3678: a per-principal changefeed quota breach classifies to the
         // RESOURCE_EXHAUSTED envelope with retriable:true and structured
