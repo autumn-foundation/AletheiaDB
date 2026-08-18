@@ -71,7 +71,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::lsn_allocator::LsnAllocator;
-use super::ring_buffer::{CompletionHandle, PendingEntry};
+use super::ring_buffer::{AppendBlocked, AppendBlockedKind, CompletionHandle, PendingEntry};
 use super::stripe::{StripeMetrics, WalStripe};
 use super::{LSN, WalOperation};
 
@@ -82,6 +82,12 @@ pub const DEFAULT_NUM_STRIPES: usize = 16;
 
 /// Default ring buffer capacity per stripe.
 pub const DEFAULT_STRIPE_CAPACITY: usize = 1024;
+
+/// Default bound on how long a writer blocks on a full ring buffer
+/// (Issue #3798): 30 seconds. Generous enough that healthy backpressure is
+/// never mistaken for a stall, short enough that a dead flush thread surfaces
+/// as a diagnosable error instead of an indefinite hang.
+pub const DEFAULT_MAX_APPEND_BLOCK_MS: u64 = 30_000;
 
 /// Configuration for the concurrent WAL.
 #[derive(Debug, Clone)]
@@ -96,6 +102,12 @@ pub struct ConcurrentWalConfig {
     pub segment_size: usize,
     /// Number of segments to retain.
     pub segments_to_retain: usize,
+    /// Maximum time (milliseconds) a writer blocks on a full ring buffer
+    /// before failing with a diagnosable error (Issue #3798).
+    ///
+    /// `0` means unbounded (legacy behavior: block forever). The default is
+    /// [`DEFAULT_MAX_APPEND_BLOCK_MS`].
+    pub max_append_block_ms: u64,
 }
 
 impl Default for ConcurrentWalConfig {
@@ -106,6 +118,7 @@ impl Default for ConcurrentWalConfig {
             stripe_capacity: DEFAULT_STRIPE_CAPACITY,
             segment_size: 64 * 1024 * 1024, // 64 MB
             segments_to_retain: 10,
+            max_append_block_ms: DEFAULT_MAX_APPEND_BLOCK_MS,
         }
     }
 }
@@ -134,6 +147,12 @@ impl ConcurrentWalConfig {
     /// Set the segment size.
     pub fn with_segment_size(mut self, size: usize) -> Self {
         self.segment_size = size;
+        self
+    }
+
+    /// Set the bound on blocking appends (`0` = unbounded, Issue #3798).
+    pub fn with_max_append_block_ms(mut self, ms: u64) -> Self {
+        self.max_append_block_ms = ms;
         self
     }
 }
@@ -273,6 +292,38 @@ impl ConcurrentWal {
         Ok(())
     }
 
+    /// Deadline for a blocking append, or `None` when the bound is disabled
+    /// (`max_append_block_ms == 0`, legacy unbounded blocking).
+    #[inline]
+    fn append_deadline(&self) -> Option<std::time::Instant> {
+        (self.config.max_append_block_ms != 0).then(|| {
+            std::time::Instant::now()
+                + std::time::Duration::from_millis(self.config.max_append_block_ms)
+        })
+    }
+
+    /// Turn a refused blocking append into a caller-facing error (Issue #3798).
+    ///
+    /// `Closed` keeps the historical wording verbatim so existing callers and
+    /// tests are unaffected. `TimedOut` is the new, diagnosable case: it names
+    /// what filled up, how long the writer waited, which stripe, and where to
+    /// look next (a wedged or dead background flusher).
+    fn map_append_blocked(&self, blocked: AppendBlocked, stripe_id: usize) -> Error {
+        match blocked.kind {
+            AppendBlockedKind::Closed => Error::Storage(StorageError::WalError {
+                reason: "WAL buffer closed".to_string(),
+            }),
+            AppendBlockedKind::TimedOut { waited } => Error::Storage(StorageError::WalError {
+                reason: format!(
+                    "WAL append gave up after waiting {:?}: stripe {} ring buffer full and \
+                     nothing drained it within the {} ms bound; the background flusher may be \
+                     dead or wedged (check ConcurrentWalSystem::is_healthy)",
+                    waited, stripe_id, self.config.max_append_block_ms
+                ),
+            }),
+        }
+    }
+
     /// Append an operation (async mode - returns immediately after buffering).
     ///
     /// The entry is buffered in a stripe's ring buffer and will be
@@ -293,14 +344,12 @@ impl ConcurrentWal {
         let data = self.serialize_entry(lsn, &operation)?;
         let stripe = self.get_stripe();
 
-        match stripe.append_blocking(lsn, data) {
+        match stripe.append_blocking_until(lsn, data, self.append_deadline()) {
             Ok(()) => {
                 self.total_appends.fetch_add(1, Ordering::Relaxed);
                 Ok(lsn)
             }
-            Err(_entry) => Err(Error::Storage(StorageError::WalError {
-                reason: "WAL buffer closed".to_string(),
-            })),
+            Err(blocked) => Err(self.map_append_blocked(blocked, stripe.id())),
         }
     }
 
@@ -456,14 +505,12 @@ impl ConcurrentWal {
             lsns.push(lsn);
             let stripe = self.get_stripe();
 
-            match stripe.append_blocking(lsn, data) {
+            match stripe.append_blocking_until(lsn, data, self.append_deadline()) {
                 Ok(()) => {
                     self.total_appends.fetch_add(1, Ordering::Relaxed);
                 }
-                Err(_entry) => {
-                    return Err(Error::Storage(StorageError::WalError {
-                        reason: "WAL buffer closed".to_string(),
-                    }));
+                Err(blocked) => {
+                    return Err(self.map_append_blocked(blocked, stripe.id()));
                 }
             }
         }

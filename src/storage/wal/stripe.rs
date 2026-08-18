@@ -51,7 +51,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::LSN;
 use super::ring_buffer::{
-    CompletionHandle, DEFAULT_RING_BUFFER_CAPACITY, PendingEntry, WalRingBuffer,
+    AppendBlocked, CompletionHandle, DEFAULT_RING_BUFFER_CAPACITY, PendingEntry, WalRingBuffer,
 };
 
 /// A single stripe in the concurrent WAL.
@@ -161,8 +161,31 @@ impl WalStripe {
     /// - `Ok(())` if appended successfully (after waiting if needed)
     /// - `Err(entry)` if buffer is closed
     pub fn append_blocking(&self, lsn: LSN, data: Vec<u8>) -> Result<(), PendingEntry> {
+        // Unbounded wait (`None`) preserves this method's legacy contract.
+        self.append_blocking_until(lsn, data, None)
+            .map_err(|blocked| blocked.entry)
+    }
+
+    /// Append an entry, blocking until space is available or `deadline` passes
+    /// (Issue #3798).
+    ///
+    /// `None` reproduces [`Self::append_blocking`]'s unbounded wait; `Some(t)`
+    /// guarantees a return by `t` even if the flush thread has stopped
+    /// draining this stripe.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` if appended successfully (after waiting if needed)
+    /// - `Err(AppendBlocked)` carrying the entry back plus the reason
+    ///   (buffer closed vs deadline elapsed)
+    pub fn append_blocking_until(
+        &self,
+        lsn: LSN,
+        data: Vec<u8>,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(), AppendBlocked> {
         let entry = PendingEntry::new_async(lsn, data);
-        self.append_entry_blocking(entry)
+        self.append_entry_blocking_until(entry, deadline)
     }
 
     /// Append a pre-constructed entry (non-blocking).
@@ -182,16 +205,27 @@ impl WalStripe {
 
     /// Append a pre-constructed entry (blocking - waits for space).
     fn append_entry_blocking(&self, entry: PendingEntry) -> Result<(), PendingEntry> {
+        self.append_entry_blocking_until(entry, None)
+            .map_err(|blocked| blocked.entry)
+    }
+
+    /// Append a pre-constructed entry, bounded by an optional deadline
+    /// (Issue #3798). `None` waits forever, exactly as before.
+    fn append_entry_blocking_until(
+        &self,
+        entry: PendingEntry,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(), AppendBlocked> {
         let data_len = entry.data.len();
 
-        match self.ring_buffer.append_blocking(entry) {
+        match self.ring_buffer.append_blocking_until(entry, deadline) {
             Ok(()) => {
                 self.append_count.fetch_add(1, Ordering::Relaxed);
                 self.bytes_appended
                     .fetch_add(data_len as u64, Ordering::Relaxed);
                 Ok(())
             }
-            Err(e) => Err(e),
+            Err(blocked) => Err(blocked),
         }
     }
 

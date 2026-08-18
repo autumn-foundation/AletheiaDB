@@ -146,6 +146,34 @@ impl BackpressureConfig {
     }
 }
 
+/// Why a blocking append gave up without placing its entry (Issue #3798).
+///
+/// A writer that blocks forever on a full ring buffer is indistinguishable
+/// from a hung process, so the blocking append reports *why* it stopped
+/// waiting instead of never returning.
+#[derive(Debug)]
+pub enum AppendBlockedKind {
+    /// The buffer was closed (shutdown); waiting longer would never help.
+    Closed,
+    /// The caller's deadline elapsed while the buffer stayed full.
+    TimedOut {
+        /// How long the caller actually waited before giving up.
+        waited: std::time::Duration,
+    },
+}
+
+/// A blocking append that did not place its entry.
+///
+/// The entry is handed back intact (exactly like the legacy `Err(entry)`
+/// return) so the caller can retry it, report it, or drop it.
+#[derive(Debug)]
+pub struct AppendBlocked {
+    /// The entry that was *not* appended, returned to its owner.
+    pub entry: PendingEntry,
+    /// Why the append gave up.
+    pub kind: AppendBlockedKind,
+}
+
 /// A pending WAL entry waiting to be flushed to disk.
 #[derive(Debug)]
 pub struct PendingEntry {
@@ -656,6 +684,41 @@ impl WalRingBuffer {
     /// exponential backoff: starts at `base_sleep_us`, doubling each
     /// iteration until `max_sleep_us` is reached.
     pub fn append_blocking(&self, entry: PendingEntry) -> Result<(), PendingEntry> {
+        // Unbounded wait (`None`), unmapped back to the legacy return value so
+        // this method's contract is byte-for-byte what it always was.
+        self.append_blocking_until(entry, None)
+            .map_err(|blocked| blocked.entry)
+    }
+
+    /// Append an entry, blocking until space is available or `deadline` passes.
+    ///
+    /// This is the bounded counterpart of [`Self::append_blocking`]: passing
+    /// `None` reproduces the legacy unbounded wait exactly, while `Some(t)`
+    /// gives the caller a guaranteed return by `t` even when the consumer
+    /// (the background flush thread) has stopped draining.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` if the entry was successfully appended
+    /// - `Err(AppendBlocked)` carrying the entry back, with `kind` telling the
+    ///   caller whether the buffer was closed or the deadline elapsed
+    ///
+    /// # Scaffold (Issue #3798)
+    ///
+    /// The deadline is accepted but **not yet enforced**: this currently
+    /// delegates to the legacy unbounded backoff loop and only maps the
+    /// closed-buffer return into [`AppendBlockedKind::Closed`]. Honoring the
+    /// deadline (returning [`AppendBlockedKind::TimedOut`]) is the behavior
+    /// change the accompanying failing tests specify.
+    pub fn append_blocking_until(
+        &self,
+        entry: PendingEntry,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(), AppendBlocked> {
+        // SCAFFOLD: the deadline is deliberately ignored for now so this
+        // refactor is behavior-neutral; enforcing it is the fix.
+        let _ = deadline;
+
         let mut current_entry = entry;
         let mut sleep_us = self.backpressure.base_sleep_us;
 
@@ -664,7 +727,10 @@ impl WalRingBuffer {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     if self.is_closed() {
-                        return Err(e);
+                        return Err(AppendBlocked {
+                            entry: e,
+                            kind: AppendBlockedKind::Closed,
+                        });
                     }
 
                     // Buffer is full - sleep with exponential backoff
@@ -1450,6 +1516,95 @@ mod tests {
             max_sleep_us: 10,
         };
         let _ = WalRingBuffer::with_config(1024, config);
+    }
+
+    // ── Issue #3798: bounded blocking append ─────────────────────────────
+    //
+    // A writer that blocks forever on a full ring buffer (because the flush
+    // thread died) is indistinguishable from a hung process. These two tests
+    // pin the contract: the deadline is honored, and the closed-buffer
+    // semantics of BOTH entry points are unchanged.
+
+    /// A full buffer with no consumer must hand the entry back once the
+    /// caller's deadline elapses -- never block the writer forever.
+    #[test]
+    fn test_append_blocking_until_times_out_on_full_buffer() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        // Capacity 2, filled to the brim, and deliberately never drained.
+        let buf = Arc::new(WalRingBuffer::new(2));
+        for i in 0..2 {
+            buf.try_append(PendingEntry::new_async(LSN(i), vec![i as u8]))
+                .expect("filling a fresh capacity-2 buffer must succeed");
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let worker_buf = Arc::clone(&buf);
+        // Detached on purpose: while the deadline is unenforced this worker
+        // never returns, so the TEST must never join it -- the watchdog
+        // recv_timeout below is what decides pass/fail.
+        thread::spawn(move || {
+            let entry = PendingEntry::new_async(LSN(99), vec![7, 7, 7]);
+            let deadline = Instant::now() + Duration::from_millis(100);
+            let _ = tx.send(worker_buf.append_blocking_until(entry, Some(deadline)));
+        });
+
+        let result = rx.recv_timeout(Duration::from_secs(5)).expect(
+            "append_blocking_until(Some(deadline)) never returned within 5s: a full ring \
+             buffer with no consumer still blocks the writer forever (Issue #3798)",
+        );
+
+        let blocked = result.expect_err("append must not succeed against a full, undrained buffer");
+        let AppendBlocked { entry, kind } = blocked;
+        match kind {
+            AppendBlockedKind::TimedOut { waited } => assert!(
+                waited >= Duration::from_millis(100),
+                "reported wait ({:?}) must cover the requested 100ms deadline",
+                waited
+            ),
+            other => panic!("expected AppendBlockedKind::TimedOut, got {:?}", other),
+        }
+        assert_eq!(entry.lsn, LSN(99), "the entry must be handed back intact");
+        assert_eq!(
+            entry.data,
+            vec![7, 7, 7],
+            "the payload must be handed back intact"
+        );
+    }
+
+    /// Regression guard (passes before AND after the bounded-append fix):
+    /// a closed buffer is reported as `Closed` on the bounded entry point, and
+    /// the legacy `append_blocking` keeps returning its legacy `Err(entry)`.
+    #[test]
+    fn test_append_blocking_preserves_closed_semantics() {
+        use std::time::{Duration, Instant};
+
+        let buf = WalRingBuffer::new(2);
+        for i in 0..2 {
+            buf.try_append(PendingEntry::new_async(LSN(i), vec![i as u8]))
+                .expect("filling a fresh capacity-2 buffer must succeed");
+        }
+        buf.close();
+
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let blocked = buf
+            .append_blocking_until(PendingEntry::new_async(LSN(50), vec![1, 2]), Some(deadline))
+            .expect_err("a closed buffer must refuse the append");
+        assert!(
+            matches!(blocked.kind, AppendBlockedKind::Closed),
+            "a closed buffer must report Closed, not a timeout: {:?}",
+            blocked.kind
+        );
+        assert_eq!(blocked.entry.lsn, LSN(50));
+        assert_eq!(blocked.entry.data, vec![1, 2]);
+
+        // Legacy entry point: unchanged signature, unchanged return value.
+        let returned = buf
+            .append_blocking(PendingEntry::new_async(LSN(51), vec![3]))
+            .expect_err("a closed buffer must return the entry to the caller");
+        assert_eq!(returned.lsn, LSN(51));
+        assert_eq!(returned.data, vec![3]);
     }
 
     #[test]

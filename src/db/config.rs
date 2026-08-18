@@ -862,6 +862,9 @@ impl AletheiaDB {
                 wal_cipher: wal_cipher.clone(),
                 wal_key_version: provisioned_key_version,
                 tolerate_torn_tail: config.wal.tolerate_torn_tail,
+                // Issue #3798: bounded blocking append. Not yet surfaced in
+                // `crate::config::WalConfig`, so take the default.
+                ..Default::default()
             };
 
             let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
@@ -1810,6 +1813,9 @@ impl AletheiaDB {
                 wal_cipher: None,
                 wal_key_version: None,
                 tolerate_torn_tail: wal_config.tolerate_torn_tail,
+                // Issue #3798: bounded blocking append. Not yet surfaced in
+                // `crate::config::WalConfig`, so take the default.
+                ..Default::default()
             };
 
             let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);

@@ -51,7 +51,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
 
-use super::concurrent::{ConcurrentWal, ConcurrentWalConfig};
+use super::concurrent::{ConcurrentWal, ConcurrentWalConfig, DEFAULT_MAX_APPEND_BLOCK_MS};
 use super::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig, FlushStats};
 use super::group_commit::GroupCommitCoordinator;
 use super::{LSN, WalOperation};
@@ -98,6 +98,13 @@ pub struct ConcurrentWalSystemConfig {
     /// when `false`, any parse failure hard-errors (fail-stop recovery). See
     /// [`crate::config::WalConfig::tolerate_torn_tail`].
     pub tolerate_torn_tail: bool,
+    /// Maximum time (milliseconds) a writer blocks on a full ring buffer
+    /// before failing with a diagnosable error (Issue #3798).
+    ///
+    /// `0` means unbounded (legacy behavior: block forever). Plumbed straight
+    /// through to [`ConcurrentWalConfig::max_append_block_ms`]; default
+    /// [`DEFAULT_MAX_APPEND_BLOCK_MS`].
+    pub max_append_block_ms: u64,
 }
 
 impl std::fmt::Debug for ConcurrentWalSystemConfig {
@@ -117,6 +124,7 @@ impl std::fmt::Debug for ConcurrentWalSystemConfig {
             )
             .field("wal_key_version", &self.wal_key_version)
             .field("tolerate_torn_tail", &self.tolerate_torn_tail)
+            .field("max_append_block_ms", &self.max_append_block_ms)
             .finish()
     }
 }
@@ -135,6 +143,7 @@ impl Default for ConcurrentWalSystemConfig {
             wal_cipher: None,
             wal_key_version: None,
             tolerate_torn_tail: true,
+            max_append_block_ms: DEFAULT_MAX_APPEND_BLOCK_MS,
         }
     }
 }
@@ -163,6 +172,14 @@ impl ConcurrentWalSystemConfig {
     /// Set the flush interval in milliseconds.
     pub fn with_flush_interval_ms(mut self, ms: u64) -> Self {
         self.flush_interval_ms = ms;
+        self
+    }
+
+    /// Set the bound on blocking appends in milliseconds (Issue #3798).
+    ///
+    /// `0` disables the bound (legacy unbounded blocking).
+    pub fn with_max_append_block_ms(mut self, ms: u64) -> Self {
+        self.max_append_block_ms = ms;
         self
     }
 }
@@ -216,6 +233,31 @@ impl FlushNotifier {
 /// Threshold for consecutive flush errors before logging a critical warning.
 const FLUSH_ERROR_WARNING_THRESHOLD: u64 = 3;
 
+/// Floor for the heartbeat staleness threshold (Issue #3798). Even a very
+/// short flush interval gets at least this much slack before the flush thread
+/// is judged stalled, so a scheduling hiccup never reads as a dead flusher.
+const MIN_HEARTBEAT_STALENESS: Duration = Duration::from_secs(1);
+
+/// How long the flush heartbeat may go unchanged before the WAL is considered
+/// unhealthy (Issue #3798): ten flush intervals, floored at
+/// [`MIN_HEARTBEAT_STALENESS`].
+///
+/// Pure function of the configured interval so it can be reasoned about (and
+/// tested) without spawning a flush thread.
+#[allow(dead_code)] // Wired into `is_healthy` by the flusher-liveness fix.
+fn heartbeat_staleness_threshold(flush_interval: Duration) -> Duration {
+    (flush_interval * 10).max(MIN_HEARTBEAT_STALENESS)
+}
+
+/// Wallclock microseconds since the UNIX epoch (0 if the clock predates it).
+/// Used to timestamp flusher heartbeats (Issue #3798).
+fn now_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
 /// Helper struct to encapsulate background flush logic.
 struct BackgroundFlusher {
     wal: Arc<ConcurrentWal>,
@@ -226,6 +268,21 @@ struct BackgroundFlusher {
     error_counter: Arc<AtomicU64>,
     interval: Duration,
     sync_on_flush: bool,
+    /// Completed loop iterations, published so callers can prove this thread
+    /// is still alive (Issue #3798).
+    #[allow(dead_code)] // Bumped per iteration by the flusher-liveness fix.
+    flush_heartbeat: Arc<AtomicU64>,
+    /// Wallclock micros of the most recent heartbeat (Issue #3798).
+    #[allow(dead_code)] // Stamped per iteration by the flusher-liveness fix.
+    last_beat_micros: Arc<AtomicU64>,
+    /// Non-poison coordinator errors survived instead of dying (Issue #3798).
+    #[allow(dead_code)] // Incremented by the flusher-liveness fix.
+    flush_cycle_errors: Arc<AtomicU64>,
+    /// Test-only error injection for the flush cycle (Issue #3798). Held
+    /// unconditionally so construction is cfg-uniform; only consulted under
+    /// `#[cfg(test)]`.
+    #[allow(dead_code)]
+    test_inject_cycle_error: Arc<AtomicBool>,
 }
 
 impl BackgroundFlusher {
@@ -249,7 +306,7 @@ impl BackgroundFlusher {
         // here - continuing would leave waiting transactions hanging indefinitely.
         let should_mark_flushed = !entries.is_empty()
             || self.group_commit.as_ref().is_some_and(|gc| {
-                gc.current_batch_size()
+                self.current_batch_size(gc)
                     .expect("GroupCommitCoordinator lock poisoned - flush thread cannot continue")
                     > 0
             });
@@ -262,6 +319,22 @@ impl BackgroundFlusher {
             // No entries but there are pending transactions - advance epoch anyway
             self.handle_flush_result(Ok(()));
         }
+    }
+
+    /// Read the group-commit coordinator's pending batch size.
+    ///
+    /// Test builds can inject a synthetic (non-poison) error here, which flows
+    /// through exactly the same downstream handling a real coordinator error
+    /// would take — the point being to prove the flush thread survives it
+    /// (Issue #3798) without having to poison a real lock.
+    fn current_batch_size(&self, gc: &GroupCommitCoordinator) -> Result<usize> {
+        #[cfg(test)]
+        if self.test_inject_cycle_error.swap(false, Ordering::Relaxed) {
+            return Err(Error::Storage(StorageError::WalError {
+                reason: "injected test error".into(),
+            }));
+        }
+        gc.current_batch_size()
     }
 
     fn perform_final_flush(&self) {
@@ -329,6 +402,26 @@ pub struct ConcurrentWalSystem {
     group_commit: Option<Arc<GroupCommitCoordinator>>,
     /// Counter for consecutive flush errors (for health monitoring).
     consecutive_flush_errors: Arc<AtomicU64>,
+    /// Completed background-flusher loop iterations (Issue #3798). A strictly
+    /// increasing value proves the flush thread is alive; a frozen one is the
+    /// signal that writers are about to pile up behind a full ring buffer.
+    flush_heartbeat: Arc<AtomicU64>,
+    /// Wallclock micros of the most recent heartbeat, seeded at spawn time so
+    /// startup is a grace period rather than an instant staleness trip
+    /// (Issue #3798).
+    #[allow(dead_code)] // Read by `is_healthy` once staleness detection lands.
+    last_beat_micros: Arc<AtomicU64>,
+    /// Non-poison flush-cycle errors the flusher skipped instead of dying
+    /// (Issue #3798).
+    flush_cycle_errors: Arc<AtomicU64>,
+    /// Test-only staleness override in micros (`0` = use the computed
+    /// threshold), so liveness tests need not wait real seconds.
+    #[allow(dead_code)] // Read by `is_healthy` once staleness detection lands.
+    health_staleness_override_micros: AtomicU64,
+    /// Test-only flush-cycle error injection, shared with the
+    /// [`BackgroundFlusher`] (Issue #3798).
+    #[allow(dead_code)] // Written by tests, read by the flusher under cfg(test).
+    test_inject_cycle_error: Arc<AtomicBool>,
     /// Crash-torn-tail recovery policy applied by [`Self::read_from`]
     /// (Issue #3433).
     tolerate_torn_tail: bool,
@@ -375,6 +468,7 @@ impl ConcurrentWalSystem {
             stripe_capacity: config.stripe_capacity,
             segment_size: config.segment_size,
             segments_to_retain: config.segments_to_retain,
+            max_append_block_ms: config.max_append_block_ms,
         };
 
         // Build the WAL DEK keyring from the configured cipher (Issue #3617). A
@@ -445,6 +539,14 @@ impl ConcurrentWalSystem {
         // Create error counter for health monitoring
         let consecutive_flush_errors = Arc::new(AtomicU64::new(0));
 
+        // Flusher liveness signals (Issue #3798). `last_beat_micros` starts at
+        // construction time so a freshly started system has a full staleness
+        // window of grace before it can be judged stalled.
+        let flush_heartbeat = Arc::new(AtomicU64::new(0));
+        let last_beat_micros = Arc::new(AtomicU64::new(now_micros()));
+        let flush_cycle_errors = Arc::new(AtomicU64::new(0));
+        let test_inject_cycle_error = Arc::new(AtomicBool::new(false));
+
         // Start background flush thread for async/group-commit modes
         let flush_thread = if matches!(
             config.durability_mode,
@@ -458,6 +560,10 @@ impl ConcurrentWalSystem {
             let flush_notifier_clone = Arc::clone(&flush_notifier);
             let group_commit_clone = group_commit.clone();
             let error_counter_clone = Arc::clone(&consecutive_flush_errors);
+            let heartbeat_clone = Arc::clone(&flush_heartbeat);
+            let last_beat_clone = Arc::clone(&last_beat_micros);
+            let cycle_errors_clone = Arc::clone(&flush_cycle_errors);
+            let inject_clone = Arc::clone(&test_inject_cycle_error);
             let flush_interval = Duration::from_millis(config.flush_interval_ms);
             let sync_on_flush =
                 matches!(config.durability_mode, DurabilityMode::GroupCommit { .. });
@@ -472,6 +578,10 @@ impl ConcurrentWalSystem {
                     error_counter_clone,
                     flush_interval,
                     sync_on_flush,
+                    heartbeat_clone,
+                    last_beat_clone,
+                    cycle_errors_clone,
+                    inject_clone,
                 );
             }))
         } else {
@@ -487,6 +597,11 @@ impl ConcurrentWalSystem {
             durability_mode: config.durability_mode,
             group_commit,
             consecutive_flush_errors,
+            flush_heartbeat,
+            last_beat_micros,
+            flush_cycle_errors,
+            health_staleness_override_micros: AtomicU64::new(0),
+            test_inject_cycle_error,
             tolerate_torn_tail: config.tolerate_torn_tail,
             wal_keyring,
             #[cfg(not(target_arch = "wasm32"))]
@@ -510,6 +625,10 @@ impl ConcurrentWalSystem {
         error_counter: Arc<AtomicU64>,
         interval: Duration,
         sync_on_flush: bool,
+        flush_heartbeat: Arc<AtomicU64>,
+        last_beat_micros: Arc<AtomicU64>,
+        flush_cycle_errors: Arc<AtomicU64>,
+        test_inject_cycle_error: Arc<AtomicBool>,
     ) {
         let flusher = BackgroundFlusher {
             wal,
@@ -520,6 +639,10 @@ impl ConcurrentWalSystem {
             error_counter,
             interval,
             sync_on_flush,
+            flush_heartbeat,
+            last_beat_micros,
+            flush_cycle_errors,
+            test_inject_cycle_error,
         };
         flusher.run();
     }
@@ -834,6 +957,35 @@ impl ConcurrentWalSystem {
     /// The counter resets to 0 after a successful flush.
     pub fn consecutive_flush_errors(&self) -> u64 {
         self.consecutive_flush_errors.load(Ordering::Relaxed)
+    }
+
+    /// Completed background-flusher loop iterations (Issue #3798).
+    ///
+    /// Strictly increasing while the flush thread is alive and scheduling; a
+    /// value that stops advancing is the observable signal that the flusher
+    /// died or wedged, and therefore that writers will soon block on full ring
+    /// buffers. Always `0` for durability modes that run no flush thread
+    /// (e.g. [`DurabilityMode::Synchronous`]).
+    pub fn flush_heartbeat(&self) -> u64 {
+        self.flush_heartbeat.load(Ordering::Relaxed)
+    }
+
+    /// Non-poison flush-cycle errors the background flusher survived
+    /// (Issue #3798).
+    ///
+    /// Unlike [`Self::consecutive_flush_errors`] this never resets: it counts,
+    /// over the process lifetime, how many times a cycle was skipped instead
+    /// of taking down the flush thread.
+    pub fn flush_cycle_errors(&self) -> u64 {
+        self.flush_cycle_errors.load(Ordering::Relaxed)
+    }
+
+    /// Override the heartbeat staleness threshold (micros; `0` = use the
+    /// computed one). Test-only, so liveness assertions need not wait seconds.
+    #[cfg(test)]
+    pub(crate) fn set_health_staleness_override_micros(&self, micros: u64) {
+        self.health_staleness_override_micros
+            .store(micros, Ordering::Relaxed);
     }
 
     /// Check if the WAL is healthy (no consecutive flush errors).
@@ -2227,5 +2379,214 @@ mod tests {
             "Batch should be flushed immediately"
         );
         assert_eq!(lsns.len(), 2);
+    }
+
+    // ── Issue #3798: background flusher liveness ─────────────────────────
+    //
+    // A flush thread that dies (or wedges) is currently invisible: writers
+    // simply block forever on full ring buffers and the health check keeps
+    // reporting "healthy". These tests pin the observable contract —
+    // a heartbeat, a survivable error path, and a health check that reads it.
+
+    /// Watchdog for every bounded poll below. No assertion here may depend on
+    /// timing luck: each one either observes its condition inside this window
+    /// or fails with an explicit message.
+    const LIVENESS_WATCHDOG: Duration = Duration::from_secs(5);
+
+    /// Poll `cond` every 10ms until it holds or the watchdog elapses.
+    fn poll_until(mut cond: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + LIVENESS_WATCHDOG;
+        while std::time::Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        cond()
+    }
+
+    fn group_commit_config(
+        dir: &std::path::Path,
+        flush_interval_ms: u64,
+    ) -> ConcurrentWalSystemConfig {
+        ConcurrentWalSystemConfig::new(dir)
+            .with_durability_mode(DurabilityMode::GroupCommit {
+                max_batch_size: 8,
+                max_delay_ms: 5,
+            })
+            .with_flush_interval_ms(flush_interval_ms)
+    }
+
+    /// A transient (non-poison) coordinator error must NOT take down the flush
+    /// thread: it should be counted, the cycle skipped, and flushing resumed.
+    #[test]
+    fn test_flush_thread_survives_injected_cycle_error() {
+        let dir = tempdir().unwrap();
+        let wal = ConcurrentWalSystem::new(group_commit_config(dir.path(), 20)).unwrap();
+
+        // Make the next flush cycle observe a non-poison error, exactly as a
+        // transient coordinator failure would.
+        wal.test_inject_cycle_error.store(true, Ordering::Relaxed);
+
+        assert!(
+            poll_until(|| wal.flush_cycle_errors() >= 1),
+            "flush thread died on non-poison error (current .expect() behavior): \
+             flush_cycle_errors stayed at {} for {:?}, so no cycle was ever skipped-and-counted",
+            wal.flush_cycle_errors(),
+            LIVENESS_WATCHDOG
+        );
+
+        // Surviving means the heartbeat keeps advancing AFTER the error.
+        let beat_after_error = wal.flush_heartbeat();
+        assert!(
+            poll_until(|| wal.flush_heartbeat() > beat_after_error),
+            "flush heartbeat frozen at {} after the injected error: the flush thread \
+             did not survive it",
+            beat_after_error
+        );
+
+        // ...and the WAL still round-trips real work.
+        wal.append(create_test_operation(1))
+            .expect("append after an injected flush-cycle error must succeed");
+        wal.flush()
+            .expect("flush after an injected flush-cycle error must succeed");
+        assert!(
+            wal.total_flushed() >= 1,
+            "the post-error append must reach disk"
+        );
+    }
+
+    /// The flusher must publish a strictly increasing heartbeat so its
+    /// liveness is observable from outside the thread.
+    #[test]
+    fn test_flush_heartbeat_advances() {
+        let dir = tempdir().unwrap();
+        let wal = ConcurrentWalSystem::new(group_commit_config(dir.path(), 10)).unwrap();
+
+        assert!(
+            poll_until(|| wal.flush_heartbeat() >= 1),
+            "flush_heartbeat() never reached 1 within {:?} with a 10ms flush interval: \
+             the flusher publishes no liveness signal",
+            LIVENESS_WATCHDOG
+        );
+
+        let first = wal.flush_heartbeat();
+        assert!(
+            poll_until(|| wal.flush_heartbeat() > first),
+            "flush_heartbeat() stuck at {} within {:?}: the signal does not advance per cycle",
+            first,
+            LIVENESS_WATCHDOG
+        );
+    }
+
+    /// A flusher that runs its startup cycle and then sleeps ~forever is a
+    /// wedged flusher; the health check must say so even though no flush has
+    /// actually errored.
+    #[test]
+    fn test_is_healthy_detects_stale_heartbeat() {
+        let dir = tempdir().unwrap();
+        // One startup cycle, then a ~1h sleep: a heartbeat that cannot advance
+        // again on its own -- wedged by configuration.
+        let wal = ConcurrentWalSystem::new(group_commit_config(dir.path(), 3_600_000)).unwrap();
+        wal.set_health_staleness_override_micros(50_000); // 50ms
+
+        assert!(
+            poll_until(|| !wal.is_healthy()),
+            "is_healthy() stayed true for {:?} with the heartbeat frozen far beyond the \
+             50ms staleness override: a wedged flusher is invisible to health checks",
+            LIVENESS_WATCHDOG
+        );
+        assert_eq!(
+            wal.consecutive_flush_errors(),
+            0,
+            "no flush actually failed here; only the heartbeat is stale"
+        );
+    }
+
+    /// Edge pin (passes before AND after the liveness fix): a durability mode
+    /// with no flush thread has no heartbeat to go stale, so it must stay
+    /// healthy no matter how strict the staleness threshold is.
+    #[test]
+    fn test_is_healthy_true_without_flush_thread() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path())
+            .with_durability_mode(DurabilityMode::Synchronous);
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        assert_eq!(
+            wal.flush_heartbeat(),
+            0,
+            "Synchronous mode runs no background flusher"
+        );
+        wal.set_health_staleness_override_micros(1); // absurdly strict
+        thread::sleep(Duration::from_millis(20));
+
+        assert!(
+            wal.is_healthy(),
+            "a WAL with no flush thread has no heartbeat that can go stale"
+        );
+        wal.append(create_test_operation(1)).unwrap();
+        assert!(
+            wal.is_healthy(),
+            "synchronous appends keep the WAL healthy regardless of heartbeat staleness"
+        );
+    }
+
+    /// Pure formula (passes before AND after the fix): ten flush intervals,
+    /// floored at one second.
+    #[test]
+    fn test_staleness_threshold_formula() {
+        assert_eq!(
+            heartbeat_staleness_threshold(Duration::from_millis(10)),
+            Duration::from_secs(1),
+            "short intervals are floored at 1s"
+        );
+        assert_eq!(
+            heartbeat_staleness_threshold(Duration::from_millis(200)),
+            Duration::from_secs(2),
+            "above the floor the threshold is 10x the interval"
+        );
+        assert_eq!(
+            heartbeat_staleness_threshold(Duration::ZERO),
+            Duration::from_secs(1),
+            "a zero interval still gets the floor"
+        );
+    }
+
+    /// The flush thread must not panic-on-error or log through a macro that
+    /// itself panics (EPIPE). Guards the source of the flusher path directly.
+    #[test]
+    fn test_no_expect_or_eprintln_remains_on_flush_thread_path() {
+        const SOURCE: &str = include_str!("concurrent_system.rs");
+
+        // Needles are assembled at runtime so this test's own source can never
+        // match itself.
+        let eprintln_needle = format!("{}{}", "eprint", "ln!");
+        let expect_needle = format!("{}{}", ".expect", "(");
+
+        let eprintln_hits = SOURCE.matches(eprintln_needle.as_str()).count();
+        assert_eq!(
+            eprintln_hits, 0,
+            "found {} `{}` call(s) in concurrent_system.rs: the flusher must log through a \
+             non-panicking helper (this macro panics on EPIPE)",
+            eprintln_hits, eprintln_needle
+        );
+
+        let start = SOURCE
+            .find("impl BackgroundFlusher")
+            .expect("start marker `impl BackgroundFlusher` must exist");
+        let end = SOURCE
+            .find("/// Unified concurrent WAL system.")
+            .expect("end marker `/// Unified concurrent WAL system.` must exist");
+        assert!(start < end, "flusher region markers are out of order");
+
+        let region = &SOURCE[start..end];
+        let expect_hits = region.matches(expect_needle.as_str()).count();
+        assert_eq!(
+            expect_hits, 0,
+            "found {} `{}` call(s) on the flush-thread path: a non-poison coordinator error \
+             must be counted and skipped, not panic the flush thread",
+            expect_hits, expect_needle
+        );
     }
 }
