@@ -703,21 +703,21 @@ impl WalRingBuffer {
     /// - `Err(AppendBlocked)` carrying the entry back, with `kind` telling the
     ///   caller whether the buffer was closed or the deadline elapsed
     ///
-    /// # Scaffold (Issue #3798)
+    /// # Closed takes precedence over TimedOut (Issue #3798)
     ///
-    /// The deadline is accepted but **not yet enforced**: this currently
-    /// delegates to the legacy unbounded backoff loop and only maps the
-    /// closed-buffer return into [`AppendBlockedKind::Closed`]. Honoring the
-    /// deadline (returning [`AppendBlockedKind::TimedOut`]) is the behavior
-    /// change the accompanying failing tests specify.
+    /// A closed buffer is checked *before* the deadline on every retry, even
+    /// once the deadline is already in the past: "shut down" is a permanent,
+    /// actionable answer while "timed out" only says *keep waiting did not
+    /// help*. Reporting the timeout first would turn an orderly shutdown into
+    /// a spurious stall alarm.
     pub fn append_blocking_until(
         &self,
         entry: PendingEntry,
         deadline: Option<std::time::Instant>,
     ) -> Result<(), AppendBlocked> {
-        // SCAFFOLD: the deadline is deliberately ignored for now so this
-        // refactor is behavior-neutral; enforcing it is the fix.
-        let _ = deadline;
+        // Measured from loop entry so the reported wait is what this call
+        // actually spent parked, not the caller's clock.
+        let start = std::time::Instant::now();
 
         let mut current_entry = entry;
         let mut sleep_us = self.backpressure.base_sleep_us;
@@ -733,9 +733,30 @@ impl WalRingBuffer {
                         });
                     }
 
+                    // Bounded wait: give the entry back rather than parking a
+                    // writer forever behind a consumer that stopped draining.
+                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        return Err(AppendBlocked {
+                            entry: e,
+                            kind: AppendBlockedKind::TimedOut {
+                                waited: start.elapsed(),
+                            },
+                        });
+                    }
+
                     // Buffer is full - sleep with exponential backoff
                     if sleep_us > 0 {
-                        std::thread::sleep(std::time::Duration::from_micros(sleep_us));
+                        let mut nap = std::time::Duration::from_micros(sleep_us);
+                        // Never sleep clean past the deadline: clamp the last
+                        // nap to what is left so the caller is answered at its
+                        // deadline instead of one full quantum after it.
+                        if let Some(d) = deadline {
+                            let remaining = d.saturating_duration_since(std::time::Instant::now());
+                            if remaining < nap {
+                                nap = remaining;
+                            }
+                        }
+                        std::thread::sleep(nap);
                         // Double sleep time up to max
                         sleep_us = (sleep_us.saturating_mul(2)).min(self.backpressure.max_sleep_us);
                     } else {

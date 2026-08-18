@@ -244,9 +244,27 @@ const MIN_HEARTBEAT_STALENESS: Duration = Duration::from_secs(1);
 ///
 /// Pure function of the configured interval so it can be reasoned about (and
 /// tested) without spawning a flush thread.
-#[allow(dead_code)] // Wired into `is_healthy` by the flusher-liveness fix.
 fn heartbeat_staleness_threshold(flush_interval: Duration) -> Duration {
     (flush_interval * 10).max(MIN_HEARTBEAT_STALENESS)
+}
+
+/// Report a flush-thread error without ever panicking (Issue #3798).
+///
+/// Follows the module-local logging convention of
+/// [`super::segment_reader`]'s scan warnings, with one deliberate difference:
+/// the `std` stderr *print* macros panic when the write fails, and a
+/// daemonized / launchd-managed process whose stderr pipe has been closed
+/// hits exactly that (EPIPE). A panic there kills the flush thread — the very
+/// silent-stall failure this path exists to report — so the fallback writes
+/// through `writeln!` and drops the result instead.
+fn log_flush_error(message: &str) {
+    #[cfg(feature = "observability")]
+    tracing::error!("{}", message);
+    #[cfg(not(feature = "observability"))]
+    {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "ERROR: {}", message);
+    }
 }
 
 /// Wallclock microseconds since the UNIX epoch (0 if the clock predates it).
@@ -270,13 +288,10 @@ struct BackgroundFlusher {
     sync_on_flush: bool,
     /// Completed loop iterations, published so callers can prove this thread
     /// is still alive (Issue #3798).
-    #[allow(dead_code)] // Bumped per iteration by the flusher-liveness fix.
     flush_heartbeat: Arc<AtomicU64>,
     /// Wallclock micros of the most recent heartbeat (Issue #3798).
-    #[allow(dead_code)] // Stamped per iteration by the flusher-liveness fix.
     last_beat_micros: Arc<AtomicU64>,
     /// Non-poison coordinator errors survived instead of dying (Issue #3798).
-    #[allow(dead_code)] // Incremented by the flusher-liveness fix.
     flush_cycle_errors: Arc<AtomicU64>,
     /// Test-only error injection for the flush cycle (Issue #3798). Held
     /// unconditionally so construction is cfg-uniform; only consulted under
@@ -289,27 +304,66 @@ impl BackgroundFlusher {
     fn run(&self) {
         while !self.shutdown.load(Ordering::Relaxed) {
             self.perform_flush_cycle();
+            // Publish liveness once per COMPLETED cycle, before parking
+            // (Issue #3798). Bumping here and not after the wait is what makes
+            // a wedged flusher observable: a thread asleep in `wait_timeout`
+            // for an hour stops publishing, so its heartbeat goes stale while
+            // a healthy flusher's advances every interval.
+            self.flush_heartbeat.fetch_add(1, Ordering::Relaxed);
+            self.last_beat_micros.store(now_micros(), Ordering::Relaxed);
             // Wait for flush interval OR immediate signal (batch full)
             self.flush_notifier.wait_timeout(self.interval);
         }
         self.perform_final_flush();
     }
 
+    /// React to a `GroupCommitCoordinator` error raised on the flush thread
+    /// (Issue #3798).
+    ///
+    /// LOCK POISONING: a poisoned coordinator lock means a thread died holding
+    /// it and the system is unrecoverable; failing fast is correct, because
+    /// continuing would leave waiting transactions hanging indefinitely.
+    ///
+    /// EVERY OTHER ERROR is transient. Tearing the flush thread down over one
+    /// is what converts a momentary coordinator hiccup into a permanent stall:
+    /// nothing drains the ring buffers afterwards, so writers pile up behind a
+    /// full buffer forever. Count it, log it, skip this cycle, and let the next
+    /// interval retry; waiters remain protected by `wait_for_flush`'s own
+    /// timeout.
+    fn note_cycle_error(&self, what: &str, err: &Error) {
+        if let Error::Storage(StorageError::LockPoisoned { .. }) = err {
+            panic!(
+                "GroupCommitCoordinator lock poisoned - flush thread cannot continue \
+                 (while {}: {})",
+                what, err
+            );
+        }
+
+        self.flush_cycle_errors.fetch_add(1, Ordering::Relaxed);
+        log_flush_error(&format!(
+            "WAL flush cycle skipped: {} failed ({}); retrying next interval",
+            what, err
+        ));
+    }
+
     fn perform_flush_cycle(&self) {
         let entries = self.wal.drain_all();
 
         // Always try to advance the epoch when there are entries OR when
-        // group commit has pending transactions.
-        //
-        // LOCK POISONING: If current_batch_size() fails, the coordinator lock is
-        // poisoned and the system is in an unrecoverable state. Panicking is correct
-        // here - continuing would leave waiting transactions hanging indefinitely.
+        // group commit has pending transactions. A non-poison failure to read
+        // the pending batch size is treated as "nothing pending" for THIS
+        // cycle only (see `note_cycle_error`).
         let should_mark_flushed = !entries.is_empty()
-            || self.group_commit.as_ref().is_some_and(|gc| {
-                self.current_batch_size(gc)
-                    .expect("GroupCommitCoordinator lock poisoned - flush thread cannot continue")
-                    > 0
-            });
+            || self
+                .group_commit
+                .as_ref()
+                .is_some_and(|gc| match self.current_batch_size(gc) {
+                    Ok(pending) => pending > 0,
+                    Err(err) => {
+                        self.note_cycle_error("reading the group-commit batch size", &err);
+                        false
+                    }
+                });
 
         if !entries.is_empty() {
             // Flush to coordinator
@@ -350,31 +404,32 @@ impl BackgroundFlusher {
             Ok(_) => {
                 // Reset error counter on success
                 self.error_counter.store(0, Ordering::Relaxed);
-                if let Some(ref gc) = self.group_commit {
-                    gc.mark_flushed(Ok(())).expect(
-                        "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
-                    );
+                if let Some(ref gc) = self.group_commit
+                    && let Err(err) = gc.mark_flushed(Ok(()))
+                {
+                    self.note_cycle_error("marking the group-commit batch flushed", &err);
                 }
             }
             Err(e) => {
                 // Track consecutive errors for health monitoring
                 let errors = self.error_counter.fetch_add(1, Ordering::Relaxed) + 1;
                 if errors == FLUSH_ERROR_WARNING_THRESHOLD {
-                    eprintln!(
+                    log_flush_error(&format!(
                         "CRITICAL: WAL flush failed {} consecutive times. \
                          Data durability may be compromised. Last error: {}",
                         errors, e
-                    );
+                    ));
                 } else {
-                    eprintln!("WAL flush error: {}", e);
+                    log_flush_error(&format!("WAL flush error: {}", e));
                 }
 
                 if let Some(ref gc) = self.group_commit {
                     // Create a new error from the string representation
-                    gc.mark_flushed(Err(crate::core::error::Error::other(e.to_string())))
-                        .expect(
-                            "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
-                        );
+                    if let Err(err) =
+                        gc.mark_flushed(Err(crate::core::error::Error::other(e.to_string())))
+                    {
+                        self.note_cycle_error("reporting the flush failure to group commit", &err);
+                    }
                 }
             }
         }
@@ -409,14 +464,15 @@ pub struct ConcurrentWalSystem {
     /// Wallclock micros of the most recent heartbeat, seeded at spawn time so
     /// startup is a grace period rather than an instant staleness trip
     /// (Issue #3798).
-    #[allow(dead_code)] // Read by `is_healthy` once staleness detection lands.
     last_beat_micros: Arc<AtomicU64>,
     /// Non-poison flush-cycle errors the flusher skipped instead of dying
     /// (Issue #3798).
     flush_cycle_errors: Arc<AtomicU64>,
+    /// Configured background-flush interval, retained so the heartbeat
+    /// staleness threshold scales with it (Issue #3798).
+    flush_interval: Duration,
     /// Test-only staleness override in micros (`0` = use the computed
     /// threshold), so liveness tests need not wait real seconds.
-    #[allow(dead_code)] // Read by `is_healthy` once staleness detection lands.
     health_staleness_override_micros: AtomicU64,
     /// Test-only flush-cycle error injection, shared with the
     /// [`BackgroundFlusher`] (Issue #3798).
@@ -546,6 +602,7 @@ impl ConcurrentWalSystem {
         let last_beat_micros = Arc::new(AtomicU64::new(now_micros()));
         let flush_cycle_errors = Arc::new(AtomicU64::new(0));
         let test_inject_cycle_error = Arc::new(AtomicBool::new(false));
+        let flush_interval = Duration::from_millis(config.flush_interval_ms);
 
         // Start background flush thread for async/group-commit modes
         let flush_thread = if matches!(
@@ -564,7 +621,6 @@ impl ConcurrentWalSystem {
             let last_beat_clone = Arc::clone(&last_beat_micros);
             let cycle_errors_clone = Arc::clone(&flush_cycle_errors);
             let inject_clone = Arc::clone(&test_inject_cycle_error);
-            let flush_interval = Duration::from_millis(config.flush_interval_ms);
             let sync_on_flush =
                 matches!(config.durability_mode, DurabilityMode::GroupCommit { .. });
 
@@ -600,6 +656,7 @@ impl ConcurrentWalSystem {
             flush_heartbeat,
             last_beat_micros,
             flush_cycle_errors,
+            flush_interval,
             health_staleness_override_micros: AtomicU64::new(0),
             test_inject_cycle_error,
             tolerate_torn_tail: config.tolerate_torn_tail,
@@ -988,12 +1045,44 @@ impl ConcurrentWalSystem {
             .store(micros, Ordering::Relaxed);
     }
 
-    /// Check if the WAL is healthy (no consecutive flush errors).
+    /// Whether the background flusher's heartbeat has gone stale
+    /// (Issue #3798).
     ///
-    /// Returns `true` if the last flush succeeded, `false` if there are
-    /// outstanding errors that haven't been cleared by a successful flush.
+    /// Two deliberate non-alarms:
+    ///
+    /// - **No flush thread** (e.g. [`DurabilityMode::Synchronous`]): there is
+    ///   no heartbeat that *could* advance, because the write path flushes
+    ///   inline. Such a WAL is never stale.
+    /// - **Startup**: `last_beat_micros` is seeded at construction time, so a
+    ///   system that has not completed its first cycle yet still gets a full
+    ///   staleness window of grace instead of tripping instantly.
+    fn heartbeat_stale(&self) -> bool {
+        if self.flush_thread.is_none() {
+            return false;
+        }
+
+        let threshold_micros = match self
+            .health_staleness_override_micros
+            .load(Ordering::Relaxed)
+        {
+            0 => heartbeat_staleness_threshold(self.flush_interval).as_micros() as u64,
+            overridden => overridden,
+        };
+
+        let last_beat = self.last_beat_micros.load(Ordering::Relaxed);
+        now_micros().saturating_sub(last_beat) > threshold_micros
+    }
+
+    /// Check if the WAL is healthy.
+    ///
+    /// Returns `true` when the last flush succeeded **and** the background
+    /// flusher is still publishing its heartbeat. A frozen heartbeat
+    /// (Issue #3798) is reported as unhealthy even though no flush has
+    /// errored: a flusher that died or wedged raises no error at all, it just
+    /// stops draining, and the first visible symptom would otherwise be
+    /// writers blocking on full ring buffers.
     pub fn is_healthy(&self) -> bool {
-        self.consecutive_flush_errors() == 0
+        self.consecutive_flush_errors() == 0 && !self.heartbeat_stale()
     }
 
     /// Get the WAL directory path.
