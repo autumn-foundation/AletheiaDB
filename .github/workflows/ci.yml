@@ -251,7 +251,19 @@ jobs:
           # RUSTSEC-2026-0187 (lopdf) precedent. rustsec/audit-check@v2 honors
           # only this `ignore:` input, so the advisory is listed here as well as
           # in .cargo/audit.toml.
-          ignore: "RUSTSEC-2026-0104, RUSTSEC-2024-0436, RUSTSEC-2023-0071"
+          #
+          # RUSTSEC-2026-0258: h2 0.3.27 "unbounded empty DATA frames" (low
+          # severity DoS). The h2 0.4 instance is patched (0.4.16 in the
+          # lockfile); no patched 0.3 release exists. Transitive-only via the
+          # AWS smithy stack's legacy hyper-0.14 path, reachable only through
+          # the optional `encryption-aws-kms` / `embeddings` features. See
+          # .cargo/audit.toml; tracked via issue #3807.
+          #
+          # RUSTSEC-2026-0235: rkyv 0.7.46, a lockfile-only pin via
+          # rust_decimal's optional `rkyv` feature — in no resolved build graph,
+          # never compiled or linked. See .cargo/audit.toml; tracked via issue
+          # #3807.
+          ignore: "RUSTSEC-2026-0104, RUSTSEC-2024-0436, RUSTSEC-2023-0071, RUSTSEC-2026-0258, RUSTSEC-2026-0235"
 
   feature-matrix:
     name: Feature Matrix
