@@ -54,9 +54,16 @@
 //!   nested.
 //! - The **only external callers** of the coordinator are
 //!   `src/api/transaction/write/mod.rs` (`wait_for_flush`) and
-//!   `src/storage/wal/concurrent_system.rs` (`register_transaction`,
-//!   `current_batch_size`, `mark_flushed`) — each a complete call that returns
-//!   before the next begins.
+//!   `src/storage/wal/concurrent_system.rs` (`register_transaction` from
+//!   `commit`, plus `current_batch_size`, `start_flush` and `finish_flush`
+//!   from the background flusher) — each a complete call that returns before
+//!   the next begins. The background flusher drives
+//!   `start_flush` / `finish_flush` **directly** rather than through
+//!   `mark_flushed`, precisely so a refused `finish_flush` can be told apart
+//!   from a refused `start_flush` and retried (Issue #3798). `mark_flushed`
+//!   consequently has **no production caller** any more; it is retained as
+//!   test and back-compatibility API, and its two acquisitions are still
+//!   sequential, so it changes nothing in this audit.
 //! - The guard type (`StateGuard`) **never escapes this module**, and its
 //!   `Deref` target `GroupCommitState` keeps every field private, so no
 //!   caller — internal or downstream — can hold the guard across a call back
@@ -206,22 +213,6 @@ fn reentrancy_panic_from_env() -> bool {
             .map(|value| value == "1")
             .unwrap_or(false)
     })
-}
-
-/// Emit a lock-acquisition diagnostic through the module's logging convention.
-///
-/// Mirrors `segment_reader::log_scan_warning`'s `observability` gating, but the
-/// fallback writes through `writeln!` rather than `eprintln!`: this runs on the
-/// commit path, and `eprintln!` **panics** if stderr is closed (EPIPE) — turning
-/// a diagnostic into a second, worse failure.
-fn log_lock_diagnostic(message: &str) {
-    #[cfg(feature = "observability")]
-    tracing::error!("{}", message);
-    #[cfg(not(feature = "observability"))]
-    {
-        use std::io::Write;
-        let _ = writeln!(std::io::stderr().lock(), "ERROR: {}", message);
-    }
 }
 
 /// Increment `waiters` for as long as this value lives.
@@ -818,13 +809,23 @@ impl GroupCommitCoordinator {
             return Ok(StateGuard::reassemble(self, site, guard));
         }
 
+        // An absurd budget (`u64::MAX` ms) makes `Instant + Duration`
+        // unrepresentable, and the unchecked add PANICS. `acquire_timeout_ms`
+        // is a `u64` an operator can set to anything, and a misconfigured
+        // number crashing a commit-path thread would be strictly worse than
+        // the deadlock it guards against -- so an unrepresentable deadline
+        // degrades to the same unbounded acquisition `0` selects
+        // (Issue #3798 review round 2).
+        let start = Instant::now();
+        let Some(deadline) = start.checked_add(Duration::from_millis(budget_ms)) else {
+            let guard = self.state.lock().map_err(|_| Self::poisoned())?;
+            return Ok(StateGuard::reassemble(self, site, guard));
+        };
+
         self.contended_acquires.fetch_add(1, Ordering::Relaxed);
         // RAII: the decrement must survive every exit below, including an
         // unwinding panic, or `waiters` drifts upward forever.
         let _ticket = WaiterTicket::take(&self.waiters);
-
-        let start = Instant::now();
-        let deadline = start + Duration::from_millis(budget_ms);
 
         // One yield first: under honest contention the holder's critical
         // section here is tens of nanoseconds, so the lock is almost always
@@ -908,7 +909,7 @@ impl GroupCommitCoordinator {
             mirrors = self.mirror_snapshot(),
         );
 
-        log_lock_diagnostic(&reason);
+        super::log_wal_diagnostic(&reason);
 
         if self.reentrancy_panic.load(Ordering::Relaxed) {
             // CI hardening only (ALETHEIADB_WAL_REENTRANCY_PANIC=1): turn a
@@ -941,17 +942,18 @@ impl GroupCommitCoordinator {
         let reason = format!(
             "timed out acquiring group_commit_state at site '{site}': possible deadlock. \
              waited {waited}µs of the configured acquire_timeout_ms={budget_ms}; \
-             holder thread token {holder} at site '{holder_site}'; waiters {waiters}. \
-             {mirrors}.{durability}",
+             holder thread token {holder} at site '{holder_site}'; waiters {waiters}; \
+             contended_acquires {contended}. {mirrors}.{durability}",
             site = site.as_str(),
             waited = waited.as_micros(),
             holder = self.owner.load(Ordering::Relaxed),
             holder_site = LockSite::holder_name(self.owner_site.load(Ordering::Relaxed)),
             waiters = self.waiters.load(Ordering::Relaxed),
+            contended = self.contended_acquires.load(Ordering::Relaxed),
             mirrors = self.mirror_snapshot(),
         );
 
-        log_lock_diagnostic(&reason);
+        super::log_wal_diagnostic(&reason);
 
         Error::Storage(StorageError::WalError { reason })
     }
@@ -973,6 +975,19 @@ impl GroupCommitCoordinator {
     /// not ordinary contention.
     pub fn acquire_timeouts(&self) -> u64 {
         self.acquire_timeouts.load(Ordering::Relaxed)
+    }
+
+    /// Number of acquisitions that could not be satisfied by the uncontended
+    /// fast path since process start.
+    ///
+    /// This is the *denominator* the other two counters need. Ordinary
+    /// contention makes this rise steadily while
+    /// [`Self::acquire_timeouts`] stays at zero — healthy load. A suspected
+    /// deadlock looks different: `acquire_timeouts` moves at all, and this
+    /// counter jumps as every other thread piles up behind the wedged holder.
+    /// Reading one without the other cannot tell those apart.
+    pub fn contended_acquires(&self) -> u64 {
+        self.contended_acquires.load(Ordering::Relaxed)
     }
 
     /// The acquisition bound currently in force, in milliseconds (`0` =
@@ -1764,6 +1779,15 @@ mod tests {
             0,
             "contention is not a suspected deadlock"
         );
+        // The counter that measures ordinary contention must be readable, and
+        // must stay consistent with the deadlock counter: every abandoned
+        // acquisition is by definition also a contended one.
+        assert!(
+            coord.contended_acquires() >= coord.acquire_timeouts(),
+            "contended_acquires ({}) cannot be below acquire_timeouts ({})",
+            coord.contended_acquires(),
+            coord.acquire_timeouts()
+        );
     }
 
     /// When another thread really is wedged holding the guard, the blocked
@@ -1798,6 +1822,7 @@ mod tests {
             "waited",
             "holder thread token",
             "waiters",
+            "contended_acquires",
             "current_epoch",
             "flushed_epoch",
             "batch_count",
@@ -1809,6 +1834,12 @@ mod tests {
             );
         }
         assert_eq!(coord.acquire_timeouts(), 1, "the timeout must be counted");
+        assert!(
+            coord.contended_acquires() >= 1,
+            "the acquisition went down the contended path, so the counter that measures \
+             ordinary contention must be readable and non-zero here -- without it a rising \
+             `contended_acquires` cannot be told apart from a suspected deadlock"
+        );
 
         let _ = release.send(());
         holder.join().expect("holder panicked");
@@ -1850,6 +1881,38 @@ mod tests {
         );
 
         let _ = release.send(());
+        holder.join().expect("holder panicked");
+    }
+
+    /// An absurd `acquire_timeout_ms` must never panic a commit-path thread.
+    ///
+    /// The bound is a plain `u64` of milliseconds an operator can set to
+    /// anything, and `Instant + Duration` PANICS on overflow. Whether
+    /// `u64::MAX` ms actually overflows is platform-dependent, so the portable
+    /// contract is the one asserted: the acquisition completes normally once
+    /// the holder lets go, rather than dying on the deadline computation
+    /// (Issue #3798 review round 2).
+    #[test]
+    fn test_absurd_acquire_timeout_does_not_panic_the_acquisition() {
+        let coord = Arc::new(GroupCommitCoordinator::with_defaults());
+        coord.set_acquire_timeout_ms_for_test(u64::MAX);
+
+        // Hold the guard briefly so the probe is forced onto the contended
+        // path, where the deadline is computed at all.
+        let (release, holder) = hold_state_guard(&coord, LockSite::StartFlush);
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            let _ = release.send(());
+        });
+
+        let probe = Arc::clone(&coord);
+        let outcome = run_with_watchdog(move || probe.register_transaction());
+
+        let result = outcome
+            .expect("the acquisition never returned: an absurd bound must behave as unbounded");
+        result.expect("an absurd bound must acquire once the holder releases, not panic or fail");
+
+        releaser.join().expect("releaser panicked");
         holder.join().expect("holder panicked");
     }
 

@@ -773,12 +773,27 @@ let config = ConcurrentWalSystemConfig::new(wal_dir)
     .with_max_append_block_ms(30_000); // 0 = unbounded (legacy behavior)
 ```
 
-The bound is **per top-level append call**, not per entry: a batch append
-shares one budget rather than re-arming it for every operation, and the clock
-is only read if an entry actually has to wait.
+#### Per-call bound semantics: a stall detector, not a throughput SLA
 
-The new failure mode is a `StorageError::WalError` naming what filled up, how
-long the writer waited, which stripe, and where to look next:
+The bound measures **time without progress**, not total call time. One
+`AppendDeadline` is created per top-level append call and threaded through
+every entry of a batch, so consecutive blocked entries with no room appearing
+between them are **one** stall window rather than one each; each entry that is
+actually placed **restarts** the window. The clock is only read if an entry has
+to wait at all.
+
+Two consequences worth stating plainly:
+
+- A batch append that keeps getting room **completes**, however long it takes.
+  A large bulk import against a healthy-but-slow flusher is not a stall, and
+  there is deliberately **no cap on total batch time** — capping it failed such
+  a batch mid-flight and blamed a flusher that was draining the whole time,
+  which is both a false alarm and a regression against the legacy unbounded
+  backpressure that completed.
+- A single entry's semantics are unchanged: it can only ever arm one window.
+
+The failure mode is a `StorageError::WalError` naming what filled up, how long
+the writer waited *in that stall*, which stripe, and where to look next:
 
 ```text
 WAL append gave up after waiting 30.0s: stripe 7 ring buffer full and nothing
@@ -786,9 +801,16 @@ drained it within the 30000 ms bound; the background flusher may be dead or
 wedged (check ConcurrentWalSystem::is_healthy)
 ```
 
+An absurd configured value (`u64::MAX` ms) can make the deadline instant
+unrepresentable; that degrades to "unbounded" rather than panicking the writer.
+
 The **synchronous and handle-based append paths are bounded too** — they were
-the remaining unbounded entries into the same ring buffer. In `Synchronous`
-mode nothing drains in the background, so the message names that instead:
+the remaining unbounded entries into the same ring buffer. The attribution
+follows the **durability mode**, not the append family: the write-transaction
+path uses the async batch append in *every* mode, and `Synchronous` starts no
+background flusher, so an async append there is caller-drained as well and says
+so. (Blaming a flusher that mode never starts pointed operators at
+`is_healthy()`, which it reports as `true` by construction.)
 
 ```text
 WAL append gave up after waiting 30.0s: stripe 7 ring buffer full and nothing
@@ -857,11 +879,32 @@ logging goes through a non-panicking writer rather than `eprintln!`, because
 `eprintln!` panics when stderr is closed (EPIPE) — killing the flush thread is
 precisely the failure this path exists to report.
 
-A `finish_flush` that cannot acquire the state mutex is likewise retained as a
-`pending_finish` and re-driven on the next cycle. Without that retry, one
-refused acquisition would leave the group-commit epoch chain — and therefore
-the durability frontier — permanently wedged, with every waiter parked behind
-it.
+A `finish_flush` that cannot acquire the state mutex is likewise retained — on
+a FIFO queue of un-finished epochs — and re-driven at the top of every
+subsequent cycle, oldest first, stopping at the first entry that still fails.
+Without that retry, one refused acquisition would leave the group-commit epoch
+chain — and therefore the durability frontier — permanently wedged, with every
+waiter parked behind it.
+
+A queue rather than a single slot, because **an outcome is never dropped**. A
+single slot forced the flusher to refuse to open a *new* epoch while one was
+outstanding, which discarded that cycle's outcome — including a **failed** disk
+flush. The failure then reached nobody, and a later cycle published a clean
+success for the very epoch whose entries never reached disk: an
+acknowledged-but-lost commit. The flusher now always opens an epoch and always
+delivers its outcome; a queued epoch defers *delivery*, never suppresses the
+*outcome*. This is safe because `finish_flush` already tolerates late and
+out-of-order completion (a `completed_epochs` set parks epoch 6 until 5 lands)
+and records an error against *its own* epoch regardless of arrival order.
+Symmetrically, a failure whose `start_flush` was refused is carried into the
+next epoch that does open — `current_epoch` did not move, so that epoch covers
+exactly the transactions whose data was lost.
+
+Should the coordinator lock stay unusable for ~1024 consecutive cycles, the
+flusher fails fast the same way a poisoned lock does. Dropping the oldest entry
+would silently destroy the durability outcome the queue exists to preserve, and
+growing without bound would convert a wedged lock into an OOM; neither is
+defensible.
 
 ### Bounded group-commit lock acquisition
 

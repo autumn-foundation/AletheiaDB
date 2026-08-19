@@ -71,11 +71,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entries into the ring buffer, and in `Synchronous` mode nothing drains in the
   background, so a full ring could self-deadlock the writer. The error text is
   mode-appropriate there ("no consumer is draining the buffer …") rather than
-  blaming a flusher that does not exist.
-- **BEHAVIORAL:** the append bound is **per top-level call**, not per entry
-  (Issue #3798): a batch append shares one budget instead of re-arming it for
-  every operation, and the deadline is lazy — no clock is read on the
-  never-blocking fast path.
+  blaming a flusher that does not exist. The attribution follows the
+  **durability mode**, not the append family: the write-transaction path uses
+  the *async* batch append in every mode, so a stalled async append in
+  `Synchronous` mode also names the calling thread instead of sending the
+  operator to `is_healthy()`, which that mode reports as `true` by
+  construction.
+- **BEHAVIORAL:** the append bound measures **time without progress**, not
+  total call time (Issue #3798). One deadline is shared by every entry of a
+  batch, so consecutive blocked entries are one stall window rather than one
+  each, and each entry actually placed restarts the window; the deadline is
+  lazy, so no clock is read on the never-blocking fast path. There is
+  deliberately **no cap on total batch time**: a large batch that keeps getting
+  room completes however long it takes (an earlier per-call cap failed slow
+  bulk imports mid-flight and blamed a flusher that was draining the whole
+  time). An absurd configured value whose deadline instant is unrepresentable
+  degrades to "unbounded" instead of panicking the writer; the same applies to
+  `acquire_timeout_ms`.
 - **BEHAVIORAL:** `ConcurrentWalSystem::is_healthy()` now reports `false` on a
   stale flush heartbeat, not only on outstanding consecutive flush errors
   (Issue #3798) — a flusher that died or wedged raises no error at all, so
@@ -108,12 +120,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stderr is closed (EPIPE) — killing the flush thread is precisely the failure
   that path exists to report.
 - The background flusher now splits `start_flush` / `finish_flush` and retains
-  a refused `finish_flush` as a `pending_finish`, retried on each subsequent
-  cycle (Issue #3798). Previously a single bounded-acquisition failure inside
-  `finish_flush` could permanently wedge the group-commit epoch chain and the
-  durability frontier, leaving every waiter parked behind it.
+  a refused `finish_flush` on a FIFO queue of un-finished epochs, drained
+  oldest-first at the top of each subsequent cycle (Issue #3798). Previously a
+  single bounded-acquisition failure inside `finish_flush` could permanently
+  wedge the group-commit epoch chain and the durability frontier, leaving every
+  waiter parked behind it. `GroupCommitCoordinator::mark_flushed` consequently
+  has no production caller any more and is retained as test /
+  back-compatibility API.
 
 ### Fixed
+
+- **DURABILITY:** a flush outcome is never discarded (Issue #3798). While an
+  un-finished epoch was outstanding, the flusher declined to open a new epoch
+  and **dropped that cycle's outcome** — including a FAILED disk flush, which
+  then reached nobody; a later cycle published a clean success for the very
+  epoch whose entries never reached disk, so its committers were told a lost
+  transaction was durable. The flusher now always opens an epoch and always
+  delivers its outcome (a queued epoch defers *delivery*, never suppresses the
+  *outcome*), which is safe because `finish_flush` already parks out-of-order
+  completions and records an error against its own epoch. A failure whose
+  `start_flush` was refused is likewise carried into the next epoch that opens,
+  since `current_epoch` did not move and that epoch covers the same
+  transactions. A coordinator lock unusable for ~1024 consecutive cycles now
+  fails fast rather than silently dropping outcomes or growing without bound.
+- `GroupCommitCoordinator::contended_acquires()` is now readable (Issue #3798);
+  the counter was incremented but exposed nowhere, so a rising ordinary
+  contention could not be told apart from a suspected deadlock. It also appears
+  in the acquisition-failure forensic payload.
 
 - Documented the durability-unknown caveat on commit-path acquisition timeouts
   (Issue #3798): a timeout at `register_transaction` or `wait_for_flush` may

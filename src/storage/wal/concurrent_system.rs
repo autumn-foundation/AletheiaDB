@@ -51,7 +51,9 @@ use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
 
-use super::concurrent::{ConcurrentWal, ConcurrentWalConfig, DEFAULT_MAX_APPEND_BLOCK_MS};
+use super::concurrent::{
+    AppendDrainer, ConcurrentWal, ConcurrentWalConfig, DEFAULT_MAX_APPEND_BLOCK_MS,
+};
 use super::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig, FlushStats};
 use super::group_commit::{DEFAULT_ACQUIRE_TIMEOUT_MS, GroupCommitConfig, GroupCommitCoordinator};
 use super::{LSN, WalOperation};
@@ -283,21 +285,13 @@ fn heartbeat_staleness_threshold(flush_interval: Duration) -> Duration {
 
 /// Report a flush-thread error without ever panicking (Issue #3798).
 ///
-/// Follows the module-local logging convention of
-/// [`super::segment_reader`]'s scan warnings, with one deliberate difference:
-/// the `std` stderr *print* macros panic when the write fails, and a
-/// daemonized / launchd-managed process whose stderr pipe has been closed
-/// hits exactly that (EPIPE). A panic there kills the flush thread — the very
-/// silent-stall failure this path exists to report — so the fallback writes
-/// through `writeln!` and drops the result instead.
+/// A thin alias for the shared [`super::log_wal_diagnostic`], which carries
+/// the EPIPE rationale for both this path and the group-commit lock
+/// diagnostics (Issue #3798 review round 2). It stays a named function so the
+/// call sites below read as flush-thread reporting rather than as generic
+/// logging.
 fn log_flush_error(message: &str) {
-    #[cfg(feature = "observability")]
-    tracing::error!("{}", message);
-    #[cfg(not(feature = "observability"))]
-    {
-        use std::io::Write;
-        let _ = writeln!(std::io::stderr(), "ERROR: {}", message);
-    }
+    super::log_wal_diagnostic(message);
 }
 
 /// Microseconds since a process-start baseline, on the MONOTONIC clock.
@@ -339,8 +333,9 @@ struct BackgroundFlusher {
     /// `#[cfg(test)]`.
     #[allow(dead_code)]
     test_inject_cycle_error: Arc<AtomicBool>,
-    /// An epoch that `start_flush` opened but `finish_flush` could not close,
-    /// held for retry on every subsequent cycle (Issue #3798 review round).
+    /// Epochs that `start_flush` opened but `finish_flush` could not close,
+    /// oldest first, retried at the top of every subsequent cycle
+    /// (Issue #3798 review round).
     ///
     /// Dropping such an epoch freezes the coordinator's durability frontier
     /// PERMANENTLY: `finish_flush` advances `flushed_epoch` only over a
@@ -350,10 +345,40 @@ struct BackgroundFlusher {
     /// `None` = success / `Some(message)` = the flush error to deliver, since
     /// `Error` is not `Clone`.
     ///
+    /// A QUEUE, not a single slot (Issue #3798 review round 2): a slot forced
+    /// `mark_group_commit_flushed` to refuse to open a new epoch while one was
+    /// outstanding, which DISCARDED that cycle's outcome — including a FAILED
+    /// disk flush. The failure then reached nobody, and a later cycle
+    /// published a clean success for the very epoch whose entries never
+    /// reached disk: an acknowledged-but-lost commit. An outcome is never
+    /// dropped now; at worst it is deferred.
+    ///
     /// `RefCell` rather than a lock: the flusher is owned by one thread and
     /// never shared.
-    pending_finish: std::cell::RefCell<Option<(u64, Option<String>)>>,
+    pending_finishes: std::cell::RefCell<std::collections::VecDeque<(u64, Option<String>)>>,
+    /// A FAILING outcome whose epoch could not even be OPENED, carried into
+    /// the next epoch that does open (Issue #3798 review round 2).
+    ///
+    /// A refused `start_flush` advances nothing, so `current_epoch` still
+    /// covers exactly the transactions whose data was just lost — the next
+    /// successfully opened epoch IS their epoch, and must report the failure
+    /// rather than a clean success. Stored as a message for the same
+    /// `Error: !Clone` reason as above; the FIRST such failure wins, since it
+    /// is the original loss.
+    carried_failure: std::cell::RefCell<Option<String>>,
 }
+
+/// How many un-finished epochs the flusher will hold before it stops trying
+/// (Issue #3798 review round 2).
+///
+/// Reaching this depth means `finish_flush` has been refused on ~1024
+/// consecutive cycles — the coordinator lock has been unusable for minutes and
+/// no waiter has been released in all that time. Neither of the alternatives
+/// is defensible: dropping the oldest entry silently destroys the durability
+/// outcome this queue exists to preserve, and growing without bound converts a
+/// wedged lock into an OOM. So the flusher fails fast the same way a poisoned
+/// coordinator lock does, with a message that names the real fault.
+const MAX_PENDING_FINISHES: usize = 1024;
 
 impl BackgroundFlusher {
     fn run(&self) {
@@ -387,10 +412,13 @@ impl BackgroundFlusher {
     /// interval retry; waiters remain protected by `wait_for_flush`'s own
     /// timeout.
     ///
-    /// "Let the next interval retry" is only true because the one error that
-    /// is NOT self-healing — a `finish_flush` that leaves an epoch open — is
-    /// retained and re-driven by [`Self::retry_pending_finish`]. Skipping that
-    /// one would freeze the durability frontier for the life of the process.
+    /// "Let the next interval retry" is only true because the errors that are
+    /// NOT self-healing are retained rather than skipped: a `finish_flush`
+    /// that leaves an epoch open is queued and re-driven by
+    /// [`Self::drain_pending_finishes`] (skipping it would freeze the
+    /// durability frontier for the life of the process), and a failing
+    /// *outcome* whose `start_flush` was refused is carried to the next epoch
+    /// that opens (skipping it would report a lost transaction as durable).
     fn note_cycle_error(&self, what: &str, err: &Error) {
         if let Error::Storage(StorageError::LockPoisoned { .. }) = err {
             panic!(
@@ -407,38 +435,62 @@ impl BackgroundFlusher {
         ));
     }
 
-    /// Retry a `finish_flush` a previous cycle could not deliver.
+    /// Retry every `finish_flush` a previous cycle could not deliver, oldest
+    /// first.
     ///
     /// Runs FIRST in every cycle: the coordinator advances its durability
     /// frontier only over a contiguous epoch run, so a stranded epoch must
-    /// land before any new one is opened. `finish_flush` already tolerates a
-    /// late completion (it inserts the epoch and re-runs the contiguous
-    /// advance), and the flusher is the only caller of `start_flush` /
-    /// `finish_flush`, so retrying here cannot race anyone.
+    /// land before the frontier can climb past it. Draining stops at the first
+    /// entry that still fails, which preserves FIFO order — a later epoch must
+    /// never be delivered while an older one is still queued behind it, or the
+    /// queue would reorder outcomes relative to the epochs they belong to.
+    ///
+    /// WHY THIS IS SOUND (verified by reading `GroupCommitCoordinator::
+    /// finish_flush`, not assumed):
+    ///
+    /// 1. **Late/out-of-order completion is already handled.** `finish_flush`
+    ///    inserts the epoch into a `completed_epochs` `BTreeSet` and then
+    ///    advances `flushed_epoch` only over the contiguous run starting at
+    ///    `flushed_epoch + 1`. Finishing 6 before 5 therefore parks 6 in the
+    ///    set until 5 lands, at which point both are released in one sweep.
+    /// 2. **An error is recorded against ITS OWN epoch.** `finish_flush`
+    ///    pushes `(epoch, message)` onto `recent_errors`, and `wait_for_flush`
+    ///    scans that list for its own epoch number. Arrival order does not
+    ///    enter into either side, so a deferred failure still reaches exactly
+    ///    the waiters it belongs to.
+    ///
+    /// The flusher is the only caller of `start_flush` / `finish_flush`, so
+    /// retrying here cannot race anyone.
     ///
     /// Returns `true` when nothing is outstanding any more.
-    fn retry_pending_finish(&self) -> bool {
+    fn drain_pending_finishes(&self) -> bool {
         let Some(gc) = self.group_commit.as_ref() else {
             return true;
         };
-        // Cloned out before the call: `note_cycle_error` must not run while
-        // the cell is borrowed.
-        let Some((epoch, stored)) = self.pending_finish.borrow().clone() else {
-            return true;
-        };
 
-        let outcome = match &stored {
-            None => Ok(()),
-            Some(message) => Err(crate::core::error::Error::other(message.clone())),
-        };
-        match gc.finish_flush(epoch, outcome) {
-            Ok(()) => {
-                *self.pending_finish.borrow_mut() = None;
-                true
-            }
-            Err(err) => {
-                self.note_cycle_error("retrying the deferred group-commit finish_flush", &err);
-                false
+        loop {
+            // Cloned out in its own scope so the borrow ends before anything
+            // else runs: `note_cycle_error` below can panic, and a `RefCell`
+            // borrow held across it (or across any future re-entry into this
+            // flusher) is how a clean fail-fast becomes a confusing
+            // already-borrowed panic instead.
+            let next = { self.pending_finishes.borrow().front().cloned() };
+            let Some((epoch, stored)) = next else {
+                return true;
+            };
+
+            let outcome = match &stored {
+                None => Ok(()),
+                Some(message) => Err(crate::core::error::Error::other(message.clone())),
+            };
+            match gc.finish_flush(epoch, outcome) {
+                Ok(()) => {
+                    self.pending_finishes.borrow_mut().pop_front();
+                }
+                Err(err) => {
+                    self.note_cycle_error("retrying the deferred group-commit finish_flush", &err);
+                    return false;
+                }
             }
         }
     }
@@ -448,40 +500,76 @@ impl BackgroundFlusher {
     ///
     /// Split into explicit `start_flush` / `finish_flush` (rather than the
     /// fused `mark_flushed`) precisely so the two failures can be told apart:
-    /// a failed `start_flush` opened no epoch and is safe to skip, while a
-    /// failed `finish_flush` has already advanced `current_epoch` and MUST be
-    /// retried or the frontier never moves again.
+    /// a failed `start_flush` opened no epoch, while a failed `finish_flush`
+    /// has already advanced `current_epoch` and MUST be retried or the
+    /// frontier never moves again.
+    ///
+    /// THE ONE INVARIANT HERE: an outcome is never dropped. This method always
+    /// tries to open an epoch and always tries to deliver `outcome` to it,
+    /// even with older epochs still queued — a queued epoch defers *delivery*,
+    /// it must not suppress the *outcome*. Suppressing it is what turned a
+    /// failed disk flush into a silent success for those transactions
+    /// (Issue #3798 review round 2).
     fn mark_group_commit_flushed(&self, outcome: Result<()>) {
         let Some(gc) = self.group_commit.as_ref() else {
             return;
         };
 
-        if self.pending_finish.borrow().is_some() {
-            // A stranded epoch is still outstanding (its retry failed earlier
-            // in this cycle). Opening another epoch behind it would only add a
-            // second one to strand, and waiters are protected by their own
-            // timeout meanwhile.
-            return;
-        }
-
         let epoch = match gc.start_flush() {
             Ok(epoch) => epoch,
             Err(err) => {
-                // No epoch was opened, so this cycle strands nothing.
+                // No epoch was opened, so nothing is stranded and no waiter
+                // was woken -- but a FAILING outcome still has nowhere to go,
+                // and `current_epoch` did not move, so the epoch this cycle
+                // would have flushed is the same one the next cycle will open.
+                // Carry the failure to it rather than losing it.
+                if let Err(e) = &outcome {
+                    let mut carried = self.carried_failure.borrow_mut();
+                    if carried.is_none() {
+                        *carried = Some(e.to_string());
+                    }
+                }
                 self.note_cycle_error("starting the group-commit flush epoch", &err);
                 return;
             }
         };
 
+        // Fold in any failure carried from a cycle whose `start_flush` was
+        // refused: those transactions are covered by THIS epoch.
+        let carried = self.carried_failure.borrow_mut().take();
+        let outcome = match (carried, outcome) {
+            (None, outcome) => outcome,
+            (Some(earlier), Ok(())) => Err(crate::core::error::Error::other(earlier)),
+            (Some(earlier), Err(current)) => Err(crate::core::error::Error::other(format!(
+                "{earlier}; and then {current}"
+            ))),
+        };
+
         let stored = outcome.as_ref().err().map(|e| e.to_string());
         if let Err(err) = gc.finish_flush(epoch, outcome) {
-            *self.pending_finish.borrow_mut() = Some((epoch, stored));
+            let depth = {
+                let mut queue = self.pending_finishes.borrow_mut();
+                queue.push_back((epoch, stored));
+                queue.len()
+            };
             self.note_cycle_error("finishing the group-commit flush epoch", &err);
+            if depth > MAX_PENDING_FINISHES {
+                // Same fail-fast reasoning as a poisoned coordinator lock: see
+                // `MAX_PENDING_FINISHES` for why neither dropping nor growing
+                // is an acceptable alternative.
+                panic!(
+                    "GroupCommitCoordinator has refused finish_flush for {} consecutive \
+                     epochs (queue depth {}) - the state mutex is unusable and no \
+                     transaction has reached durability in that time; flush thread cannot \
+                     continue",
+                    MAX_PENDING_FINISHES, depth
+                );
+            }
         }
     }
 
     fn perform_flush_cycle(&self) {
-        self.retry_pending_finish();
+        self.drain_pending_finishes();
 
         let entries = self.wal.drain_all();
 
@@ -529,7 +617,7 @@ impl BackgroundFlusher {
 
     fn perform_final_flush(&self) {
         // Last chance to land a stranded epoch before this thread is gone.
-        self.retry_pending_finish();
+        self.drain_pending_finishes();
 
         let entries = self.wal.drain_all();
         if !entries.is_empty() {
@@ -596,9 +684,16 @@ pub struct ConcurrentWalSystem {
     /// increasing value proves the flush thread is alive; a frozen one is the
     /// signal that writers are about to pile up behind a full ring buffer.
     flush_heartbeat: Arc<AtomicU64>,
-    /// Wallclock micros of the most recent heartbeat, seeded at spawn time so
-    /// startup is a grace period rather than an instant staleness trip
-    /// (Issue #3798).
+    /// MONOTONIC micros of the most recent heartbeat — the [`monotonic_micros`]
+    /// process-start `Instant` baseline, never the wallclock — seeded at
+    /// construction so startup is a grace period rather than an instant
+    /// staleness trip (Issue #3798).
+    ///
+    /// It must never become a wallclock reading: staleness is a duration
+    /// measured across a window an NTP step or a VM suspend/resume can move.
+    /// A step forward would report a healthy flusher as dead; a step backward
+    /// would read the elapsed time as zero and mask a genuinely dead one —
+    /// exactly the case the heartbeat exists to catch.
     last_beat_micros: Arc<AtomicU64>,
     /// Non-poison flush-cycle errors the flusher skipped instead of dying
     /// (Issue #3798).
@@ -700,7 +795,19 @@ impl ConcurrentWalSystem {
             wal_keyring: Arc::clone(&wal_keyring),
         };
 
-        let wal = Arc::new(ConcurrentWal::new(wal_config)?);
+        // Who drains the handle-less append paths depends on the durability
+        // mode, and this is the only place that knows it (Issue #3798 review
+        // round 2). The real write-transaction path uses the async batch
+        // append in EVERY mode, and `Synchronous` starts no flush thread, so
+        // without this a Synchronous-mode stall blamed a flusher that does not
+        // exist and pointed at `is_healthy()`, which that mode reports as
+        // `true` by construction.
+        let mut wal_inner = ConcurrentWal::new(wal_config)?;
+        wal_inner.set_async_drainer(match config.durability_mode {
+            DurabilityMode::Synchronous => AppendDrainer::CallingThread,
+            _ => AppendDrainer::BackgroundFlusher,
+        });
+        let wal = Arc::new(wal_inner);
         let coordinator = Arc::new(FlushCoordinator::new(coordinator_config)?);
         let shutdown_signal = Arc::new(AtomicBool::new(false));
 
@@ -849,7 +956,8 @@ impl ConcurrentWalSystem {
             last_beat_micros,
             flush_cycle_errors,
             test_inject_cycle_error,
-            pending_finish: std::cell::RefCell::new(None),
+            pending_finishes: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            carried_failure: std::cell::RefCell::new(None),
         };
         flusher.run();
     }
@@ -2670,6 +2778,53 @@ mod tests {
             .with_flush_interval_ms(flush_interval_ms)
     }
 
+    /// The system's own coordinator, for tests that drive flush cycles by hand.
+    fn coordinator_of(system: &ConcurrentWalSystem) -> Arc<GroupCommitCoordinator> {
+        Arc::clone(
+            system
+                .group_commit_coordinator()
+                .expect("GroupCommit mode has a coordinator"),
+        )
+    }
+
+    /// A [`BackgroundFlusher`] over `system`'s own parts, driven synchronously
+    /// on the calling thread.
+    ///
+    /// Every flush-outcome test below needs one, and the struct is private, so
+    /// building it lives here rather than being copied per test.
+    fn test_flusher(
+        system: &ConcurrentWalSystem,
+        gc: &Arc<GroupCommitCoordinator>,
+    ) -> BackgroundFlusher {
+        BackgroundFlusher {
+            wal: Arc::clone(&system.wal),
+            coordinator: Arc::clone(&system.coordinator),
+            shutdown: Arc::clone(&system.shutdown_signal),
+            flush_notifier: Arc::clone(&system.flush_notifier),
+            group_commit: Some(Arc::clone(gc)),
+            error_counter: Arc::clone(&system.consecutive_flush_errors),
+            interval: Duration::from_millis(10),
+            sync_on_flush: false,
+            flush_heartbeat: Arc::clone(&system.flush_heartbeat),
+            last_beat_micros: Arc::clone(&system.last_beat_micros),
+            flush_cycle_errors: Arc::clone(&system.flush_cycle_errors),
+            test_inject_cycle_error: Arc::clone(&system.test_inject_cycle_error),
+            pending_finishes: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            carried_failure: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// A system whose own flusher has run its startup cycle and then parked
+    /// for an hour, so the cycles a test drives by hand are the only ones.
+    fn quiesced_group_commit_system(dir: &std::path::Path) -> ConcurrentWalSystem {
+        let system = ConcurrentWalSystem::new(group_commit_config(dir, 3_600_000)).unwrap();
+        assert!(
+            poll_until(|| system.flush_heartbeat() >= 1),
+            "the startup flush cycle never completed, so this test cannot own the timeline"
+        );
+        system
+    }
+
     /// A `finish_flush` the coordinator refuses must NOT strand its epoch.
     ///
     /// `start_flush` has already advanced `current_epoch` by then, and the
@@ -2686,34 +2841,9 @@ mod tests {
     #[test]
     fn test_stranded_finish_flush_is_retried_and_unwedges_the_frontier() {
         let dir = tempdir().unwrap();
-        // A ~1h interval: the system's own flusher runs one startup cycle and
-        // then sleeps, so the cycles asserted below are exactly ours.
-        let system = ConcurrentWalSystem::new(group_commit_config(dir.path(), 3_600_000)).unwrap();
-        assert!(
-            poll_until(|| system.flush_heartbeat() >= 1),
-            "the startup flush cycle never completed, so this test cannot own the timeline"
-        );
-
-        let gc = Arc::clone(
-            system
-                .group_commit_coordinator()
-                .expect("GroupCommit mode has a coordinator"),
-        );
-        let flusher = BackgroundFlusher {
-            wal: Arc::clone(&system.wal),
-            coordinator: Arc::clone(&system.coordinator),
-            shutdown: Arc::clone(&system.shutdown_signal),
-            flush_notifier: Arc::clone(&system.flush_notifier),
-            group_commit: Some(Arc::clone(&gc)),
-            error_counter: Arc::clone(&system.consecutive_flush_errors),
-            interval: Duration::from_millis(10),
-            sync_on_flush: false,
-            flush_heartbeat: Arc::clone(&system.flush_heartbeat),
-            last_beat_micros: Arc::clone(&system.last_beat_micros),
-            flush_cycle_errors: Arc::clone(&system.flush_cycle_errors),
-            test_inject_cycle_error: Arc::clone(&system.test_inject_cycle_error),
-            pending_finish: std::cell::RefCell::new(None),
-        };
+        let system = quiesced_group_commit_system(dir.path());
+        let gc = coordinator_of(&system);
+        let flusher = test_flusher(&system, &gc);
 
         // A transaction waiting on the epoch the next cycle will flush.
         let (epoch, _) = gc.register_transaction().expect("registration succeeds");
@@ -2757,6 +2887,161 @@ mod tests {
         );
         gc.wait_for_flush(next_epoch)
             .expect("post-recovery commit must not wait out its deadlock-detection timeout");
+    }
+
+    /// The `LockSite` the flush-outcome tests inject failures at, spelled once.
+    const FINISH_FLUSH: crate::storage::wal::group_commit::LockSite =
+        crate::storage::wal::group_commit::LockSite::FinishFlush;
+    const START_FLUSH: crate::storage::wal::group_commit::LockSite =
+        crate::storage::wal::group_commit::LockSite::StartFlush;
+
+    /// A synthetic disk-flush failure, exactly as `perform_flush_cycle` would
+    /// hand one to `handle_flush_result` when `coordinator.flush()` fails.
+    ///
+    /// Driven through that seam rather than by breaking the real coordinator:
+    /// the sequence under test needs the failure to land on a *specific* cycle
+    /// while a stranded epoch is outstanding, which no I/O-level fault
+    /// injection can schedule deterministically.
+    fn flush_failure(what: &str) -> Result<()> {
+        Err(crate::core::error::Error::other(what.to_string()))
+    }
+
+    /// A FAILED disk flush must never be silently discarded because an earlier
+    /// epoch is still stranded.
+    ///
+    /// The exact #3798-round-2 sequence: epoch A's `finish_flush` is refused
+    /// and strands; the next cycle's `coordinator.flush()` FAILS for epoch B;
+    /// a later cycle lands A and then advances the frontier past B. If the
+    /// failing outcome was dropped on the way in (because a pending finish was
+    /// outstanding), B's waiters are told their transaction is durable when it
+    /// never reached disk -- an acknowledged-but-lost commit, the worst failure
+    /// this subsystem can produce.
+    #[test]
+    fn test_failed_flush_outcome_survives_an_outstanding_pending_finish() {
+        let dir = tempdir().unwrap();
+        let system = quiesced_group_commit_system(dir.path());
+        let gc = coordinator_of(&system);
+        let flusher = test_flusher(&system, &gc);
+
+        // Epoch A: opened, then stranded by a refused finish_flush.
+        let (epoch_a, _) = gc.register_transaction().expect("registration succeeds");
+        gc.fail_next_acquisition_at_for_test(FINISH_FLUSH);
+        flusher.perform_flush_cycle();
+        assert!(
+            gc.flushed_epoch().expect("frontier readable") < epoch_a,
+            "precondition: epoch {epoch_a} must be stranded before the failing flush"
+        );
+
+        // Epoch B: a transaction registered behind the strand, whose flush
+        // then fails on disk.
+        let (epoch_b, _) = gc.register_transaction().expect("registration succeeds");
+        assert!(epoch_b > epoch_a, "B must be the epoch after A");
+        flusher.handle_flush_result(flush_failure("injected disk flush failure"));
+
+        // Recovery: A lands, then the frontier is free to move past B.
+        flusher.perform_flush_cycle();
+        flusher.perform_flush_cycle();
+        assert!(
+            gc.flushed_epoch().expect("frontier readable") >= epoch_b,
+            "the frontier never recovered past epoch {epoch_b}"
+        );
+
+        gc.wait_for_flush(epoch_a)
+            .expect("epoch A's flush succeeded, so its waiters must be released cleanly");
+
+        let err = gc.wait_for_flush(epoch_b).expect_err(
+            "epoch B's flush FAILED, but its waiters were told the transaction is durable: \
+             the failing outcome was discarded because a pending finish was outstanding",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("injected disk flush failure"),
+            "the epoch's own flush error must reach its waiters, got: {msg}"
+        );
+    }
+
+    /// Two stranded finishes must drain in order and each deliver its OWN
+    /// outcome.
+    ///
+    /// A queue that coalesced them, reordered them, or reused one outcome for
+    /// both would either wedge the contiguous-advance logic or hand a
+    /// successful epoch someone else's error (and vice versa).
+    #[test]
+    fn test_queued_finishes_drain_fifo_with_their_own_outcomes() {
+        let dir = tempdir().unwrap();
+        let system = quiesced_group_commit_system(dir.path());
+        let gc = coordinator_of(&system);
+        let flusher = test_flusher(&system, &gc);
+
+        // Strand A with a SUCCESSFUL outcome.
+        let (epoch_a, _) = gc.register_transaction().expect("registration succeeds");
+        gc.fail_next_acquisition_at_for_test(FINISH_FLUSH);
+        flusher.perform_flush_cycle();
+
+        // Strand B, behind A, with a FAILING outcome.
+        let (epoch_b, _) = gc.register_transaction().expect("registration succeeds");
+        gc.fail_next_acquisition_at_for_test(FINISH_FLUSH);
+        flusher.handle_flush_result(flush_failure("epoch B never reached disk"));
+
+        // One cycle drains both, oldest first.
+        flusher.perform_flush_cycle();
+        assert!(
+            gc.flushed_epoch().expect("frontier readable") >= epoch_b,
+            "both queued finishes must land, frontier is at {}",
+            gc.flushed_epoch().unwrap_or(0)
+        );
+
+        gc.wait_for_flush(epoch_a)
+            .expect("epoch A succeeded and must resolve as a success");
+        let msg = gc
+            .wait_for_flush(epoch_b)
+            .expect_err("epoch B failed and must resolve as a failure")
+            .to_string();
+        assert!(
+            msg.contains("epoch B never reached disk"),
+            "each queued epoch must carry its own outcome, got: {msg}"
+        );
+    }
+
+    /// A failing outcome whose epoch could not even be OPENED must still reach
+    /// the epoch those transactions land in.
+    ///
+    /// A refused `start_flush` advances nothing, so `current_epoch` still
+    /// covers exactly the same registered transactions -- the ones whose data
+    /// was just lost. Letting the next cycle open that epoch and report a
+    /// clean success would be the same acknowledged-but-lost commit by another
+    /// route.
+    #[test]
+    fn test_failed_flush_outcome_survives_a_refused_start_flush() {
+        let dir = tempdir().unwrap();
+        let system = quiesced_group_commit_system(dir.path());
+        let gc = coordinator_of(&system);
+        let flusher = test_flusher(&system, &gc);
+
+        let (epoch, _) = gc.register_transaction().expect("registration succeeds");
+
+        // The disk flush fails AND the epoch cannot be opened to report it.
+        gc.fail_next_acquisition_at_for_test(START_FLUSH);
+        flusher.handle_flush_result(flush_failure("disk exploded before the epoch opened"));
+
+        // The next cycle opens that same epoch (nothing advanced).
+        flusher.perform_flush_cycle();
+        assert!(
+            gc.flushed_epoch().expect("frontier readable") >= epoch,
+            "the frontier must still advance once the coordinator recovers"
+        );
+
+        let msg = gc
+            .wait_for_flush(epoch)
+            .expect_err(
+                "the lost flush was reported as a clean success: a failure whose start_flush \
+                 was refused must still reach the epoch covering those transactions",
+            )
+            .to_string();
+        assert!(
+            msg.contains("disk exploded before the epoch opened"),
+            "the carried failure must name the original error, got: {msg}"
+        );
     }
 
     /// A transient (non-poison) coordinator error must NOT take down the flush

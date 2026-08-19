@@ -109,6 +109,11 @@ pub struct ConcurrentWalConfig {
     ///
     /// `0` means unbounded (legacy behavior: block forever). The default is
     /// [`DEFAULT_MAX_APPEND_BLOCK_MS`].
+    ///
+    /// It bounds time WITHOUT PROGRESS, not total call time: a batch append
+    /// that keeps getting room completes however long it takes, and only an
+    /// interval of this length with nothing draining the ring is a stall
+    /// (Issue #3798 review round 2).
     pub max_append_block_ms: u64,
 }
 
@@ -185,21 +190,42 @@ pub struct ConcurrentWal {
     shutdown_requested: AtomicBool,
     /// Counter for active batch operations.
     active_batches: AtomicUsize,
+    /// Who drains this WAL's stripes for the handle-less (async) append paths
+    /// (Issue #3798 review round 2).
+    ///
+    /// Set from the configured `DurabilityMode` by `ConcurrentWalSystem::new`,
+    /// which is the only place that knows it. It defaults to
+    /// [`AppendDrainer::BackgroundFlusher`] so a directly constructed
+    /// `ConcurrentWal` is unchanged.
+    async_drainer: AppendDrainer,
+    /// Test-only: how many stall windows the deadline of the most recent
+    /// `append_batch` call opened, so the "one window per uninterrupted
+    /// stall" property is assertable without a flaky wall-clock ceiling.
+    #[cfg(test)]
+    last_batch_deadline_arms: AtomicU64,
 }
 
 /// Who was supposed to drain the stripe a blocked writer is waiting on
 /// (Issue #3798).
 ///
-/// The two append families have genuinely different remediations, so they must
-/// not share one message: an async append waits on the background flush
-/// thread, while a handle-returning append is drained by its own caller
-/// (`DurabilityMode::Synchronous` drains *after* the append returns), where
-/// there is no flusher to blame at all.
+/// The remediations are genuinely different, so they must not share one
+/// message: an append drained by a background flush thread points at
+/// `is_healthy()`, while one drained by its own caller has no flusher to blame
+/// at all.
+///
+/// This is NOT a property of the append family (Issue #3798 review round 2):
+/// the real write-transaction path uses the *async* `append_batch` in **every**
+/// durability mode, and `DurabilityMode::Synchronous` runs no flush thread, so
+/// an async append there is also caller-drained. Hard-coding the flusher on the
+/// async paths sent Synchronous-mode operators to `is_healthy()`, which that
+/// mode reports as `true` by construction. The handle-returning paths are
+/// always caller-drained; the handle-less ones follow
+/// [`ConcurrentWal::async_drainer`].
 #[derive(Clone, Copy)]
-enum AppendDrainer {
+pub(crate) enum AppendDrainer {
     /// The background flush thread (async / group-commit paths).
     BackgroundFlusher,
-    /// The calling thread itself (synchronous, handle-returning paths).
+    /// The calling thread itself (synchronous and handle-returning paths).
     CallingThread,
 }
 
@@ -239,7 +265,34 @@ impl ConcurrentWal {
             total_appends: AtomicU64::new(0),
             shutdown_requested: AtomicBool::new(false),
             active_batches: AtomicUsize::new(0),
+            async_drainer: AppendDrainer::BackgroundFlusher,
+            #[cfg(test)]
+            last_batch_deadline_arms: AtomicU64::new(0),
         })
+    }
+
+    /// Declare who drains the stripes for the handle-less append paths
+    /// (Issue #3798 review round 2).
+    ///
+    /// Called once, at construction, by `ConcurrentWalSystem::new` -- the only
+    /// place that knows the `DurabilityMode`. Deliberately not a public config
+    /// field: it is derived state, and a caller who could set it out of step
+    /// with the mode would only make the diagnostic lie differently.
+    pub(crate) fn set_async_drainer(&mut self, drainer: AppendDrainer) {
+        self.async_drainer = drainer;
+    }
+
+    /// Test-only: stall windows opened by the most recent `append_batch`.
+    #[cfg(test)]
+    pub(crate) fn last_batch_deadline_arms(&self) -> u32 {
+        self.last_batch_deadline_arms.load(Ordering::Relaxed) as u32
+    }
+
+    /// Test-only: publish the arm count of a finished batch's deadline.
+    #[cfg(test)]
+    fn record_batch_deadline_arms(&self, deadline: &AppendDeadline) {
+        self.last_batch_deadline_arms
+            .store(deadline.arm_count() as u64, Ordering::Relaxed);
     }
 
     /// Create a new concurrent WAL with default configuration.
@@ -310,12 +363,15 @@ impl ConcurrentWal {
         Ok(())
     }
 
-    /// The blocking-append bound for ONE top-level append call (Issue #3798).
+    /// The stall bound for ONE top-level append call (Issue #3798).
     ///
     /// Created once per call -- including once per *batch*, not once per entry
-    /// -- and threaded down by `&mut`, so the bound bounds the call and the
-    /// clock is only read if an entry actually has to wait. A configured
-    /// `max_append_block_ms` of `0` yields the unbounded (legacy) deadline.
+    /// -- and threaded down by `&mut`, so consecutive blocked entries share
+    /// one stall window and the clock is only read if an entry actually has to
+    /// wait. A batch reports each placed entry with
+    /// [`AppendDeadline::note_progress`], so the bound detects a STALL rather
+    /// than capping total call time. A configured `max_append_block_ms` of `0`
+    /// yields the unbounded (legacy) deadline.
     #[inline]
     fn append_deadline(&self) -> AppendDeadline {
         AppendDeadline::from_millis(self.config.max_append_block_ms)
@@ -393,9 +449,7 @@ impl ConcurrentWal {
                 self.total_appends.fetch_add(1, Ordering::Relaxed);
                 Ok(lsn)
             }
-            Err(blocked) => {
-                Err(self.map_append_blocked(blocked, stripe.id(), AppendDrainer::BackgroundFlusher))
-            }
+            Err(blocked) => Err(self.map_append_blocked(blocked, stripe.id(), self.async_drainer)),
         }
     }
 
@@ -552,9 +606,13 @@ impl ConcurrentWal {
         // transaction-framing work (Issue #3413), which discards a prefix with
         // no commit marker at recovery.
         //
-        // ONE deadline for the whole batch: re-arming it per entry would let a
-        // 1000-op batch block for 1000 x the bound while the caller holds the
-        // commit clock -- the bound must bound the CALL.
+        // ONE deadline threaded through every entry: consecutive blocked
+        // entries with no room appearing between them are one stall, not one
+        // each. `note_progress` restarts the window after each placed entry,
+        // so the bound measures time WITHOUT progress -- a batch that is being
+        // drained the whole way through completes however long it takes, and
+        // only a genuinely undrained buffer trips it (Issue #3798 review
+        // round 2).
         let mut deadline = self.append_deadline();
         let mut lsns = Vec::with_capacity(serialized.len());
         for (lsn, data) in serialized {
@@ -564,17 +622,18 @@ impl ConcurrentWal {
             match stripe.append_blocking_until(lsn, data, &mut deadline) {
                 Ok(()) => {
                     self.total_appends.fetch_add(1, Ordering::Relaxed);
+                    deadline.note_progress();
                 }
                 Err(blocked) => {
-                    return Err(self.map_append_blocked(
-                        blocked,
-                        stripe.id(),
-                        AppendDrainer::BackgroundFlusher,
-                    ));
+                    #[cfg(test)]
+                    self.record_batch_deadline_arms(&deadline);
+                    return Err(self.map_append_blocked(blocked, stripe.id(), self.async_drainer));
                 }
             }
         }
 
+        #[cfg(test)]
+        self.record_batch_deadline_arms(&deadline);
         Ok(lsns)
     }
 
@@ -634,11 +693,13 @@ impl ConcurrentWal {
         // could leave a partial prefix; that residue is out of scope here and
         // is covered by the WAL transaction-framing work (Issue #3413).
         //
-        // ONE deadline for the whole batch (see `append_batch`). It matters
-        // most here: this is the Synchronous path, whose only drainer is the
-        // caller itself once this method returns, so a batch bigger than the
-        // ring can never fit and must be refused promptly rather than parked
-        // per entry.
+        // ONE deadline threaded through every entry (see `append_batch`). It
+        // matters most here: this is the handle-returning path, whose only
+        // drainer is the caller itself once this method returns, so a batch
+        // bigger than the ring can never fit and must be refused promptly
+        // rather than parked per entry. `note_progress` cannot rescue that
+        // case -- the entries that fit make progress, and the one that cannot
+        // then stalls for the full bound against a buffer nothing will drain.
         let mut deadline = self.append_deadline();
         let mut lsns = Vec::with_capacity(serialized.len());
         let mut handles = Vec::with_capacity(serialized.len());
@@ -650,6 +711,7 @@ impl ConcurrentWal {
                 Ok(handle) => {
                     self.total_appends.fetch_add(1, Ordering::Relaxed);
                     handles.push(handle);
+                    deadline.note_progress();
                 }
                 Err(blocked) => {
                     return Err(self.map_append_blocked(
@@ -1272,15 +1334,18 @@ mod tests {
         );
     }
 
-    /// The bound bounds the CALL, not each entry inside it.
+    /// The bound detects a STALL, and one stall is armed once no matter how
+    /// many entries the batch still has to place.
     ///
-    /// A batch that re-arms a fresh budget per entry stretches its worst case
-    /// to `N x bound` while holding the commit clock. The drainer here frees
-    /// the ring twice, at 100ms and 250ms, so a per-entry budget keeps
-    /// re-winning and only gives up at ~450ms, while one shared budget answers
-    /// at ~200ms.
+    /// This is the structural half of what the old wall-clock assertion tried
+    /// to say. Nothing drains here, so the batch makes no progress at all: the
+    /// deadline must arm on the first blocked entry and never again, and the
+    /// call must return after ONE bound rather than after one per entry. The
+    /// upper bound is watchdog-scale on purpose -- a tight wall-clock ceiling
+    /// is a starvation flake on a loaded runner, and the arm count is the
+    /// property, not the clock (Issue #3798 review round 2).
     #[test]
-    fn test_append_batch_shares_one_deadline_across_entries() {
+    fn test_append_batch_arms_one_stall_window_for_the_whole_call() {
         use std::sync::mpsc;
         use std::time::{Duration, Instant};
 
@@ -1289,19 +1354,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let wal = wedged_wal(dir.path(), 2, BOUND_MS);
 
-        // Fill the ring first, so entry 0 of the batch already has to wait.
+        // Fill the ring first, so entry 0 of the batch already has to wait,
+        // and leave it full: no progress is possible for the whole call.
         for _ in 0..2 {
             wal.append_async(test_operation())
                 .expect("filling a fresh 2-slot ring must succeed");
         }
-
-        let drainer = Arc::clone(&wal);
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(100));
-            drop(drainer.drain_all());
-            thread::sleep(Duration::from_millis(150));
-            drop(drainer.drain_all());
-        });
 
         let (tx, rx) = mpsc::channel();
         let worker = Arc::clone(&wal);
@@ -1314,17 +1372,135 @@ mod tests {
 
         let (elapsed, failed) = rx
             .recv_timeout(APPEND_WATCHDOG)
-            .expect("append_batch never returned against a ring it cannot drain fast enough");
+            .expect("append_batch never returned against a ring nobody drains");
 
         assert!(
             failed,
-            "the batch cannot fit within one {BOUND_MS}ms budget, so it must report the \
-             timeout rather than succeed after several of them"
+            "nothing drained the ring, so the batch must report the stall rather than succeed"
+        );
+        assert_eq!(
+            wal.last_batch_deadline_arms(),
+            1,
+            "a batch that never made progress must arm exactly ONE stall window, not one \
+             per entry (Issue #3798 review round 2)"
         );
         assert!(
-            elapsed < Duration::from_millis(BOUND_MS * 2),
-            "append_batch took {elapsed:?}: the {BOUND_MS}ms bound is being re-armed per \
-             entry, so it bounds each entry instead of the call (Issue #3798 review round)"
+            elapsed >= Duration::from_millis(BOUND_MS),
+            "append_batch gave up after {elapsed:?}, short of its own {BOUND_MS}ms bound"
+        );
+        assert!(
+            elapsed < APPEND_WATCHDOG,
+            "append_batch took {elapsed:?}: far past any plausible single stall window"
+        );
+    }
+
+    /// A batch that keeps making progress must COMPLETE, however long it takes.
+    ///
+    /// The bound is a stall detector, not a throughput SLA. Arming it once for
+    /// the whole call made a large bulk-import batch fail mid-flight against a
+    /// perfectly healthy, actively draining flusher -- and blame it for being
+    /// dead. Legacy backpressure completed here; so must this.
+    #[test]
+    fn test_append_batch_completes_while_the_drainer_keeps_making_room() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        // 30 entries through a 2-slot ring is ~14 drain rounds at ~25ms each
+        // (~350ms total), so the CALL far outlives the 150ms bound while no
+        // single STALL comes close to it.
+        const BOUND_MS: u64 = 150;
+        const DRAIN_EVERY: Duration = Duration::from_millis(25);
+        const ENTRIES: usize = 30;
+
+        let dir = tempdir().unwrap();
+        let wal = wedged_wal(dir.path(), 2, BOUND_MS);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let drainer = Arc::clone(&wal);
+        let drainer_stop = Arc::clone(&stop);
+        let drain_thread = thread::spawn(move || {
+            while !drainer_stop.load(Ordering::Relaxed) {
+                thread::sleep(DRAIN_EVERY);
+                drop(drainer.drain_all());
+            }
+        });
+
+        let (tx, rx) = mpsc::channel();
+        let worker = Arc::clone(&wal);
+        thread::spawn(move || {
+            let ops: Vec<WalOperation> = (0..ENTRIES).map(|_| test_operation()).collect();
+            let _ = tx.send(worker.append_batch(ops).err().map(|e| e.to_string()));
+        });
+
+        let outcome = rx
+            .recv_timeout(APPEND_WATCHDOG)
+            .expect("append_batch never returned against a slow but healthy drainer");
+        stop.store(true, Ordering::Relaxed);
+        let _ = drain_thread.join();
+
+        assert!(
+            outcome.is_none(),
+            "a {ENTRIES}-entry batch that was drained the whole way through failed anyway: \
+             {:?}. The bound is measuring total call time instead of time WITHOUT progress, \
+             so a slow bulk import is falsely reported as a dead flusher.",
+            outcome
+        );
+    }
+    /// In `Synchronous` mode there is NO background flusher, yet the real
+    /// write-transaction path appends through `append_batch_async`.
+    ///
+    /// Hard-coding the flusher attribution there sends an operator to
+    /// `is_healthy()`, which that mode reports as `true` by construction (no
+    /// flush thread means no heartbeat that could ever go stale) -- a dead end
+    /// dressed up as a lead.
+    #[test]
+    fn test_synchronous_mode_async_append_blames_the_caller_not_a_flusher() {
+        use crate::storage::wal::concurrent_system::{
+            ConcurrentWalSystem, ConcurrentWalSystemConfig,
+        };
+        use crate::storage::wal::durability::DurabilityMode;
+        use std::sync::mpsc;
+
+        let dir = tempdir().unwrap();
+        let mut config = ConcurrentWalSystemConfig::new(dir.path())
+            .with_durability_mode(DurabilityMode::Synchronous)
+            .with_num_stripes(1)
+            .with_max_append_block_ms(200);
+        config.stripe_capacity = 2;
+
+        let system = Arc::new(ConcurrentWalSystem::new(config).expect("system construction"));
+
+        let (tx, rx) = mpsc::channel();
+        let worker = Arc::clone(&system);
+        // Detached behind a watchdog: the property is "does this ever answer?".
+        thread::spawn(move || {
+            let ops: Vec<WalOperation> = (0..6).map(|_| test_operation()).collect();
+            let _ = tx.send(
+                worker
+                    .append_batch_async(ops)
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_default(),
+            );
+        });
+
+        let message = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("append_batch_async never returned on a full, undrained ring");
+        assert!(
+            !message.is_empty(),
+            "a 6-op batch cannot fit a 2-slot ring that nothing drains, yet it succeeded"
+        );
+        assert!(
+            message.contains("no consumer is draining the buffer"),
+            "Synchronous mode has no flusher, so the async append must name the calling \
+             thread as the drainer, got: {message}"
+        );
+        assert!(
+            !message.contains("background flusher"),
+            "the message blames a background flusher this durability mode never starts, \
+             and points at is_healthy(), which is constitutionally true here: {message}"
         );
     }
 }
