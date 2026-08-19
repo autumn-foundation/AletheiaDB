@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### ⚠️ Breaking changes
+
+- WAL config structs gained fields (Issue #3798), so exhaustive struct-literal
+  construction that names every field no longer compiles — add
+  `..Default::default()`, or use the builders. Affected:
+  `crate::config::WalConfig` (`max_append_block_ms`, `acquire_timeout_ms`),
+  `ConcurrentWalSystemConfig` (both), `ConcurrentWalConfig`
+  (`max_append_block_ms`), and `GroupCommitConfig` (`acquire_timeout_ms`).
+  Every new field defaults to the pre-#3798 behavior for a healthy system, so
+  this is a compile-time break only — see Added/Changed below for what the
+  fields do.
+
 ### Added
 
 - WAL stall diagnosability (Issue #3798). Two additive config fields:
@@ -14,10 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ConcurrentWalConfig::max_append_block_ms` (default 30_000; `0` = unbounded)
   bounding how long a writer blocks on a full ring buffer, and
   `GroupCommitConfig::acquire_timeout_ms` (default 120_000; `0` = unbounded)
-  bounding acquisition of the group-commit state mutex. Struct-literal
-  construction of these configs that names every field breaks; add
-  `..Default::default()`. Builder setters `with_max_append_block_ms` are
-  provided on both WAL config types.
+  bounding acquisition of the group-commit state mutex (see Breaking changes
+  above). Setters `with_max_append_block_ms` (both WAL config types) and
+  `with_acquire_timeout_ms` (`ConcurrentWalSystemConfig`) are provided.
+- Both bounds are reachable end-to-end from the user-facing configuration
+  (Issue #3798): `crate::config::WalConfig::max_append_block_ms` /
+  `acquire_timeout_ms`, the matching `WalConfigBuilder` setters, and the
+  `[wal]` TOML keys of the same names (`#[serde(default)]`, so existing config
+  files load unchanged). `acquire_timeout_ms` reaches the coordinator via
+  `GroupCommitCoordinator::with_config`, so the documented
+  `0` = legacy-unbounded escape hatch now works from `AletheiaDB::open` /
+  `with_unified_config`, not only from the internal config types.
 - `ConcurrentWalSystem::flush_heartbeat()` (completed background-flusher loop
   iterations; strictly increasing while the flush thread is alive) and
   `flush_cycle_errors()` (process-lifetime count of non-poison flush-cycle
@@ -25,8 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GroupCommitCoordinator::reentrancy_detections()` and `acquire_timeouts()`
   counters, so a health check or soak test can assert both stay at zero
   (Issue #3798). Re-entrancy detection is non-blocking and precedes every
-  acquisition; `ALETHEIADB_WAL_REENTRANCY_PANIC=1` (read once per process)
-  escalates a detection from an error to a panic for CI.
+  acquisition; `ALETHEIADB_WAL_REENTRANCY_PANIC=1` escalates a detection from
+  an error to a panic for CI. The variable is read once per process, but the
+  resulting policy is stored **per coordinator** (captured at construction), so
+  the flag and the re-entrancy tests coexist — each test pins the behavior it
+  asserts on its own instance instead of inheriting the job's environment.
 
 ### Changed
 
@@ -37,15 +59,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   likely cause ("the background flusher may be dead or wedged") rather than
   parking the writer forever. Buffer **closed** still takes precedence over the
   deadline and keeps its historical `"WAL buffer closed"` wording. Set
-  `max_append_block_ms: 0` to restore the unbounded legacy behavior.
+  `max_append_block_ms: 0` to restore the unbounded legacy behavior. The
+  classification is conservative: the timeout is a `StorageError::WalError`,
+  which the MCP surface maps to `INTERNAL` / `retriable: false`, even though a
+  ring-buffer-full timeout is in fact retry-safe (a mid-batch failure leaves a
+  prefix with no `CommitTx` marker, which recovery discards). A dedicated
+  retriable variant is tracked as Issue #3800.
+- **BEHAVIORAL:** the **synchronous and handle-based** append paths
+  (`append_with_handle`, `append_batch_with_handles`) are bounded by the same
+  `max_append_block_ms` (Issue #3798) — they were the remaining unbounded
+  entries into the ring buffer, and in `Synchronous` mode nothing drains in the
+  background, so a full ring could self-deadlock the writer. The error text is
+  mode-appropriate there ("no consumer is draining the buffer …") rather than
+  blaming a flusher that does not exist.
+- **BEHAVIORAL:** the append bound is **per top-level call**, not per entry
+  (Issue #3798): a batch append shares one budget instead of re-arming it for
+  every operation, and the deadline is lazy — no clock is read on the
+  never-blocking fast path.
 - **BEHAVIORAL:** `ConcurrentWalSystem::is_healthy()` now reports `false` on a
   stale flush heartbeat, not only on outstanding consecutive flush errors
   (Issue #3798) — a flusher that died or wedged raises no error at all, so
   error counters alone could never see it. Staleness threshold is
-  `max(10 × flush_interval, 1s)`; the heartbeat is seeded at construction so
+  `max(10 × flush_interval, 5s)` — the 5s floor keeps a very small
+  `flush_interval_ms` from turning an ordinary scheduling hiccup on a loaded CI
+  box into a "dead flusher" verdict. The heartbeat is seeded at construction so
   startup is a grace period, and a durability mode with no background flusher
   (e.g. `Synchronous`) is never stale. This value also feeds
   `database_stats.wal.healthy`.
+- **BEHAVIORAL:** flusher heartbeat timestamps are now **monotonic** —
+  microseconds since a process-start `Instant` baseline rather than the
+  wallclock (Issue #3798) — so a system clock step or a suspend/resume can
+  neither invent staleness nor hide it.
 - **BEHAVIORAL:** group-commit state-mutex acquisition is now bounded by
   `acquire_timeout_ms` with non-blocking re-entrancy detection (Issue #3798).
   Both refusals are `StorageError::WalError` (`INTERNAL`, non-retriable on the
@@ -63,6 +107,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fast. Flush-path logging no longer uses `eprintln!`, which panics when
   stderr is closed (EPIPE) — killing the flush thread is precisely the failure
   that path exists to report.
+- The background flusher now splits `start_flush` / `finish_flush` and retains
+  a refused `finish_flush` as a `pending_finish`, retried on each subsequent
+  cycle (Issue #3798). Previously a single bounded-acquisition failure inside
+  `finish_flush` could permanently wedge the group-commit epoch chain and the
+  durability frontier, leaving every waiter parked behind it.
 
 ### Fixed
 
@@ -70,10 +119,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Issue #3798): a timeout at `register_transaction` or `wait_for_flush` may
   leave a WAL frame already appended, so the transaction **may still become
   durable and replay at recovery** and must not be reported to a client as a
-  clean abort. Making this precise requires WAL abort framing, tracked as
-  Issue #3413. See [docs/WAL.md](docs/WAL.md) ("Stall Diagnosability") and the
-  module documentation on `src/storage/wal/group_commit.rs` for the full
-  call-site audit.
+  clean abort. The WAL transaction frame format that would make this precise
+  already shipped in 0.2.0 (Issue #3413 — `BeginTx`/`CommitTx`/`AbortTx`); what
+  is still missing is the commit path **emitting** an abort record when a step
+  after the append fails, tracked as Issue #3799. See
+  [docs/WAL.md](docs/WAL.md) ("Stall Diagnosability") and the module
+  documentation on `src/storage/wal/group_commit.rs` for the full call-site
+  audit.
 
 ## [0.2.0] - 2026-07-30
 

@@ -24,7 +24,7 @@ use aletheiadb::{
 };
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -701,10 +701,16 @@ fn bench_group_commit_register_transaction(c: &mut Criterion) {
 
 /// Benchmark how fast `finish_flush` releases a full batch of waiters (#3798).
 ///
-/// This is the wakeup path the fix changes: today `notify_all` runs while the
-/// state guard is still held, so every woken waiter re-blocks on the notifier's
-/// own mutex. Measuring "notify → all 200 waiters have returned" is what makes
-/// that thundering herd visible, and keeps it from creeping back.
+/// This is the wakeup path #3798 changed: `finish_flush` now drops the state
+/// guard *before* `notify_all`, so a woken waiter does not immediately re-block
+/// on the notifier's own mutex. Measuring "notify → all 200 waiters have
+/// observed the flush" is what makes that thundering herd visible, and keeps it
+/// from creeping back.
+///
+/// The timed region ends when the last waiter reports through an mpsc channel —
+/// deliberately **not** when its thread joins. Joining would fold 200 thread
+/// teardowns (a scheduler cost that has nothing to do with the wakeup path)
+/// into the measurement, so the joins run outside the clock.
 fn bench_group_commit_finish_flush_wakeup(c: &mut Criterion) {
     /// Enough waiters to make the herd measurable, small enough that spawning
     /// them per iteration stays cheap.
@@ -729,15 +735,25 @@ fn bench_group_commit_finish_flush_wakeup(c: &mut Criterion) {
                 let epoch = coordinator.current_epoch().unwrap();
 
                 let ready = Arc::new(Barrier::new(WAITERS + 1));
+                // Each waiter reports the instant `wait_for_flush` returns, so
+                // the timed region can close on "all waiters observed the
+                // flush" without waiting for their threads to be torn down.
+                let (done_tx, done_rx) = mpsc::channel();
                 let mut handles = Vec::with_capacity(WAITERS);
                 for _ in 0..WAITERS {
                     let coordinator = Arc::clone(&coordinator);
                     let ready = Arc::clone(&ready);
+                    let done_tx = done_tx.clone();
                     handles.push(thread::spawn(move || {
                         ready.wait();
-                        coordinator.wait_for_flush(epoch)
+                        let outcome = coordinator.wait_for_flush(epoch);
+                        // The receiver outlives every send, so this cannot fail.
+                        let _ = done_tx.send(outcome);
                     }));
                 }
+                // Drop the template sender: only the per-thread clones remain,
+                // so a lost waiter surfaces as a disconnect rather than a hang.
+                drop(done_tx);
 
                 // Setup, outside the timed region: let the waiters reach the
                 // condvar. A straggler that arrives late simply observes the
@@ -748,10 +764,15 @@ fn bench_group_commit_finish_flush_wakeup(c: &mut Criterion) {
                 let start = Instant::now();
                 let flushing = coordinator.start_flush().unwrap();
                 coordinator.finish_flush(flushing, Ok(())).unwrap();
-                for handle in handles {
-                    handle.join().unwrap().unwrap();
+                for _ in 0..WAITERS {
+                    done_rx.recv().unwrap().unwrap();
                 }
                 total += start.elapsed();
+
+                // Teardown, outside the timed region.
+                for handle in handles {
+                    handle.join().unwrap();
+                }
             }
             total
         });

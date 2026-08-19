@@ -40,11 +40,14 @@
 //!
 //! ## The committed call-site audit
 //!
-//! - All **eight** acquisitions of the state mutex in this file route through
-//!   the single `lock_state` chokepoint: `register_transaction`,
+//! - All **eight** acquisitions of the state mutex written in this file route
+//!   through the single `lock_state` chokepoint: `register_transaction`,
 //!   `wait_for_flush`, `start_flush`, `finish_flush`, `current_batch_size`,
 //!   `current_epoch`, `flushed_epoch`, `should_flush`. There is no other
-//!   `state.lock()` anywhere in the crate.
+//!   `state.lock()` anywhere in the crate. The one acquisition that is *not*
+//!   written here — and therefore not routed through `lock_state` — is the
+//!   re-lock `Condvar::wait_timeout` performs internally on wakeup; see the
+//!   lock-leaf contract below.
 //! - **No critical section calls another coordinator method.** `mark_flushed`
 //!   is `start_flush` *then* `finish_flush`: the first guard dies at that
 //!   method's return, so the two acquisitions are strictly sequential, never
@@ -81,8 +84,11 @@
 //!    (`src/api/transaction/write/mod.rs`). Any single indefinite block
 //!    underneath it becomes an untimed, zero-CPU convoy of every other
 //!    committing thread. **Mitigation deferred:** that hold is deliberate and
-//!    documented at the site, pending the WAL abort framing tracked as Issue
-//!    #3413. Out of scope here.
+//!    documented at the site. The WAL transaction *frame format* itself
+//!    (Issue #3413 — `BeginTx`/`CommitTx`/`AbortTx`) has landed; what the
+//!    shortened hold still waits on is the **commit path emitting an abort
+//!    record** when a step after the append fails, tracked as Issue #3799.
+//!    Out of scope here.
 //!
 //! ## Lock-leaf contract
 //!
@@ -91,8 +97,26 @@
 //! callback or foreign trait impl. The only blocking construct inside a
 //! critical section is `Condvar::wait_timeout` on the coordinator's *own*
 //! `flush_complete`, which releases the mutex while parked. `lock_state`
-//! itself only ever *sleeps* (it never takes another lock), so a thread
-//! waiting here holds nothing another thread could need.
+//! itself only ever *sleeps* (it never takes another lock), so this mutex
+//! never participates in a lock cycle of its own.
+//!
+//! Two qualifications the audit is careful about:
+//!
+//! - **The acquisition bound does not cover the condvar re-lock.**
+//!   `Condvar::wait_timeout` re-acquires the mutex *internally* on wakeup,
+//!   before handing the guard back to `wait_for_flush`. That is an unbounded
+//!   `std` re-lock: it does not pass through `lock_state` and is therefore not
+//!   subject to `acquire_timeout_ms`. How long a waiter stays in the loop is
+//!   still bounded by the loop's own `deadline`, but the individual re-lock
+//!   inside `wait_timeout` is untimed. It is the one acquisition of this mutex
+//!   the bound does not cover.
+//! - **This mutex is a leaf; its callers are not.** The commit-path call sites
+//!   in `src/api/transaction/write/mod.rs` call `register_transaction` /
+//!   `wait_for_flush` **while holding the `current_timestamp` commit lock**, so
+//!   a thread blocked here does hold something every other committer needs —
+//!   that is exactly the #3798 amplifier described above. The leaf property is
+//!   a claim about this module's own critical sections, not about the commit
+//!   path that enters them.
 //!
 //! Any future change that breaks this contract reintroduces exactly the
 //! deadlock class the audit ruled out.
@@ -113,9 +137,12 @@
 //! `wait_for_flush`) says so in its message: the in-flight transaction's WAL
 //! frame may already have been appended, so it **may still become durable and
 //! replay at recovery**. Such a failure must not be reported to a client as a
-//! clean abort. There is no abort framing to make this precise until Issue
-//! #3413 lands. Observation sites wrote nothing and therefore make no
-//! durability claim.
+//! clean abort. The frame format that would let the commit path say so
+//! precisely has already landed (Issue #3413, `AbortTx`); what is still
+//! missing is the commit path **emitting** that abort record when a step after
+//! the append fails, tracked as Issue #3799. Until then the outcome is
+//! genuinely unknown and is disclosed as such. Observation sites wrote nothing
+//! and therefore make no durability claim.
 //!
 //! ## Escalation flag
 //!
@@ -1009,7 +1036,14 @@ impl GroupCommitCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// - `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// - `StorageError::WalError` if this thread already holds the state guard
+    ///   (re-entrancy detection), or if the acquisition exceeds
+    ///   `acquire_timeout_ms`; setting that to `0` removes the timeout mode.
+    /// - An acquisition timeout here is a **commit-path** failure: the
+    ///   transaction's WAL frame may already be appended, so durability is
+    ///   unknown and the error must not be reported as a clean abort (see the
+    ///   module's durability-unknown caveat).
     pub fn register_transaction(&self) -> Result<(u64, bool), Error> {
         let mut state = self.lock_state(LockSite::RegisterTransaction)?;
 
@@ -1053,6 +1087,15 @@ impl GroupCommitCoordinator {
     /// Returns an error if:
     /// - The flush for this epoch failed
     /// - The wait times out (indicates a stuck flush thread or excessive system load)
+    /// - The coordinator lock is poisoned (`StorageError::LockPoisoned`)
+    /// - The state-mutex acquisition is re-entrant, or exceeds
+    ///   `acquire_timeout_ms` (`0` removes that timeout mode) —
+    ///   `StorageError::WalError` in both cases
+    ///
+    /// This is a **commit-path** site: both the flush timeout and an
+    /// acquisition timeout leave durability **unknown** (the WAL frame may
+    /// already be appended), so neither may be reported as a clean abort — see
+    /// the module's durability-unknown caveat.
     ///
     /// # Examples
     ///
@@ -1158,6 +1201,15 @@ impl GroupCommitCoordinator {
     /// # Returns
     ///
     /// The epoch number that is being flushed.
+    ///
+    /// # Errors
+    ///
+    /// - `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// - `StorageError::WalError` for a re-entrant acquisition, or for one
+    ///   exceeding `acquire_timeout_ms` (`0` removes that timeout mode).
+    ///
+    /// A flush-thread site, not a commit-path one, so no durability-unknown
+    /// caveat attaches to these errors.
     pub fn start_flush(&self) -> Result<u64, Error> {
         let mut state = self.lock_state(LockSite::StartFlush)?;
 
@@ -1184,6 +1236,16 @@ impl GroupCommitCoordinator {
     ///
     /// * `epoch` - The epoch that was flushed (returned by `start_flush`).
     /// * `result` - The result of the flush operation.
+    ///
+    /// # Errors
+    ///
+    /// - `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// - `StorageError::WalError` for a re-entrant acquisition, or for one
+    ///   exceeding `acquire_timeout_ms` (`0` removes that timeout mode).
+    ///
+    /// A failure here publishes no durability frontier and wakes no waiter, so
+    /// the caller must retry it (the flush loop keeps the epoch as
+    /// `pending_finish`) or the frontier wedges.
     pub fn finish_flush(&self, epoch: u64, result: Result<(), Error>) -> Result<(), Error> {
         let mut state = self.lock_state(LockSite::FinishFlush)?;
 
@@ -1271,6 +1333,14 @@ impl GroupCommitCoordinator {
     ///
     /// It is kept for backward compatibility with existing tests but `start_flush`
     /// and `finish_flush` should be used in production.
+    ///
+    /// # Errors
+    ///
+    /// Propagates whatever `start_flush` or `finish_flush` returns: lock
+    /// poisoning, a re-entrant acquisition, or an acquisition exceeding
+    /// `acquire_timeout_ms` (`0` removes that timeout mode). Because the two
+    /// acquisitions are sequential, a failure of the second leaves the epoch
+    /// advanced but unflushed.
     pub fn mark_flushed(&self, result: Result<(), Error>) -> Result<(), Error> {
         let epoch = self.start_flush()?;
         self.finish_flush(epoch, result)
@@ -1283,7 +1353,10 @@ impl GroupCommitCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned,
+    /// or `StorageError::WalError` for a re-entrant acquisition or one
+    /// exceeding `acquire_timeout_ms` (`0` removes that timeout mode). An
+    /// observation site writes nothing, so it makes no durability claim.
     ///
     /// # Examples
     ///
@@ -1306,7 +1379,10 @@ impl GroupCommitCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned,
+    /// or `StorageError::WalError` for a re-entrant acquisition or one
+    /// exceeding `acquire_timeout_ms` (`0` removes that timeout mode). An
+    /// observation site writes nothing, so it makes no durability claim.
     ///
     /// # Examples
     ///
@@ -1329,7 +1405,10 @@ impl GroupCommitCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned,
+    /// or `StorageError::WalError` for a re-entrant acquisition or one
+    /// exceeding `acquire_timeout_ms` (`0` removes that timeout mode). An
+    /// observation site writes nothing, so it makes no durability claim.
     ///
     /// # Examples
     ///
@@ -1352,7 +1431,10 @@ impl GroupCommitCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned,
+    /// or `StorageError::WalError` for a re-entrant acquisition or one
+    /// exceeding `acquire_timeout_ms` (`0` removes that timeout mode). An
+    /// observation site writes nothing, so it makes no durability claim.
     ///
     /// # Examples
     ///

@@ -661,6 +661,10 @@ let config = ConcurrentWalSystemConfig {
     /// (default: 30_000; `0` = unbounded/legacy). See "Stall Diagnosability".
     max_append_block_ms: 30_000,
 
+    /// Bound on acquiring the group-commit coordinator's state mutex, in ms
+    /// (default: 120_000; `0` = unbounded/legacy). See "Stall Diagnosability".
+    acquire_timeout_ms: 120_000,
+
     /// Durability mode
     durability_mode: DurabilityMode::GroupCommit {
         max_batch_size: 200,
@@ -713,6 +717,7 @@ pub enum DurabilityMode {
 | `segments_to_retain` | 10-20 | Enough for recovery + debugging |
 | `durability_mode` | `GroupCommit` | Best balance of ACID + performance |
 | `max_append_block_ms` | 30_000 | Long enough that healthy backpressure never trips it |
+| `acquire_timeout_ms` | 120_000 | Strictly above the flush-wait timeout, so a stuck flusher is reported first |
 
 ## Stall Diagnosability (Issue #3798)
 
@@ -724,6 +729,37 @@ without anything noticing. Both are now bounded and observable.
 Everything in this section is **additive**. No public signature changed, the
 defaults preserve existing behavior for a healthy system, and lock poisoning
 still maps to `StorageError::LockPoisoned` exactly as before.
+
+### Configuring the two bounds
+
+Both bounds are reachable end-to-end from the user-facing configuration —
+`WalConfig` fields, `WalConfigBuilder` setters, and TOML — not only from the
+internal `ConcurrentWalSystemConfig` / `GroupCommitConfig`:
+
+```rust
+use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
+
+let config = AletheiaDBConfig::builder()
+    .wal(
+        WalConfigBuilder::new()
+            .max_append_block_ms(30_000)  // 0 = unbounded (legacy)
+            .acquire_timeout_ms(120_000)  // 0 = unbounded (legacy)
+            .build(),
+    )
+    .build();
+```
+
+```toml
+[wal]
+max_append_block_ms = 30000
+acquire_timeout_ms = 120000
+```
+
+Both TOML keys are `#[serde(default)]`, so omitting them keeps the defaults and
+existing config files load unchanged. `acquire_timeout_ms` reaches the
+coordinator through `GroupCommitCoordinator::with_config`, so it applies to the
+`GroupCommit` and `AsyncBatched` modes — the ones that actually run a
+coordinator.
 
 ### Bounded blocking append
 
@@ -737,6 +773,10 @@ let config = ConcurrentWalSystemConfig::new(wal_dir)
     .with_max_append_block_ms(30_000); // 0 = unbounded (legacy behavior)
 ```
 
+The bound is **per top-level append call**, not per entry: a batch append
+shares one budget rather than re-arming it for every operation, and the clock
+is only read if an entry actually has to wait.
+
 The new failure mode is a `StorageError::WalError` naming what filled up, how
 long the writer waited, which stripe, and where to look next:
 
@@ -746,6 +786,17 @@ drained it within the 30000 ms bound; the background flusher may be dead or
 wedged (check ConcurrentWalSystem::is_healthy)
 ```
 
+The **synchronous and handle-based append paths are bounded too** — they were
+the remaining unbounded entries into the same ring buffer. In `Synchronous`
+mode nothing drains in the background, so the message names that instead:
+
+```text
+WAL append gave up after waiting 30.0s: stripe 7 ring buffer full and nothing
+drained it within the 30000 ms bound; no consumer is draining the buffer
+(Synchronous mode drains on the calling thread, only after the append returns,
+so a batch larger than the total ring capacity can never fit)
+```
+
 A **closed** buffer still takes precedence over the deadline, even once the
 deadline has passed: "shut down" is a permanent, actionable answer, while
 "timed out" only reports that waiting did not help — so an orderly shutdown
@@ -753,6 +804,14 @@ never surfaces as a spurious stall alarm. That path keeps its historical
 `"WAL buffer closed"` wording verbatim.
 
 Setting `max_append_block_ms: 0` restores the legacy unbounded block.
+
+> **Retriability.** The append timeout is a `StorageError::WalError`, which the
+> MCP classifier maps to `INTERNAL` / `retriable: false`. A ring-buffer-full
+> timeout is in fact retry-*safe* (a mid-batch failure leaves a prefix with no
+> `CommitTx` marker, which recovery discards), but `WalError` is a blanket arm
+> shared with genuinely durability-unknown failures, so the conservative
+> non-retriable classification is deliberate. A dedicated retriable variant is
+> tracked as **Issue #3800**.
 
 ### Flush-thread liveness
 
@@ -780,9 +839,16 @@ all, it just stops draining, so error counters alone can never see it:
 | No flush thread (e.g. `Synchronous`) | `true` — never stale |
 | Startup, before the first cycle | `true` — the heartbeat is seeded at construction, so the full staleness window is grace |
 
-Staleness threshold is `max(10 × flush_interval, 1s)`. `Synchronous` mode runs
-no background flusher (the write path flushes inline), so it has no heartbeat
-that *could* advance and is never judged stale.
+Staleness threshold is `max(10 × flush_interval, 5s)`. The **5s floor** matters
+because `10 × flush_interval` alone is tiny at realistic intervals (100ms at the
+default `flush_interval_ms = 10`), which would let an ordinary scheduling hiccup
+on a loaded CI box read as a dead flusher. `Synchronous` mode runs no background
+flusher (the write path flushes inline), so it has no heartbeat that *could*
+advance and is never judged stale.
+
+The heartbeat clock is **monotonic** — microseconds since a process-start
+`Instant` baseline, not the wallclock — so a system clock step or a
+suspend/resume can neither invent staleness nor hide it.
 
 A transient, non-poison coordinator error no longer takes the flush thread
 down: the cycle is counted (`flush_cycle_errors`), logged, and retried on the
@@ -790,6 +856,12 @@ next interval. Only a **poisoned** coordinator lock still fails fast. Flush-path
 logging goes through a non-panicking writer rather than `eprintln!`, because
 `eprintln!` panics when stderr is closed (EPIPE) — killing the flush thread is
 precisely the failure this path exists to report.
+
+A `finish_flush` that cannot acquire the state mutex is likewise retained as a
+`pending_finish` and re-driven on the next cycle. Without that retry, one
+refused acquisition would leave the group-commit epoch chain — and therefore
+the durability frontier — permanently wedged, with every waiter parked behind
+it.
 
 ### Bounded group-commit lock acquisition
 
@@ -805,8 +877,11 @@ genuinely stuck *mutex*. It is **deadlock detection, not a performance SLA**;
 `0` disables it and restores unbounded `Mutex::lock`.
 
 Setting `ALETHEIADB_WAL_REENTRANCY_PANIC=1` escalates a detected re-entrant
-acquisition from an error to a panic. It is read once per process and intended
-for CI, where a latent lock-order bug should be un-ignorable.
+acquisition from an error to a panic. It is intended for CI, where a latent
+lock-order bug should be un-ignorable. The environment variable is read **once
+per process**, but the resulting policy is stored **per coordinator**, captured
+at construction — so a test can pin either behavior on its own coordinator
+instance regardless of how the job's environment is configured.
 
 Both refusals are `StorageError::WalError` carrying a forensic payload sampled
 *without* the mutex (that is the point — the reporter could not take it), so
@@ -829,9 +904,12 @@ non-zero `reentrancy_detections` is always a caller bug.
 > (`register_transaction`, `wait_for_flush`) says so explicitly: the in-flight
 > transaction's WAL frame may already have been appended, so it **may still
 > become durable and replay at recovery**. Do not report such a failure to a
-> client as a clean abort. There is no abort framing to make this precise until
-> Issue #3413 lands. Observation sites wrote nothing and make no durability
-> claim.
+> client as a clean abort. The WAL transaction frame format that would make
+> this precise has already landed (Issue #3413 — `BeginTx`/`CommitTx`/
+> `AbortTx`); what is still missing is the **commit path emitting an abort
+> record** when a step after the append fails, tracked as **Issue #3799**.
+> Until then the outcome is genuinely unknown and is disclosed as such.
+> Observation sites wrote nothing and make no durability claim.
 
 For the full call-site audit behind this hardening — including why re-entrant
 acquisition was *impossible* in the audited source, and which two mechanisms
