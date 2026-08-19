@@ -688,6 +688,46 @@ mod tests {
     }
 
     #[test]
+    fn test_wal_error_classification_is_non_retriable_internal() {
+        // Issue #3798 AC11: the group-commit lock-acquisition failures (both the
+        // suspected-deadlock timeout and the re-entrancy refusal) reuse
+        // StorageError::WalError rather than adding a new StorageError variant,
+        // so this classification IS their MCP contract.
+        //
+        // Why non-retriable, honestly stated. It is NOT one argument but two,
+        // and they are not equally strong:
+        //
+        //   * The group-commit ACQUISITION timeout genuinely leaves durability
+        //     UNKNOWN on the commit path — the transaction may still become
+        //     durable and replay at recovery — so telling a client to retry
+        //     would risk a double-applied transaction. Escalation is correct.
+        //   * The bounded APPEND timeout (ring buffer full, #3798) is by
+        //     contrast retry-SAFE: a mid-batch failure leaves a WAL prefix with
+        //     no CommitTx marker, which recovery discards (#3413 framing), so
+        //     the transaction never applied. On the merits it deserves
+        //     UNAVAILABLE/retriable.
+        //
+        // It is classified non-retriable anyway because WalError is a blanket
+        // arm covering both, and StorageError is not #[non_exhaustive], so
+        // splitting it is a breaking change rather than a local edit. The
+        // conservative mapping is deliberate — over-escalating a retriable
+        // backpressure error costs a page; under-escalating a
+        // durability-unknown one risks duplicate data. The dedicated retriable
+        // variant is tracked as Issue #3800; until then any reclassification of
+        // WalError has to break this test rather than silently flip the advice.
+        let e: Error = crate::core::error::StorageError::WalError {
+            reason: "Group commit lock acquisition timed out after 120000ms at \
+                     group_commit_state site register_transaction (possible deadlock); \
+                     durability status UNKNOWN"
+                .to_string(),
+        }
+        .into();
+        let json = McpError::from_db_error(&e).to_json();
+        assert_eq!(json["code"], "INTERNAL");
+        assert_eq!(json["retriable"], false);
+    }
+
+    #[test]
     fn principal_quota_breach_is_resource_exhausted_retriable_with_details() {
         // Issue #3678: a per-principal changefeed quota breach classifies to the
         // RESOURCE_EXHAUSTED envelope with retriable:true and structured

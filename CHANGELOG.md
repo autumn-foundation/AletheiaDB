@@ -7,6 +7,200 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### ⚠️ Breaking changes
+
+- WAL config structs gained fields (Issue #3798), so exhaustive struct-literal
+  construction that names every field no longer compiles — add
+  `..Default::default()`, or use the builders. Affected:
+  `crate::config::WalConfig` (`max_append_block_ms`, `acquire_timeout_ms`),
+  `ConcurrentWalSystemConfig` (both), `ConcurrentWalConfig`
+  (`max_append_block_ms`), and `GroupCommitConfig` (`acquire_timeout_ms`).
+  Every new field defaults to the pre-#3798 behavior for a healthy system, so
+  this is a compile-time break only — see Added/Changed below for what the
+  fields do.
+
+### Added
+
+- WAL stall diagnosability (Issue #3798). Two additive config fields:
+  `ConcurrentWalSystemConfig::max_append_block_ms` /
+  `ConcurrentWalConfig::max_append_block_ms` (default 30_000; `0` = unbounded)
+  bounding how long a writer blocks on a full ring buffer, and
+  `GroupCommitConfig::acquire_timeout_ms` (default 120_000; `0` = unbounded)
+  bounding acquisition of the group-commit state mutex (see Breaking changes
+  above). Setters `with_max_append_block_ms` (both WAL config types) and
+  `with_acquire_timeout_ms` (`ConcurrentWalSystemConfig`) are provided.
+- Both bounds are reachable end-to-end from the user-facing configuration
+  (Issue #3798): `crate::config::WalConfig::max_append_block_ms` /
+  `acquire_timeout_ms`, the matching `WalConfigBuilder` setters, and the
+  `[wal]` TOML keys of the same names (`#[serde(default)]`, so existing config
+  files load unchanged). `acquire_timeout_ms` reaches the coordinator via
+  `GroupCommitCoordinator::with_config`, so the documented
+  `0` = legacy-unbounded escape hatch now works from `AletheiaDB::open` /
+  `with_unified_config`, not only from the internal config types.
+- `ConcurrentWalSystem::flush_heartbeat()` (completed background-flusher loop
+  iterations; strictly increasing while the flush thread is alive) and
+  `flush_cycle_errors()` (process-lifetime count of non-poison flush-cycle
+  errors survived instead of dying), Issue #3798.
+- `GroupCommitCoordinator::reentrancy_detections()` and `acquire_timeouts()`
+  counters, so a health check or soak test can assert both stay at zero
+  (Issue #3798). Re-entrancy detection is non-blocking and precedes every
+  acquisition; `ALETHEIADB_WAL_REENTRANCY_PANIC=1` escalates a detection from
+  an error to a panic for CI. The variable is read once per process, but the
+  resulting policy is stored **per coordinator** (captured at construction), so
+  the flag and the re-entrancy tests coexist — each test pins the behavior it
+  asserts on its own instance instead of inheriting the job's environment.
+
+### Changed
+
+- **BEHAVIORAL:** WAL appends can now fail instead of blocking indefinitely
+  (Issue #3798). When a stripe ring buffer stays full for
+  `max_append_block_ms` (default 30s), the append returns a structured
+  `StorageError::WalError` naming the stripe, the wait, the bound, and the
+  likely cause ("the background flusher may be dead or wedged") rather than
+  parking the writer forever. Buffer **closed** still takes precedence over the
+  deadline and keeps its historical `"WAL buffer closed"` wording. Set
+  `max_append_block_ms: 0` to restore the unbounded legacy behavior. The
+  classification is conservative: the timeout is a `StorageError::WalError`,
+  which the MCP surface maps to `INTERNAL` / `retriable: false`, even though a
+  ring-buffer-full timeout is in fact retry-safe (a mid-batch failure leaves a
+  prefix with no `CommitTx` marker, which recovery discards). A dedicated
+  retriable variant is tracked as Issue #3800.
+- **BEHAVIORAL:** the **synchronous and handle-based** append paths
+  (`append_with_handle`, `append_batch_with_handles`) are bounded by the same
+  `max_append_block_ms` (Issue #3798) — they were the remaining unbounded
+  entries into the ring buffer, and in `Synchronous` mode nothing drains in the
+  background, so a full ring could self-deadlock the writer. The error text is
+  mode-appropriate there ("no consumer is draining the buffer …") rather than
+  blaming a flusher that does not exist. The attribution follows the
+  **durability mode**, not the append family: the write-transaction path uses
+  the *async* batch append in every mode, so a stalled async append in
+  `Synchronous` mode also names the calling thread instead of sending the
+  operator to `is_healthy()`, which that mode reports as `true` by
+  construction.
+- **BEHAVIORAL:** the append bound measures **time without progress**, not
+  total call time (Issue #3798). One deadline is shared by every entry of a
+  batch, so consecutive blocked entries are one stall window rather than one
+  each, and each entry actually placed restarts the window; the deadline is
+  lazy, so no clock is read on the never-blocking fast path. There is
+  deliberately **no cap on total batch time**: a large batch that keeps getting
+  room completes however long it takes (an earlier per-call cap failed slow
+  bulk imports mid-flight and blamed a flusher that was draining the whole
+  time). An absurd configured value whose deadline instant is unrepresentable
+  degrades to "unbounded" instead of panicking the writer; the same applies to
+  `acquire_timeout_ms`.
+- **BEHAVIORAL:** a slow-but-progressing `append_batch` now narrates itself
+  (Issue #3798). Because the bound is never charged against the call as a
+  whole, a degraded-but-alive drainer — one freeing a slot just inside every
+  window — can keep an N-entry batch running for up to N times the bound, and
+  the commit clock is held for all of it, serializing every other writer while
+  `is_healthy()` answers `true`. Such a batch is still **not** failed; instead
+  it emits one diagnostic each time its cumulative elapsed time crosses another
+  multiple of the stall bound, naming entries placed / total, elapsed, the
+  bound, and where to look next (`is_healthy()`, flush-thread stats, disk
+  throughput). No new configuration — the reporting interval is the stall
+  bound — and entries that never blocked read no clock, so the healthy path is
+  unchanged. Narrowing the commit-clock scope so a blocking append no longer
+  holds it is the systemic cure, tracked as Issue #3804.
+- WAL flush-coordinator diagnostics no longer use the `std` stderr print
+  macros (Issue #3798). The segment-header mismatch, post-sync truncate/seek
+  failure, and legacy drain-loop paths all run on a background flush thread,
+  where those macros PANIC if stderr has been closed (EPIPE) — killing the only
+  drainer precisely while it handles a flush failure, which is the very stall
+  the message exists to report. They now route through the shared
+  non-panicking `log_wal_diagnostic` helper, and a self-scanning guard test
+  keeps them that way.
+
+### Fixed
+
+- **DURABILITY:** a flush outcome is never discarded (Issue #3798). While an
+  un-finished epoch was outstanding, the flusher declined to open a new epoch
+  and **dropped that cycle's outcome** — including a FAILED disk flush, which
+  then reached nobody; a later cycle published a clean success for the very
+  epoch whose entries never reached disk, so its committers were told a lost
+  transaction was durable. The flusher now always opens an epoch and always
+  delivers its outcome (a queued epoch defers *delivery*, never suppresses the
+  *outcome*), which is safe because `finish_flush` already parks out-of-order
+  completions and records an error against its own epoch. A failure whose
+  `start_flush` was refused is likewise carried into the next epoch that opens,
+  since `current_epoch` did not move and that epoch covers the same
+  transactions. A coordinator lock unusable for ~1024 consecutive cycles now
+  fails fast rather than silently dropping outcomes or growing without bound.
+- `GroupCommitCoordinator::contended_acquires()` is now readable (Issue #3798);
+  the counter was incremented but exposed nowhere, so a rising ordinary
+  contention could not be told apart from a suspected deadlock. It also appears
+  in the acquisition-failure forensic payload.
+
+- Documented the durability-unknown caveat on commit-path acquisition timeouts
+  (Issue #3798): a timeout at `register_transaction` or `wait_for_flush` may
+  leave a WAL frame already appended, so the transaction **may still become
+  durable and replay at recovery** and must not be reported to a client as a
+  clean abort. The WAL transaction frame format that would make this precise
+  already shipped in 0.2.0 (Issue #3413 — `BeginTx`/`CommitTx`/`AbortTx`); what
+  is still missing is the commit path **emitting** an abort record when a step
+  after the append fails, tracked as Issue #3799. See
+  [docs/WAL.md](docs/WAL.md) ("Stall Diagnosability") and the module
+  documentation on `src/storage/wal/group_commit.rs` for the full call-site
+  audit.
+
+### Known issues
+
+- A GroupCommit flush failure can be misattributed for transactions inside the
+  **append→register** window (Issue #3798 review round 3). A transaction
+  appends its WAL frames before it registers its commit epoch, so a flush cycle
+  running in between drains those frames into an earlier epoch; if that cycle
+  *fails*, its entries are dropped rather than re-queued and the error is
+  recorded against the epoch that drained them, not the one the transaction
+  then registers into — whose own entry-free flush succeeds. Such a transaction
+  can see `wait_for_flush` return `Ok` for frames that never reached disk. Once
+  a transaction is registered, every outcome for its epoch does reach it. This
+  is not detectable after the fact via `FlushCoordinator::get_max_flushed_lsn`,
+  which is telemetry rather than a durability watermark: it is advanced by
+  `fetch_max` *before* the fsync and is not rolled back when that fsync fails
+  and the segment is truncated, and because LSNs are allocated before their
+  entries are placed into a stripe, a drained batch can skip a lower LSN still
+  in flight — monotonic, but neither durability-gated nor contiguous. Closing
+  the window requires claiming the epoch before the frames are appended, or
+  re-queueing what a flush could not write.
+- **BEHAVIORAL:** `ConcurrentWalSystem::is_healthy()` now reports `false` on a
+  stale flush heartbeat, not only on outstanding consecutive flush errors
+  (Issue #3798) — a flusher that died or wedged raises no error at all, so
+  error counters alone could never see it. Staleness threshold is
+  `max(10 × flush_interval, 5s)` — the 5s floor keeps a very small
+  `flush_interval_ms` from turning an ordinary scheduling hiccup on a loaded CI
+  box into a "dead flusher" verdict. The heartbeat is seeded at construction so
+  startup is a grace period, and a durability mode with no background flusher
+  (e.g. `Synchronous`) is never stale. This value also feeds
+  `database_stats.wal.healthy`.
+- **BEHAVIORAL:** flusher heartbeat timestamps are now **monotonic** —
+  microseconds since a process-start `Instant` baseline rather than the
+  wallclock (Issue #3798) — so a system clock step or a suspend/resume can
+  neither invent staleness nor hide it.
+- **BEHAVIORAL:** group-commit state-mutex acquisition is now bounded by
+  `acquire_timeout_ms` with non-blocking re-entrancy detection (Issue #3798).
+  Both refusals are `StorageError::WalError` (`INTERNAL`, non-retriable on the
+  MCP surface) carrying a forensic payload — acquiring site, time waited
+  against the bound, holder thread token and holder site, waiter count, and
+  `current_epoch`/`flushed_epoch`/`batch_count` mirrors — sampled without the
+  mutex, so it is a triage lead rather than an authoritative read. The default
+  (120_000) is strictly greater than the `timeout_max_ms` default (60_000) so
+  the `wait_for_flush` deadlock detector always fires first; this is deadlock
+  detection, not a performance SLA. `0` restores unbounded `Mutex::lock`.
+  Lock poisoning is unchanged and still maps to `StorageError::LockPoisoned`.
+- A transient (non-poison) group-commit coordinator error no longer kills the
+  background flush thread (Issue #3798): the cycle is counted, logged, and
+  retried on the next interval; only a poisoned coordinator lock still fails
+  fast. Flush-path logging no longer uses `eprintln!`, which panics when
+  stderr is closed (EPIPE) — killing the flush thread is precisely the failure
+  that path exists to report.
+- The background flusher now splits `start_flush` / `finish_flush` and retains
+  a refused `finish_flush` on a FIFO queue of un-finished epochs, drained
+  oldest-first at the top of each subsequent cycle (Issue #3798). Previously a
+  single bounded-acquisition failure inside `finish_flush` could permanently
+  wedge the group-commit epoch chain and the durability frontier, leaving every
+  waiter parked behind it. `GroupCommitCoordinator::mark_flushed` consequently
+  has no production caller any more and is retained as test /
+  back-compatibility API.
+
 ## [0.2.0] - 2026-07-30
 
 First crates.io release since 0.1.1. This release ships the trunk work

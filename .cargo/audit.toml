@@ -26,4 +26,24 @@ ignore = [
     # upstream bump to autumn 0.6.0 (tracked via autumn#1828). This ignore is the
     # interim unblock. Mirrors the lopdf RUSTSEC-2026-0187 precedent above.
     "RUSTSEC-2023-0071",
+
+    # h2 "unbounded empty DATA frames" (low severity, DoS). The h2 0.4 lockfile
+    # instance is PATCHED (bumped to 0.4.16); this ignore covers only the
+    # remaining h2 0.3.27 instance, for which NO patched 0.3 release exists.
+    # Transitive-only via the AWS smithy stack's legacy hyper-0.14 path
+    # (h2 0.3 <- aws-smithy-http-client <- aws-smithy-mocks / aws-smithy-runtime
+    # <- aws-config / aws-sdk-kms / aws-sdk-s3), reachable only through the
+    # optional `encryption-aws-kms` / `embeddings` features — absent from
+    # default and CI builds, so shipped-build exposure is nil. Remove when the
+    # smithy stack drops its h2 0.3 legacy path (tracked via issue #3807).
+    "RUSTSEC-2026-0258",
+
+    # rkyv 0.7.46 shared-pointer validation OOB reads (patched >= 0.8.17; the
+    # 0.7 line is unsupported upstream). LOCKFILE-ONLY pin: it enters Cargo.lock
+    # via rust_decimal's optional `rkyv` feature, and rust_decimal itself is not
+    # in any resolved build graph (`cargo tree --workspace --all-features
+    # --target all -i` matches neither crate). No build compiles or links rkyv,
+    # so exposure is nil; cargo-audit scans the lockfile literally. Remove when
+    # a full lockfile re-resolution prunes the entry (tracked via issue #3807).
+    "RUSTSEC-2026-0235",
 ]

@@ -13,6 +13,7 @@
 
 mod common;
 
+use aletheiadb::storage::wal::group_commit::GroupCommitCoordinator;
 use aletheiadb::{
     AletheiaDB, WalConfigBuilder, WriteOps, WriteOptions,
     core::{PropertyMapBuilder, interning::GLOBAL_INTERNER, temporal::time},
@@ -23,8 +24,9 @@ use aletheiadb::{
 };
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// Helper to create a database with a specific durability mode.
@@ -633,6 +635,152 @@ fn bench_async_batched_delays(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark the group-commit coordinator's state-mutex acquisition (Issue #3798).
+///
+/// `register_transaction` is the commit path's single acquisition of the
+/// coordinator's state mutex, so it is the measurement that guards the
+/// hardened `lock_state` chokepoint against regression: the uncontended case
+/// must stay a plain `try_lock` (no clock reads, no counter traffic), and the
+/// contended case must not lose throughput to the deadlock instrumentation.
+///
+/// Sample sizes are deliberately small — this is a regression tripwire run as
+/// part of the normal suite, not a tuning study.
+fn bench_group_commit_register_transaction(c: &mut Criterion) {
+    let mut group = c.benchmark_group("group_commit_lock_acquisition");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(2));
+
+    // Uncontended: one thread, no other acquirer. This is the fast path that
+    // every commit pays for, so it is the number that must not move.
+    group.bench_function("register_transaction_uncontended", |b| {
+        let coordinator = GroupCommitCoordinator::with_defaults();
+        b.iter(|| {
+            black_box(coordinator.register_transaction().unwrap());
+        });
+    });
+
+    // Contended: 8 threads hammering the same mutex. Thread spawn and the
+    // rendezvous are outside the timed region; only the loops are measured.
+    const CONTENDED_THREADS: usize = 8;
+    group.bench_function(
+        BenchmarkId::new("register_transaction_contended", CONTENDED_THREADS),
+        |b| {
+            b.iter_custom(|iters| {
+                let coordinator = Arc::new(GroupCommitCoordinator::with_defaults());
+                // Rounded up so every thread runs the same count; at the
+                // iteration counts Criterion picks, the overshoot versus
+                // `iters` is negligible.
+                let per_thread = iters.div_ceil(CONTENDED_THREADS as u64).max(1);
+                let barrier = Arc::new(Barrier::new(CONTENDED_THREADS + 1));
+
+                let mut handles = Vec::with_capacity(CONTENDED_THREADS);
+                for _ in 0..CONTENDED_THREADS {
+                    let coordinator = Arc::clone(&coordinator);
+                    let barrier = Arc::clone(&barrier);
+                    handles.push(thread::spawn(move || {
+                        barrier.wait();
+                        for _ in 0..per_thread {
+                            black_box(coordinator.register_transaction().unwrap());
+                        }
+                    }));
+                }
+
+                barrier.wait();
+                let start = Instant::now();
+                for handle in handles {
+                    handle.join().unwrap();
+                }
+                start.elapsed()
+            });
+        },
+    );
+
+    group.finish();
+}
+
+/// Benchmark how fast `finish_flush` releases a full batch of waiters (#3798).
+///
+/// This is the wakeup path #3798 changed: `finish_flush` now drops the state
+/// guard *before* `notify_all`, so a woken waiter does not immediately re-block
+/// on the notifier's own mutex. Measuring "notify → all 200 waiters have
+/// observed the flush" is what makes that thundering herd visible, and keeps it
+/// from creeping back.
+///
+/// The timed region ends when the last waiter reports through an mpsc channel —
+/// deliberately **not** when its thread joins. Joining would fold 200 thread
+/// teardowns (a scheduler cost that has nothing to do with the wakeup path)
+/// into the measurement, so the joins run outside the clock.
+fn bench_group_commit_finish_flush_wakeup(c: &mut Criterion) {
+    /// Enough waiters to make the herd measurable, small enough that spawning
+    /// them per iteration stays cheap.
+    const WAITERS: usize = 200;
+
+    let mut group = c.benchmark_group("group_commit_lock_acquisition");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(2));
+    group.throughput(Throughput::Elements(WAITERS as u64));
+
+    group.bench_function("finish_flush_wakeup_200_waiters", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                // Default config: the wait_for_flush deadlock timeout is >= 10s,
+                // so no waiter can time out while the batch is being set up.
+                let coordinator = Arc::new(GroupCommitCoordinator::with_defaults());
+                for _ in 0..WAITERS {
+                    coordinator.register_transaction().unwrap();
+                }
+                let epoch = coordinator.current_epoch().unwrap();
+
+                let ready = Arc::new(Barrier::new(WAITERS + 1));
+                // Each waiter reports the instant `wait_for_flush` returns, so
+                // the timed region can close on "all waiters observed the
+                // flush" without waiting for their threads to be torn down.
+                let (done_tx, done_rx) = mpsc::channel();
+                let mut handles = Vec::with_capacity(WAITERS);
+                for _ in 0..WAITERS {
+                    let coordinator = Arc::clone(&coordinator);
+                    let ready = Arc::clone(&ready);
+                    let done_tx = done_tx.clone();
+                    handles.push(thread::spawn(move || {
+                        ready.wait();
+                        let outcome = coordinator.wait_for_flush(epoch);
+                        // The receiver outlives every send, so this cannot fail.
+                        let _ = done_tx.send(outcome);
+                    }));
+                }
+                // Drop the template sender: only the per-thread clones remain,
+                // so a lost waiter surfaces as a disconnect rather than a hang.
+                drop(done_tx);
+
+                // Setup, outside the timed region: let the waiters reach the
+                // condvar. A straggler that arrives late simply observes the
+                // epoch as already flushed and returns immediately.
+                ready.wait();
+                thread::sleep(Duration::from_millis(20));
+
+                let start = Instant::now();
+                let flushing = coordinator.start_flush().unwrap();
+                coordinator.finish_flush(flushing, Ok(())).unwrap();
+                for _ in 0..WAITERS {
+                    done_rx.recv().unwrap().unwrap();
+                }
+                total += start.elapsed();
+
+                // Teardown, outside the timed region.
+                for handle in handles {
+                    handle.join().unwrap();
+                }
+            }
+            total
+        });
+    });
+
+    group.finish();
+}
+
 /// Benchmark low-level WAL append performance for different operation types.
 fn bench_wal_append(c: &mut Criterion) {
     let mut group = c.benchmark_group("wal_append");
@@ -780,6 +928,8 @@ criterion_group!(
     bench_async_batched_delays,
     bench_per_transaction_override,
     bench_mixed_workload,
+    bench_group_commit_register_transaction,
+    bench_group_commit_finish_flush_wakeup,
     bench_wal_append,
     bench_wal_throughput,
     bench_wal_with_sync,

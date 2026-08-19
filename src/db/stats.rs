@@ -329,8 +329,14 @@ pub struct WalStateStats {
     pub current_lsn: u64,
     /// Total WAL entries appended since startup. Atomic read.
     pub total_appends: u64,
-    /// `true` when the last WAL flush succeeded (no outstanding
-    /// consecutive flush errors). Atomic read.
+    /// `true` when the last WAL flush succeeded (no outstanding consecutive
+    /// flush errors) **and** the background flusher is still publishing its
+    /// heartbeat (Issue #3798). A flusher that died or wedged raises no error
+    /// at all — it simply stops draining — so a heartbeat that has gone stale
+    /// (no completed cycle for ten flush intervals, floored at five seconds,
+    /// measured on the monotonic clock) reports unhealthy on its own. A
+    /// durability mode that runs no flush thread has no heartbeat to go stale
+    /// and is never reported unhealthy for that reason. Atomic reads.
     pub healthy: bool,
 }
 

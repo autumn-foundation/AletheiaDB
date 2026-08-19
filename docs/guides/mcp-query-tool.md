@@ -1240,10 +1240,21 @@ serializes that snapshot.
     "durability_mode": "group_commit", // synchronous | async | group_commit | async_batched
     "current_lsn": 62501,         // NEXT LSN to be allocated
     "total_appends": 62500,
-    "healthy": true               // false = outstanding WAL flush errors
+    "healthy": true               // false = outstanding WAL flush errors OR a
+                                  // stale flusher heartbeat (Issue #3798)
   }
 }
 ```
+
+`wal.healthy` covers two independent failure classes. Outstanding flush errors
+are the historical meaning. Since Issue #3798 it *also* reports `false` when
+the background flush thread's heartbeat has gone **stale** — a flusher that
+died or wedged raises no error at all, it just stops draining, so error
+counters alone can never see it. Staleness is judged against
+`max(10 × flush_interval, 5s)` on a monotonic clock. This dimension applies
+only to the flusher-backed durability modes; `Synchronous` flushes inline on
+the write path, has no heartbeat that *could* advance, and is therefore never
+judged stale. See [../WAL.md](../WAL.md#stall-diagnosability-issue-3798).
 
 The cold-tier version counts are seeded from the persisted tables when the
 database is opened (an O(1) metadata read), so a restarted process reports its
