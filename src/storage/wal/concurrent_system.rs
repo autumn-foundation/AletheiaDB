@@ -456,8 +456,22 @@ impl BackgroundFlusher {
     /// 2. **An error is recorded against ITS OWN epoch.** `finish_flush`
     ///    pushes `(epoch, message)` onto `recent_errors`, and `wait_for_flush`
     ///    scans that list for its own epoch number. Arrival order does not
-    ///    enter into either side, so a deferred failure still reaches exactly
-    ///    the waiters it belongs to.
+    ///    enter into either side, so deferring delivery never misattributes an
+    ///    outcome to a different epoch than the one it came from.
+    ///
+    /// SCOPE OF THAT GUARANTEE — it is about *epoch* attribution, not about
+    /// which transactions an epoch's entries belong to. A transaction is a
+    /// member of the epoch it REGISTERS into, and it appends its frame to the
+    /// ring buffer strictly before it registers (`log_operations_to_wal` runs
+    /// ahead of `commit()` in `api::transaction::write`). A flush cycle that
+    /// lands inside that append→register window drains the frame into epoch
+    /// `X` while the transaction goes on to register into `X + 1`, so if that
+    /// cycle FAILS the error is recorded — correctly, per the above — against
+    /// `X`, which the transaction is not waiting on. Epoch membership is
+    /// therefore not the same relation as flush membership, and the deferral
+    /// machinery here neither creates nor closes that window; see
+    /// `ConcurrentWalSystem::commit`'s "Race Condition Handling" for the full
+    /// statement of what remains unguarded.
     ///
     /// The flusher is the only caller of `start_flush` / `finish_flush`, so
     /// retrying here cannot race anyone.
@@ -1154,10 +1168,36 @@ impl ConcurrentWalSystem {
     /// 1. The flush thread draining entries
     /// 2. Transactions calling `register_transaction()`
     ///
-    /// This is handled safely: if entries are drained before registration,
-    /// the epoch will still advance (with no entries), ensuring waiters
-    /// are notified. The data durability is guaranteed because entries
-    /// must be in the ring buffer before this method is called.
+    /// A caller appends its frames to the ring buffer strictly BEFORE it calls
+    /// this method, so a flush cycle can drain those frames into an earlier
+    /// epoch than the one the caller then registers into. On the SUCCESS path
+    /// that is harmless: the drained epoch advances (possibly with no
+    /// registered members), the caller's own epoch completes behind it, and by
+    /// the time `wait_for_flush` returns the frames really are on disk —
+    /// entries must be in the ring buffer before this method is called, and a
+    /// later epoch cannot complete before an earlier one (`flushed_epoch`
+    /// advances only over a contiguous run).
+    ///
+    /// KNOWN GAP — a FAILING flush inside that window is NOT attributed to the
+    /// caller (Issue #3798 review round 3, tracked separately). If the cycle
+    /// that drained the frames fails, its entries are dropped rather than
+    /// re-queued and the error is recorded against the epoch that drained them
+    /// — not against the epoch the transaction subsequently registers into,
+    /// whose own (entry-free) flush then succeeds. Such a transaction can
+    /// therefore see `wait_for_flush` return `Ok` for frames that never reached
+    /// disk. The window is exactly append→register: once a transaction is
+    /// registered, every outcome for its epoch reaches it (see
+    /// `drain_pending_finishes`). Closing it needs the epoch to be claimed
+    /// before the frames are appended, or the flush to re-queue what it could
+    /// not write; neither is done here.
+    ///
+    /// `FlushCoordinator::get_max_flushed_lsn` cannot be used to detect this
+    /// after the fact: it is a telemetry approximation, not a durability
+    /// watermark. It is advanced by `fetch_max` BEFORE the fsync and is not
+    /// rolled back when that fsync fails and the segment is truncated, and
+    /// because LSNs are allocated before their entries are placed into a
+    /// stripe, a drained batch may skip a lower LSN still in flight — so the
+    /// value is monotonic but neither durability-gated nor contiguous.
     pub fn commit(&self) -> Result<Option<u64>> {
         match self.durability_mode {
             DurabilityMode::Synchronous => {

@@ -88,6 +88,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time). An absurd configured value whose deadline instant is unrepresentable
   degrades to "unbounded" instead of panicking the writer; the same applies to
   `acquire_timeout_ms`.
+- **BEHAVIORAL:** a slow-but-progressing `append_batch` now narrates itself
+  (Issue #3798). Because the bound is never charged against the call as a
+  whole, a degraded-but-alive drainer — one freeing a slot just inside every
+  window — can keep an N-entry batch running for up to N times the bound, and
+  the commit clock is held for all of it, serializing every other writer while
+  `is_healthy()` answers `true`. Such a batch is still **not** failed; instead
+  it emits one diagnostic each time its cumulative elapsed time crosses another
+  multiple of the stall bound, naming entries placed / total, elapsed, the
+  bound, and where to look next (`is_healthy()`, flush-thread stats, disk
+  throughput). No new configuration — the reporting interval is the stall
+  bound — and entries that never blocked read no clock, so the healthy path is
+  unchanged. Narrowing the commit-clock scope so a blocking append no longer
+  holds it is the systemic cure, tracked as Issue #3804.
+- WAL flush-coordinator diagnostics no longer use the `std` stderr print
+  macros (Issue #3798). The segment-header mismatch, post-sync truncate/seek
+  failure, and legacy drain-loop paths all run on a background flush thread,
+  where those macros PANIC if stderr has been closed (EPIPE) — killing the only
+  drainer precisely while it handles a flush failure, which is the very stall
+  the message exists to report. They now route through the shared
+  non-panicking `log_wal_diagnostic` helper, and a self-scanning guard test
+  keeps them that way.
+
+### Fixed
+
+- **DURABILITY:** a flush outcome is never discarded (Issue #3798). While an
+  un-finished epoch was outstanding, the flusher declined to open a new epoch
+  and **dropped that cycle's outcome** — including a FAILED disk flush, which
+  then reached nobody; a later cycle published a clean success for the very
+  epoch whose entries never reached disk, so its committers were told a lost
+  transaction was durable. The flusher now always opens an epoch and always
+  delivers its outcome (a queued epoch defers *delivery*, never suppresses the
+  *outcome*), which is safe because `finish_flush` already parks out-of-order
+  completions and records an error against its own epoch. A failure whose
+  `start_flush` was refused is likewise carried into the next epoch that opens,
+  since `current_epoch` did not move and that epoch covers the same
+  transactions. A coordinator lock unusable for ~1024 consecutive cycles now
+  fails fast rather than silently dropping outcomes or growing without bound.
+- `GroupCommitCoordinator::contended_acquires()` is now readable (Issue #3798);
+  the counter was incremented but exposed nowhere, so a rising ordinary
+  contention could not be told apart from a suspected deadlock. It also appears
+  in the acquisition-failure forensic payload.
+
+- Documented the durability-unknown caveat on commit-path acquisition timeouts
+  (Issue #3798): a timeout at `register_transaction` or `wait_for_flush` may
+  leave a WAL frame already appended, so the transaction **may still become
+  durable and replay at recovery** and must not be reported to a client as a
+  clean abort. The WAL transaction frame format that would make this precise
+  already shipped in 0.2.0 (Issue #3413 — `BeginTx`/`CommitTx`/`AbortTx`); what
+  is still missing is the commit path **emitting** an abort record when a step
+  after the append fails, tracked as Issue #3799. See
+  [docs/WAL.md](docs/WAL.md) ("Stall Diagnosability") and the module
+  documentation on `src/storage/wal/group_commit.rs` for the full call-site
+  audit.
+
+### Known issues
+
+- A GroupCommit flush failure can be misattributed for transactions inside the
+  **append→register** window (Issue #3798 review round 3). A transaction
+  appends its WAL frames before it registers its commit epoch, so a flush cycle
+  running in between drains those frames into an earlier epoch; if that cycle
+  *fails*, its entries are dropped rather than re-queued and the error is
+  recorded against the epoch that drained them, not the one the transaction
+  then registers into — whose own entry-free flush succeeds. Such a transaction
+  can see `wait_for_flush` return `Ok` for frames that never reached disk. Once
+  a transaction is registered, every outcome for its epoch does reach it. This
+  is not detectable after the fact via `FlushCoordinator::get_max_flushed_lsn`,
+  which is telemetry rather than a durability watermark: it is advanced by
+  `fetch_max` *before* the fsync and is not rolled back when that fsync fails
+  and the segment is truncated, and because LSNs are allocated before their
+  entries are placed into a stripe, a drained batch can skip a lower LSN still
+  in flight — monotonic, but neither durability-gated nor contiguous. Closing
+  the window requires claiming the epoch before the frames are appended, or
+  re-queueing what a flush could not write.
 - **BEHAVIORAL:** `ConcurrentWalSystem::is_healthy()` now reports `false` on a
   stale flush heartbeat, not only on outstanding consecutive flush errors
   (Issue #3798) — a flusher that died or wedged raises no error at all, so
@@ -127,38 +200,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waiter parked behind it. `GroupCommitCoordinator::mark_flushed` consequently
   has no production caller any more and is retained as test /
   back-compatibility API.
-
-### Fixed
-
-- **DURABILITY:** a flush outcome is never discarded (Issue #3798). While an
-  un-finished epoch was outstanding, the flusher declined to open a new epoch
-  and **dropped that cycle's outcome** — including a FAILED disk flush, which
-  then reached nobody; a later cycle published a clean success for the very
-  epoch whose entries never reached disk, so its committers were told a lost
-  transaction was durable. The flusher now always opens an epoch and always
-  delivers its outcome (a queued epoch defers *delivery*, never suppresses the
-  *outcome*), which is safe because `finish_flush` already parks out-of-order
-  completions and records an error against its own epoch. A failure whose
-  `start_flush` was refused is likewise carried into the next epoch that opens,
-  since `current_epoch` did not move and that epoch covers the same
-  transactions. A coordinator lock unusable for ~1024 consecutive cycles now
-  fails fast rather than silently dropping outcomes or growing without bound.
-- `GroupCommitCoordinator::contended_acquires()` is now readable (Issue #3798);
-  the counter was incremented but exposed nowhere, so a rising ordinary
-  contention could not be told apart from a suspected deadlock. It also appears
-  in the acquisition-failure forensic payload.
-
-- Documented the durability-unknown caveat on commit-path acquisition timeouts
-  (Issue #3798): a timeout at `register_transaction` or `wait_for_flush` may
-  leave a WAL frame already appended, so the transaction **may still become
-  durable and replay at recovery** and must not be reported to a client as a
-  clean abort. The WAL transaction frame format that would make this precise
-  already shipped in 0.2.0 (Issue #3413 — `BeginTx`/`CommitTx`/`AbortTx`); what
-  is still missing is the commit path **emitting** an abort record when a step
-  after the append fails, tracked as Issue #3799. See
-  [docs/WAL.md](docs/WAL.md) ("Stall Diagnosability") and the module
-  documentation on `src/storage/wal/group_commit.rs` for the full call-site
-  audit.
 
 ## [0.2.0] - 2026-07-30
 

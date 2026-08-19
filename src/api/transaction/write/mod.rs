@@ -8,6 +8,28 @@
 //!
 //! Write transactions buffer all changes in memory until commit.
 //! On commit, changes are validated and applied atomically.
+//!
+//! # The commit clock amplifies WAL back-pressure (Issue #3804)
+//!
+//! `commit()` holds the commit-timestamp lock across the WAL append, so
+//! anything that makes the append slow does not merely slow *this*
+//! transaction — it serializes every other committer behind it. The WAL's
+//! append bound is deliberately a **stall** detector rather than a cap on
+//! total call time (see `docs/WAL.md`), so a batch that keeps inching forward
+//! against a degraded-but-alive drainer can legitimately run for many
+//! multiples of that bound, and the commit clock is held for all of it. The
+//! WAL narrates such a call once per elapsed stall window; it does not
+//! shorten it. Narrowing the commit-clock scope so a blocking append no longer
+//! holds it is the actual cure and is tracked as **Issue #3804**.
+//!
+//! # Frames are appended before the epoch is registered
+//!
+//! `log_operations_to_wal` runs before `ConcurrentWalSystem::commit`, so a
+//! GroupCommit flush cycle can drain this transaction's frames into an epoch
+//! it never registers into. On the success path that is harmless; a *failing*
+//! flush inside that window is currently misattributed. The full statement of
+//! the gap, and why the flush coordinator's LSN watermark cannot be used to
+//! detect it, lives on `ConcurrentWalSystem::commit`.
 
 use super::{
     ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager, WriteBuffer,

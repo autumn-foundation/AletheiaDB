@@ -250,6 +250,20 @@ impl AppendDeadline {
         self.armed = None;
     }
 
+    /// When the CURRENT stall window began, or `None` if the caller is not
+    /// stalled right now.
+    ///
+    /// Read between an append returning `Ok` and the matching
+    /// [`Self::note_progress`], this answers "did that entry actually have to
+    /// wait?" -- and if so hands back the instant it started waiting, so a
+    /// caller can charge the wait to the whole call without reading the clock
+    /// again. Entries that sail straight through never armed, so they return
+    /// `None` and cost nothing (Issue #3798 review round 3).
+    #[inline]
+    pub(crate) fn armed_at(&self) -> Option<std::time::Instant> {
+        self.armed
+    }
+
     /// The instant this stall must give up by, arming the clock on first use.
     ///
     /// `None` for an unbounded deadline -- and in that case no clock is read,

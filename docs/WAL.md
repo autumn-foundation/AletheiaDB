@@ -792,6 +792,38 @@ Two consequences worth stating plainly:
   backpressure that completed.
 - A single entry's semantics are unchanged: it can only ever arm one window.
 
+##### The cost of that choice, stated plainly
+
+Because the bound is never charged against the call as a whole, a
+**degraded-but-alive** drainer — one freeing a slot just inside every window —
+keeps an N-entry batch running for up to N times the bound. The commit clock is
+held for that entire call, so every other writer serializes behind it, and
+`is_healthy()` answers `true` throughout, because the flush thread genuinely is
+alive. The bound will not fail such a batch, and that is the intended
+behavior — but it is no longer silent: `append_batch` emits one
+`log_wal_diagnostic` line each time the call's cumulative elapsed time crosses
+another multiple of the stall bound, naming entries placed so far, total
+entries, elapsed, the bound, and where to look next:
+
+```text
+WAL append_batch is progressing but slow: 84/200 entries placed after 3011ms,
+which is past 2 stall window(s) of 1500ms. The drainer is alive (each window
+saw progress, so the batch is NOT being failed), but it is freeing slots barely
+fast enough, and this call holds the commit path for its whole duration.
+Consider is_healthy(), the flush thread's stats, and disk throughput.
+```
+
+There is no new configuration: the reporting interval **is** the stall bound.
+Entries that never had to wait read no clock, so the healthy path is unchanged.
+The diagnostic is deliberately not wired into the handle-returning batch append,
+whose only drainer is the calling thread — "alive but slow" is not a state that
+path can be in.
+
+The systemic cure is to stop holding the commit clock across a blocking append
+at all, which is a write-path scope change rather than a WAL one; it is tracked
+separately as **Issue #3804** (see also the commit-clock amplifier note in the
+`api::transaction::write` module header).
+
 The failure mode is a `StorageError::WalError` naming what filled up, how long
 the writer waited *in that stall*, which stripe, and where to look next:
 
