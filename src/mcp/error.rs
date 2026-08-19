@@ -694,12 +694,27 @@ mod tests {
         // StorageError::WalError rather than adding a new StorageError variant,
         // so this classification IS their MCP contract.
         //
-        // This test PASSES today — it pins the assumption the #3798 fix depends
-        // on. Retriability matters here: an acquisition timeout on the commit
-        // path leaves durability UNKNOWN, so a client must never be told to just
-        // retry (which would risk a double-applied transaction) — it must
-        // escalate. Any future reclassification of WalError has to break this
-        // test rather than silently flip that advice.
+        // Why non-retriable, honestly stated. It is NOT one argument but two,
+        // and they are not equally strong:
+        //
+        //   * The group-commit ACQUISITION timeout genuinely leaves durability
+        //     UNKNOWN on the commit path — the transaction may still become
+        //     durable and replay at recovery — so telling a client to retry
+        //     would risk a double-applied transaction. Escalation is correct.
+        //   * The bounded APPEND timeout (ring buffer full, #3798) is by
+        //     contrast retry-SAFE: a mid-batch failure leaves a WAL prefix with
+        //     no CommitTx marker, which recovery discards (#3413 framing), so
+        //     the transaction never applied. On the merits it deserves
+        //     UNAVAILABLE/retriable.
+        //
+        // It is classified non-retriable anyway because WalError is a blanket
+        // arm covering both, and StorageError is not #[non_exhaustive], so
+        // splitting it is a breaking change rather than a local edit. The
+        // conservative mapping is deliberate — over-escalating a retriable
+        // backpressure error costs a page; under-escalating a
+        // durability-unknown one risks duplicate data. The dedicated retriable
+        // variant is tracked as Issue #3800; until then any reclassification of
+        // WalError has to break this test rather than silently flip the advice.
         let e: Error = crate::core::error::StorageError::WalError {
             reason: "Group commit lock acquisition timed out after 120000ms at \
                      group_commit_state site register_transaction (possible deadlock); \

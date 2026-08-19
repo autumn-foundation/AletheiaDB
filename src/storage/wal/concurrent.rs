@@ -71,7 +71,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::lsn_allocator::LsnAllocator;
-use super::ring_buffer::{AppendBlocked, AppendBlockedKind, CompletionHandle, PendingEntry};
+use super::ring_buffer::{
+    AppendBlocked, AppendBlockedKind, AppendDeadline, CompletionHandle, PendingEntry,
+};
 use super::stripe::{StripeMetrics, WalStripe};
 use super::{LSN, WalOperation};
 
@@ -185,6 +187,22 @@ pub struct ConcurrentWal {
     active_batches: AtomicUsize,
 }
 
+/// Who was supposed to drain the stripe a blocked writer is waiting on
+/// (Issue #3798).
+///
+/// The two append families have genuinely different remediations, so they must
+/// not share one message: an async append waits on the background flush
+/// thread, while a handle-returning append is drained by its own caller
+/// (`DurabilityMode::Synchronous` drains *after* the append returns), where
+/// there is no flusher to blame at all.
+#[derive(Clone, Copy)]
+enum AppendDrainer {
+    /// The background flush thread (async / group-commit paths).
+    BackgroundFlusher,
+    /// The calling thread itself (synchronous, handle-returning paths).
+    CallingThread,
+}
+
 /// Guard for tracking active batch operations.
 struct ActiveBatchGuard<'a>(&'a AtomicUsize);
 
@@ -292,14 +310,15 @@ impl ConcurrentWal {
         Ok(())
     }
 
-    /// Deadline for a blocking append, or `None` when the bound is disabled
-    /// (`max_append_block_ms == 0`, legacy unbounded blocking).
+    /// The blocking-append bound for ONE top-level append call (Issue #3798).
+    ///
+    /// Created once per call -- including once per *batch*, not once per entry
+    /// -- and threaded down by `&mut`, so the bound bounds the call and the
+    /// clock is only read if an entry actually has to wait. A configured
+    /// `max_append_block_ms` of `0` yields the unbounded (legacy) deadline.
     #[inline]
-    fn append_deadline(&self) -> Option<std::time::Instant> {
-        (self.config.max_append_block_ms != 0).then(|| {
-            std::time::Instant::now()
-                + std::time::Duration::from_millis(self.config.max_append_block_ms)
-        })
+    fn append_deadline(&self) -> AppendDeadline {
+        AppendDeadline::from_millis(self.config.max_append_block_ms)
     }
 
     /// Turn a refused blocking append into a caller-facing error (Issue #3798).
@@ -307,20 +326,45 @@ impl ConcurrentWal {
     /// `Closed` keeps the historical wording verbatim so existing callers and
     /// tests are unaffected. `TimedOut` is the new, diagnosable case: it names
     /// what filled up, how long the writer waited, which stripe, and where to
-    /// look next (a wedged or dead background flusher).
-    fn map_append_blocked(&self, blocked: AppendBlocked, stripe_id: usize) -> Error {
+    /// look next -- which depends on who was meant to drain (`drainer`).
+    ///
+    /// Retriability: the bounded-append timeout is reported as
+    /// `StorageError::WalError`, which the MCP classifier maps to
+    /// `INTERNAL`/`retriable: false`. A ring-buffer-full timeout is in fact
+    /// retry-SAFE (a mid-batch failure leaves a prefix with no CommitTx marker,
+    /// which recovery discards), but `WalError` is a blanket arm shared with
+    /// genuinely durability-unknown failures, so the conservative mapping is
+    /// deliberate. A dedicated retriable variant is tracked as Issue #3800.
+    fn map_append_blocked(
+        &self,
+        blocked: AppendBlocked,
+        stripe_id: usize,
+        drainer: AppendDrainer,
+    ) -> Error {
         match blocked.kind {
             AppendBlockedKind::Closed => Error::Storage(StorageError::WalError {
                 reason: "WAL buffer closed".to_string(),
             }),
-            AppendBlockedKind::TimedOut { waited } => Error::Storage(StorageError::WalError {
-                reason: format!(
-                    "WAL append gave up after waiting {:?}: stripe {} ring buffer full and \
-                     nothing drained it within the {} ms bound; the background flusher may be \
-                     dead or wedged (check ConcurrentWalSystem::is_healthy)",
-                    waited, stripe_id, self.config.max_append_block_ms
-                ),
-            }),
+            AppendBlockedKind::TimedOut { waited } => {
+                let culprit = match drainer {
+                    AppendDrainer::BackgroundFlusher => {
+                        "the background flusher may be dead or wedged (check \
+                         ConcurrentWalSystem::is_healthy)"
+                    }
+                    AppendDrainer::CallingThread => {
+                        "no consumer is draining the buffer (Synchronous mode drains on the \
+                         calling thread, only after the append returns, so a batch larger than \
+                         the total ring capacity can never fit)"
+                    }
+                };
+                Error::Storage(StorageError::WalError {
+                    reason: format!(
+                        "WAL append gave up after waiting {:?}: stripe {} ring buffer full and \
+                         nothing drained it within the {} ms bound; {}",
+                        waited, stripe_id, self.config.max_append_block_ms, culprit
+                    ),
+                })
+            }
         }
     }
 
@@ -344,12 +388,14 @@ impl ConcurrentWal {
         let data = self.serialize_entry(lsn, &operation)?;
         let stripe = self.get_stripe();
 
-        match stripe.append_blocking_until(lsn, data, self.append_deadline()) {
+        match stripe.append_blocking_until(lsn, data, &mut self.append_deadline()) {
             Ok(()) => {
                 self.total_appends.fetch_add(1, Ordering::Relaxed);
                 Ok(lsn)
             }
-            Err(blocked) => Err(self.map_append_blocked(blocked, stripe.id())),
+            Err(blocked) => {
+                Err(self.map_append_blocked(blocked, stripe.id(), AppendDrainer::BackgroundFlusher))
+            }
         }
     }
 
@@ -390,8 +436,11 @@ impl ConcurrentWal {
     /// Append an operation with a completion handle (for group commit).
     ///
     /// Returns with a handle that can be used to wait for durability later.
-    /// This method will block if the buffer is full until space becomes
-    /// available (backpressure).
+    /// This method blocks while the buffer is full (backpressure), bounded by
+    /// `max_append_block_ms` exactly as the async path is (Issue #3798): this
+    /// is the append `DurabilityMode::Synchronous` uses, and that mode runs no
+    /// background flusher at all, so an unbounded wait here would have nobody
+    /// left to end it.
     pub fn append_with_handle(&self, operation: WalOperation) -> Result<(LSN, CompletionHandle)> {
         self.check_not_shutting_down()?;
         let _guard = ActiveBatchGuard::new(&self.active_batches);
@@ -400,14 +449,14 @@ impl ConcurrentWal {
         let data = self.serialize_entry(lsn, &operation)?;
         let stripe = self.get_stripe();
 
-        match stripe.append_sync_blocking(lsn, data) {
+        match stripe.append_sync_blocking_until(lsn, data, &mut self.append_deadline()) {
             Ok(handle) => {
                 self.total_appends.fetch_add(1, Ordering::Relaxed);
                 Ok((lsn, handle))
             }
-            Err(_entry) => Err(Error::Storage(StorageError::WalError {
-                reason: "WAL buffer closed".to_string(),
-            })),
+            Err(blocked) => {
+                Err(self.map_append_blocked(blocked, stripe.id(), AppendDrainer::CallingThread))
+            }
         }
     }
 
@@ -495,22 +544,33 @@ impl ConcurrentWal {
         }
 
         // Phase 2 (append): every entry serialized successfully, so append
-        // them all. An append failure here is reachable ONLY if the stripe is
-        // closed mid-batch during teardown (abnormal shutdown), and could leave
-        // a partial prefix; that residue is out of scope for this contained
-        // serialize-first fix and is covered by the WAL transaction-framing
-        // work (Issue #3413).
+        // them all. Two ways this can fail: the stripe is closed mid-batch
+        // during teardown (abnormal shutdown), or the #3798 bound elapses with
+        // the ring still full -- the latter is reachable in normal operation
+        // whenever nothing is draining. Either can leave a partial prefix;
+        // that residue is out of scope here and is covered by the WAL
+        // transaction-framing work (Issue #3413), which discards a prefix with
+        // no commit marker at recovery.
+        //
+        // ONE deadline for the whole batch: re-arming it per entry would let a
+        // 1000-op batch block for 1000 x the bound while the caller holds the
+        // commit clock -- the bound must bound the CALL.
+        let mut deadline = self.append_deadline();
         let mut lsns = Vec::with_capacity(serialized.len());
         for (lsn, data) in serialized {
             lsns.push(lsn);
             let stripe = self.get_stripe();
 
-            match stripe.append_blocking_until(lsn, data, self.append_deadline()) {
+            match stripe.append_blocking_until(lsn, data, &mut deadline) {
                 Ok(()) => {
                     self.total_appends.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(blocked) => {
-                    return Err(self.map_append_blocked(blocked, stripe.id()));
+                    return Err(self.map_append_blocked(
+                        blocked,
+                        stripe.id(),
+                        AppendDrainer::BackgroundFlusher,
+                    ));
                 }
             }
         }
@@ -569,25 +629,34 @@ impl ConcurrentWal {
         }
 
         // Phase 2 (append): every entry serialized successfully, so append
-        // them all. An append failure here is reachable ONLY if the stripe is
-        // closed mid-batch during teardown (abnormal shutdown), and could leave
-        // a partial prefix; that residue is out of scope here and is covered by
-        // the WAL transaction-framing work (Issue #3413).
+        // them all. A failure here is either a stripe closed mid-batch during
+        // teardown or the #3798 bound elapsing on a ring nobody drained, and
+        // could leave a partial prefix; that residue is out of scope here and
+        // is covered by the WAL transaction-framing work (Issue #3413).
+        //
+        // ONE deadline for the whole batch (see `append_batch`). It matters
+        // most here: this is the Synchronous path, whose only drainer is the
+        // caller itself once this method returns, so a batch bigger than the
+        // ring can never fit and must be refused promptly rather than parked
+        // per entry.
+        let mut deadline = self.append_deadline();
         let mut lsns = Vec::with_capacity(serialized.len());
         let mut handles = Vec::with_capacity(serialized.len());
         for (lsn, data) in serialized {
             lsns.push(lsn);
             let stripe = self.get_stripe();
 
-            match stripe.append_sync_blocking(lsn, data) {
+            match stripe.append_sync_blocking_until(lsn, data, &mut deadline) {
                 Ok(handle) => {
                     self.total_appends.fetch_add(1, Ordering::Relaxed);
                     handles.push(handle);
                 }
-                Err(_entry) => {
-                    return Err(Error::Storage(StorageError::WalError {
-                        reason: "WAL buffer closed".to_string(),
-                    }));
+                Err(blocked) => {
+                    return Err(self.map_append_blocked(
+                        blocked,
+                        stripe.id(),
+                        AppendDrainer::CallingThread,
+                    ));
                 }
             }
         }
@@ -1101,6 +1170,162 @@ mod tests {
         assert_eq!(wal.config().num_stripes, config.num_stripes);
         assert!(wal.stripe(0).is_some());
         assert!(wal.stripe(1000).is_none());
+    }
+
+    // ── Issue #3798 review round: the bound must cover EVERY blocking append,
+    //    and must bound the CALL rather than each entry inside it ───────────
+    //
+    // Every probe here runs on a detached worker behind a `recv_timeout`
+    // watchdog: the property under test is "does this call ever return?", so a
+    // test that joined the worker would hang the suite instead of failing it.
+
+    /// Upper bound on any cross-thread probe in this section.
+    const APPEND_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// A one-stripe WAL whose ring buffer holds `capacity` entries and whose
+    /// blocking appends give up after `bound_ms`.
+    fn wedged_wal(dir: &std::path::Path, capacity: usize, bound_ms: u64) -> Arc<ConcurrentWal> {
+        let config = ConcurrentWalConfig::new(dir)
+            .with_num_stripes(1)
+            .with_stripe_capacity(capacity)
+            .with_max_append_block_ms(bound_ms);
+        Arc::new(ConcurrentWal::new(config).expect("WAL construction must succeed"))
+    }
+
+    /// `append_with_handle` -- the Synchronous-mode append path -- must honor
+    /// the same bound `append_async` got: a full ring buffer that nobody is
+    /// draining hands back a diagnosable error instead of parking the writer
+    /// forever.
+    #[test]
+    fn test_append_with_handle_is_bounded_on_a_full_buffer() {
+        use std::sync::mpsc;
+
+        let dir = tempdir().unwrap();
+        let wal = wedged_wal(dir.path(), 2, 200);
+
+        let (tx, rx) = mpsc::channel();
+        let worker = Arc::clone(&wal);
+        // Detached on purpose: while the sync path is unbounded this worker
+        // never returns, so the watchdog below is what decides pass/fail.
+        thread::spawn(move || {
+            // Two slots, four attempts, and nothing ever drains: the third
+            // append has nowhere to go.
+            for _ in 0..4 {
+                if let Err(e) = worker.append_with_handle(test_operation()) {
+                    let _ = tx.send(Some(e.to_string()));
+                    return;
+                }
+            }
+            let _ = tx.send(None);
+        });
+
+        let outcome = rx.recv_timeout(APPEND_WATCHDOG).expect(
+            "append_with_handle never returned: the Synchronous append path still blocks \
+             forever on a full, undrained ring buffer (Issue #3798 review round)",
+        );
+        let message = outcome.expect(
+            "every append succeeded against a 2-slot buffer that was never drained -- the \
+             bound was not applied at all",
+        );
+        assert!(
+            message.contains("ring buffer full"),
+            "the error must name what filled up, got: {message}"
+        );
+        assert!(
+            message.contains("no consumer"),
+            "the Synchronous-path error must name the missing consumer (there is no \
+             background flusher in this mode), got: {message}"
+        );
+    }
+
+    /// A batch larger than the whole ring can hold must fail diagnosably
+    /// instead of self-deadlocking: in Synchronous mode the calling thread is
+    /// the only drainer, and it does not drain until after the batch returns.
+    #[test]
+    fn test_append_batch_with_handles_refuses_an_unfittable_batch() {
+        use std::sync::mpsc;
+
+        let dir = tempdir().unwrap();
+        let wal = wedged_wal(dir.path(), 2, 200);
+
+        let (tx, rx) = mpsc::channel();
+        let worker = Arc::clone(&wal);
+        thread::spawn(move || {
+            let ops: Vec<WalOperation> = (0..6).map(|_| test_operation()).collect();
+            let _ = tx.send(
+                worker
+                    .append_batch_with_handles(ops)
+                    .err()
+                    .map(|e| e.to_string()),
+            );
+        });
+
+        let outcome = rx.recv_timeout(APPEND_WATCHDOG).expect(
+            "append_batch_with_handles never returned for a batch larger than the ring: it \
+             self-deadlocks (Issue #3798 review round)",
+        );
+        let message =
+            outcome.expect("a 6-op batch cannot fit in a 2-slot ring buffer, yet it succeeded");
+        assert!(
+            message.contains("ring buffer full"),
+            "the error must name what filled up, got: {message}"
+        );
+    }
+
+    /// The bound bounds the CALL, not each entry inside it.
+    ///
+    /// A batch that re-arms a fresh budget per entry stretches its worst case
+    /// to `N x bound` while holding the commit clock. The drainer here frees
+    /// the ring twice, at 100ms and 250ms, so a per-entry budget keeps
+    /// re-winning and only gives up at ~450ms, while one shared budget answers
+    /// at ~200ms.
+    #[test]
+    fn test_append_batch_shares_one_deadline_across_entries() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        const BOUND_MS: u64 = 200;
+
+        let dir = tempdir().unwrap();
+        let wal = wedged_wal(dir.path(), 2, BOUND_MS);
+
+        // Fill the ring first, so entry 0 of the batch already has to wait.
+        for _ in 0..2 {
+            wal.append_async(test_operation())
+                .expect("filling a fresh 2-slot ring must succeed");
+        }
+
+        let drainer = Arc::clone(&wal);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            drop(drainer.drain_all());
+            thread::sleep(Duration::from_millis(150));
+            drop(drainer.drain_all());
+        });
+
+        let (tx, rx) = mpsc::channel();
+        let worker = Arc::clone(&wal);
+        thread::spawn(move || {
+            let ops: Vec<WalOperation> = (0..5).map(|_| test_operation()).collect();
+            let started = Instant::now();
+            let result = worker.append_batch(ops);
+            let _ = tx.send((started.elapsed(), result.is_err()));
+        });
+
+        let (elapsed, failed) = rx
+            .recv_timeout(APPEND_WATCHDOG)
+            .expect("append_batch never returned against a ring it cannot drain fast enough");
+
+        assert!(
+            failed,
+            "the batch cannot fit within one {BOUND_MS}ms budget, so it must report the \
+             timeout rather than succeed after several of them"
+        );
+        assert!(
+            elapsed < Duration::from_millis(BOUND_MS * 2),
+            "append_batch took {elapsed:?}: the {BOUND_MS}ms bound is being re-armed per \
+             entry, so it bounds each entry instead of the call (Issue #3798 review round)"
+        );
     }
 }
 

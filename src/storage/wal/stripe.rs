@@ -51,7 +51,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::LSN;
 use super::ring_buffer::{
-    AppendBlocked, CompletionHandle, DEFAULT_RING_BUFFER_CAPACITY, PendingEntry, WalRingBuffer,
+    AppendBlocked, AppendDeadline, CompletionHandle, DEFAULT_RING_BUFFER_CAPACITY, PendingEntry,
+    WalRingBuffer,
 };
 
 /// A single stripe in the concurrent WAL.
@@ -147,8 +148,33 @@ impl WalStripe {
         lsn: LSN,
         data: Vec<u8>,
     ) -> Result<CompletionHandle, PendingEntry> {
+        // Unbounded wait preserves this method's legacy contract.
+        self.append_sync_blocking_until(lsn, data, &mut AppendDeadline::unbounded())
+            .map_err(|blocked| blocked.entry)
+    }
+
+    /// Append an entry (sync mode), blocking until space is available or
+    /// `deadline` runs out (Issue #3798).
+    ///
+    /// The bounded counterpart of [`Self::append_sync_blocking`], and the one
+    /// the durability paths that hand back a completion handle use: they are
+    /// drained by the CALLING thread rather than a background flusher, so an
+    /// unbounded wait here has no one left to wake it.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(handle)` - Handle to wait for durability
+    /// - `Err(AppendBlocked)` carrying the entry back plus the reason
+    ///   (buffer closed vs deadline elapsed)
+    pub fn append_sync_blocking_until(
+        &self,
+        lsn: LSN,
+        data: Vec<u8>,
+        deadline: &mut AppendDeadline,
+    ) -> Result<CompletionHandle, AppendBlocked> {
         let (entry, handle) = PendingEntry::new_sync(lsn, data);
-        self.append_entry_blocking(entry).map(|()| handle)
+        self.append_entry_blocking_until(entry, deadline)
+            .map(|()| handle)
     }
 
     /// Append an entry to this stripe (blocking mode - waits for space).
@@ -161,17 +187,19 @@ impl WalStripe {
     /// - `Ok(())` if appended successfully (after waiting if needed)
     /// - `Err(entry)` if buffer is closed
     pub fn append_blocking(&self, lsn: LSN, data: Vec<u8>) -> Result<(), PendingEntry> {
-        // Unbounded wait (`None`) preserves this method's legacy contract.
-        self.append_blocking_until(lsn, data, None)
+        // Unbounded wait preserves this method's legacy contract.
+        self.append_blocking_until(lsn, data, &mut AppendDeadline::unbounded())
             .map_err(|blocked| blocked.entry)
     }
 
-    /// Append an entry, blocking until space is available or `deadline` passes
-    /// (Issue #3798).
+    /// Append an entry, blocking until space is available or `deadline` runs
+    /// out (Issue #3798).
     ///
-    /// `None` reproduces [`Self::append_blocking`]'s unbounded wait; `Some(t)`
-    /// guarantees a return by `t` even if the flush thread has stopped
-    /// draining this stripe.
+    /// An [`AppendDeadline::unbounded`] reproduces [`Self::append_blocking`]'s
+    /// unbounded wait; a bounded one guarantees a return within its bound even
+    /// if the flush thread has stopped draining this stripe. The deadline is
+    /// owned by the top-level append call and shared by every entry of a
+    /// batch (see [`AppendDeadline`]).
     ///
     /// # Returns
     ///
@@ -182,7 +210,7 @@ impl WalStripe {
         &self,
         lsn: LSN,
         data: Vec<u8>,
-        deadline: Option<std::time::Instant>,
+        deadline: &mut AppendDeadline,
     ) -> Result<(), AppendBlocked> {
         let entry = PendingEntry::new_async(lsn, data);
         self.append_entry_blocking_until(entry, deadline)
@@ -203,18 +231,12 @@ impl WalStripe {
         }
     }
 
-    /// Append a pre-constructed entry (blocking - waits for space).
-    fn append_entry_blocking(&self, entry: PendingEntry) -> Result<(), PendingEntry> {
-        self.append_entry_blocking_until(entry, None)
-            .map_err(|blocked| blocked.entry)
-    }
-
-    /// Append a pre-constructed entry, bounded by an optional deadline
-    /// (Issue #3798). `None` waits forever, exactly as before.
+    /// Append a pre-constructed entry, bounded by the caller's deadline
+    /// (Issue #3798). An unbounded deadline waits forever, exactly as before.
     fn append_entry_blocking_until(
         &self,
         entry: PendingEntry,
-        deadline: Option<std::time::Instant>,
+        deadline: &mut AppendDeadline,
     ) -> Result<(), AppendBlocked> {
         let data_len = entry.data.len();
 

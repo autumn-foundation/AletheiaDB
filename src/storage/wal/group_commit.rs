@@ -120,9 +120,13 @@
 //! ## Escalation flag
 //!
 //! Setting `ALETHEIADB_WAL_REENTRANCY_PANIC=1` makes a detected re-entrant
-//! acquisition **panic** instead of returning an error. It is read once per
-//! process and intended for CI, where a latent lock-order bug should be
-//! un-ignorable rather than a handled `Result`.
+//! acquisition **panic** instead of returning an error. It is intended for CI,
+//! where a latent lock-order bug should be un-ignorable rather than a handled
+//! `Result`. The environment is read once per process, but the resulting
+//! policy is stored **per coordinator** (at construction), so the flag and the
+//! tests that exercise re-entrancy coexist: each test pins the behavior it
+//! means to assert on its own coordinator instead of inheriting the job's
+//! environment.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::ops::{Deref, DerefMut};
@@ -140,6 +144,16 @@ use crate::core::error::{Error, StorageError};
 /// module is meant to detect more likely.
 const ACQUIRE_PROBE_INITIAL: Duration = Duration::from_micros(50);
 
+/// Default bound on acquiring the group-commit state mutex (Issue #3798):
+/// two minutes.
+///
+/// Strictly greater than the `timeout_max_ms` default (60_000) so a stuck
+/// flusher is always reported by the `wait_for_flush` deadlock detector first
+/// (see the module's acquire-deadline rationale). Named so the user-facing
+/// [`crate::config::WalConfig::acquire_timeout_ms`] default cannot drift from
+/// this one.
+pub const DEFAULT_ACQUIRE_TIMEOUT_MS: u64 = 120_000;
+
 /// Ceiling of the exponential probe ladder.
 ///
 /// Caps the worst-case overshoot past `acquire_timeout_ms` at one sleep — the
@@ -148,16 +162,18 @@ const ACQUIRE_PROBE_INITIAL: Duration = Duration::from_micros(50);
 /// into arbitrarily coarse polling.
 const ACQUIRE_PROBE_MAX: Duration = Duration::from_millis(25);
 
-/// Whether a detected re-entrant acquisition should panic instead of returning
-/// an error (`ALETHEIADB_WAL_REENTRANCY_PANIC=1`).
+/// Process-wide default for whether a detected re-entrant acquisition should
+/// panic instead of returning an error (`ALETHEIADB_WAL_REENTRANCY_PANIC=1`).
 ///
-/// Read exactly once per process: the value is a CI-hardening switch, so
-/// re-reading it per acquisition would put a `getenv` on the lock path for no
-/// behavioral gain.
+/// The environment is read exactly once per process — the value is a
+/// CI-hardening switch, so re-reading it per acquisition would put a `getenv`
+/// on the lock path for no behavioral gain — but each coordinator keeps its
+/// own copy (see `GroupCommitCoordinator::reentrancy_panic`), so a test can
+/// pin either behavior on its own instance no matter how CI is configured.
 static REENTRANCY_PANIC: OnceLock<bool> = OnceLock::new();
 
-/// Resolve (once) whether re-entrancy escalates to a panic.
-fn reentrancy_panic_enabled() -> bool {
+/// Resolve (once per process) the default escalation policy.
+fn reentrancy_panic_from_env() -> bool {
     *REENTRANCY_PANIC.get_or_init(|| {
         std::env::var("ALETHEIADB_WAL_REENTRANCY_PANIC")
             .map(|value| value == "1")
@@ -548,6 +564,23 @@ pub struct GroupCommitCoordinator {
     /// Held as an atomic (rather than read from `config`) so tests can shrink
     /// the deadline on an already-constructed coordinator.
     acquire_timeout_ms: AtomicU64,
+    /// Whether a detected re-entrant acquisition escalates to a panic.
+    ///
+    /// Resolved from `ALETHEIADB_WAL_REENTRANCY_PANIC` once per coordinator,
+    /// at construction — per coordinator rather than per process so a test can
+    /// pin either behavior on its own instance without fighting an environment
+    /// variable the whole binary shares (Issue #3798 review round).
+    reentrancy_panic: std::sync::atomic::AtomicBool,
+
+    /// Test-only: make the NEXT acquisition at this [`LockSite::as_u64`] fail
+    /// exactly as an exhausted acquisition budget would (`0` = no injection,
+    /// cleared by the failure it causes).
+    ///
+    /// Racing a real acquisition timeout into one specific site is not
+    /// reproducible — the window between `start_flush` and `finish_flush` is
+    /// microseconds wide — so the failure is injected instead of raced.
+    #[cfg(test)]
+    test_fail_next_acquire_site: AtomicU64,
 
     /// When true, `finish_flush` probes whether the state mutex is free at the
     /// instant it calls `notify_all` (see `test_pre_notify_try_lock_ok`).
@@ -602,7 +635,7 @@ impl Default for GroupCommitConfig {
             timeout_min_ms: 10000,
             timeout_max_ms: 60000,
             recent_errors_capacity: 1024,
-            acquire_timeout_ms: 120_000,
+            acquire_timeout_ms: DEFAULT_ACQUIRE_TIMEOUT_MS,
         }
     }
 }
@@ -691,6 +724,9 @@ impl GroupCommitCoordinator {
             mirror_flushed_epoch: AtomicU64::new(0),
             mirror_batch_count: AtomicU64::new(0),
             acquire_timeout_ms,
+            reentrancy_panic: std::sync::atomic::AtomicBool::new(reentrancy_panic_from_env()),
+            #[cfg(test)]
+            test_fail_next_acquire_site: AtomicU64::new(0),
             #[cfg(test)]
             test_pre_notify_probe: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -724,6 +760,15 @@ impl GroupCommitCoordinator {
     /// - `StorageError::WalError` carrying a forensic snapshot, for an
     ///   acquisition that exceeds `acquire_timeout_ms`.
     pub(crate) fn lock_state(&self, site: LockSite) -> Result<StateGuard<'_>, Error> {
+        // ---- Step 0 (test builds only): injected acquisition failure -------
+        #[cfg(test)]
+        if self.test_fail_next_acquire_site.load(Ordering::Relaxed) == site.as_u64() {
+            self.test_fail_next_acquire_site.store(0, Ordering::Relaxed);
+            self.acquire_timeouts.fetch_add(1, Ordering::Relaxed);
+            let budget = self.acquire_timeout_ms.load(Ordering::Relaxed);
+            return Err(self.abandon_acquisition(site, Duration::ZERO, budget));
+        }
+
         // ---- Step 1: re-entrancy, before anything that could block ---------
         let me = current_thread_token();
         if self.owner.load(Ordering::Relaxed) == me {
@@ -838,7 +883,7 @@ impl GroupCommitCoordinator {
 
         log_lock_diagnostic(&reason);
 
-        if reentrancy_panic_enabled() {
+        if self.reentrancy_panic.load(Ordering::Relaxed) {
             // CI hardening only (ALETHEIADB_WAL_REENTRANCY_PANIC=1): turn a
             // latent lock-order bug into an immediate, un-ignorable failure.
             panic!("{reason}");
@@ -903,11 +948,39 @@ impl GroupCommitCoordinator {
         self.acquire_timeouts.load(Ordering::Relaxed)
     }
 
+    /// The acquisition bound currently in force, in milliseconds (`0` =
+    /// unbounded).
+    ///
+    /// Exposed so a configuration test can prove the knob actually reached the
+    /// coordinator rather than being silently replaced by the default.
+    pub fn acquire_timeout_ms(&self) -> u64 {
+        self.acquire_timeout_ms.load(Ordering::Relaxed)
+    }
+
     /// Shrink (or disable, with `0`) the acquisition bound on a live
     /// coordinator so tests do not have to wait out the two-minute default.
     #[cfg(test)]
     pub(crate) fn set_acquire_timeout_ms_for_test(&self, ms: u64) {
         self.acquire_timeout_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Pin this coordinator's re-entrancy escalation, overriding whatever
+    /// `ALETHEIADB_WAL_REENTRANCY_PANIC` said at construction.
+    ///
+    /// Tests of BOTH behaviors can then coexist in one binary, and a CI job
+    /// that exports the variable no longer breaks the tests that pin the `Err`
+    /// path (Issue #3798 review round).
+    #[cfg(test)]
+    pub(crate) fn set_reentrancy_panic_for_test(&self, on: bool) {
+        self.reentrancy_panic.store(on, Ordering::Relaxed);
+    }
+
+    /// Make the next acquisition at `site` fail as an exhausted acquisition
+    /// budget would, once. See `test_fail_next_acquire_site`.
+    #[cfg(test)]
+    pub(crate) fn fail_next_acquisition_at_for_test(&self, site: LockSite) {
+        self.test_fail_next_acquire_site
+            .store(site.as_u64(), Ordering::Relaxed);
     }
 
     /// Create a new GroupCommitCoordinator with default configuration.
@@ -1402,15 +1475,15 @@ mod tests {
     /// timeout message does not contain. Re-entrancy is a caller bug that must
     /// be reported immediately, not two minutes later.
     ///
-    /// The `ALETHEIADB_WAL_REENTRANCY_PANIC=1` CI-hardening escalation is
-    /// deliberately NOT covered by a test of its own: setting an environment
-    /// variable is process-global and would race every other test in the
-    /// binary. This test pins the contractually important half — the default
-    /// path returns `Err`, it never panics.
+    /// The escalation policy is pinned OFF on this coordinator, so the test
+    /// asserts the `Err` contract even in a CI job that exports
+    /// `ALETHEIADB_WAL_REENTRANCY_PANIC=1`. The panic half has its own test
+    /// (`test_reentrancy_escalates_to_panic_when_enabled`).
     #[test]
     fn test_reentrant_acquisition_returns_structured_error() {
         let coord = Arc::new(GroupCommitCoordinator::with_defaults());
         coord.set_acquire_timeout_ms_for_test(200);
+        coord.set_reentrancy_panic_for_test(false);
 
         let probe = Arc::clone(&coord);
         let outcome = run_with_watchdog(move || {
@@ -1469,6 +1542,10 @@ mod tests {
             ..GroupCommitConfig::default()
         };
         let coord = Arc::new(GroupCommitCoordinator::with_config(config));
+        // The final phase re-enters on purpose and demands the `Err`: pin the
+        // escalation off so an ALETHEIADB_WAL_REENTRANCY_PANIC=1 job does not
+        // turn that into a panic on the probe thread.
+        coord.set_reentrancy_panic_for_test(false);
 
         let (epoch, _) = coord.register_transaction().unwrap();
 
@@ -1505,6 +1582,50 @@ mod tests {
         assert!(
             err.to_string().contains("re-entrant"),
             "expected a re-entrancy refusal, got: {err}"
+        );
+    }
+
+    /// With escalation ON, a re-entrant acquisition panics instead of
+    /// returning — the CI-hardening half of the contract.
+    ///
+    /// The coordinator here is a THROWAWAY: the panic unwinds while the outer
+    /// `StateGuard` is still held, which poisons that coordinator's mutex.
+    /// Sharing it with any other assertion would report the poison rather than
+    /// the re-entrancy.
+    #[test]
+    fn test_reentrancy_escalates_to_panic_when_enabled() {
+        let coord = Arc::new(GroupCommitCoordinator::with_defaults());
+        coord.set_acquire_timeout_ms_for_test(200);
+        coord.set_reentrancy_panic_for_test(true);
+
+        let probe = Arc::clone(&coord);
+        // On a worker thread, and behind the watchdog: an escalation that
+        // failed to fire would self-deadlock instead of panicking, and this
+        // test must fail rather than hang.
+        let outcome = run_with_watchdog(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _held = probe
+                    .lock_state(LockSite::CurrentEpoch)
+                    .expect("first acquisition succeeds");
+                let _ = probe.register_transaction();
+            }))
+        })
+        .expect("the re-entrant acquisition neither panicked nor returned within the watchdog");
+
+        let payload = outcome.expect_err("re-entrancy must panic once escalation is enabled");
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+            .unwrap_or_default();
+        assert!(
+            message.contains("re-entrant"),
+            "the panic must name re-entrancy, got: {message}"
+        );
+        assert_eq!(
+            coord.reentrancy_detections(),
+            1,
+            "the escalated refusal must still be counted"
         );
     }
 
@@ -1680,8 +1801,19 @@ mod tests {
 
         let (release, holder) = hold_state_guard(&coord, LockSite::StartFlush);
 
+        // The probe announces itself immediately BEFORE it starts acquiring:
+        // without that handshake, `Empty` below could just mean the worker was
+        // never scheduled, and the test would pass without ever entering the
+        // `budget_ms == 0` branch.
+        let (started_tx, started_rx) = mpsc::channel::<()>();
         let probe = Arc::clone(&coord);
-        let rx = spawn_probe(move || probe.register_transaction());
+        let rx = spawn_probe(move || {
+            let _ = started_tx.send(());
+            probe.register_transaction()
+        });
+        started_rx
+            .recv_timeout(WATCHDOG)
+            .expect("the probe thread never started acquiring");
 
         // Longer than any plausible misfiring bound (the other tests use
         // 200ms), and the guard is still held throughout.
