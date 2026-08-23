@@ -97,8 +97,8 @@ fn test_flush_coordinator_race_condition() {
         let mut actual_max = 0;
         let mut count = 0;
 
-        for chunk in data_slice.chunks_exact(8) {
-            let lsn = u64::from_le_bytes(chunk.try_into().unwrap());
+        for chunk in data_slice.as_chunks::<8>().0 {
+            let lsn = u64::from_le_bytes(*chunk);
             actual_min = actual_min.min(lsn);
             actual_max = actual_max.max(lsn);
             count += 1;

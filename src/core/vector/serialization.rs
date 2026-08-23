@@ -230,9 +230,8 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
     let values = {
         // Big-endian fallback: convert each element individually
         let mut values = Vec::with_capacity(dimension);
-        for chunk in data_slice.chunks_exact(4) {
-            // SAFETY: chunks_exact guarantees exactly 4 bytes per chunk
-            values.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+        for chunk in data_slice.as_chunks::<4>().0 {
+            values.push(f32::from_le_bytes(*chunk));
         }
         values
     };
@@ -397,8 +396,8 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
     #[cfg(not(target_endian = "little"))]
     let indices = {
         let mut indices = Vec::with_capacity(nnz);
-        for chunk in indices_slice.chunks_exact(4) {
-            indices.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+        for chunk in indices_slice.as_chunks::<4>().0 {
+            indices.push(u32::from_le_bytes(*chunk));
         }
         indices
     };
@@ -432,8 +431,8 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
     #[cfg(not(target_endian = "little"))]
     let values = {
         let mut values = Vec::with_capacity(nnz);
-        for chunk in values_slice.chunks_exact(4) {
-            values.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+        for chunk in values_slice.as_chunks::<4>().0 {
+            values.push(f32::from_le_bytes(*chunk));
         }
         values
     };
