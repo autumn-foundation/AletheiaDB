@@ -548,32 +548,52 @@ pub struct MergedAdjacencyGuard<'a> {
     tombstones_empty: bool,
 }
 
+/// Two-variant iterator letting `MergedAdjacencyGuard::iter()` pick, once per
+/// call, between an unfiltered chain (no per-edge tombstone check) and a
+/// filtered one — instead of a single `Filter` adapter whose predicate is a
+/// per-edge `tombstones_empty || ...` branch.
+enum AdjacencyIter<U, F> {
+    Unfiltered(U),
+    Filtered(F),
+}
+
+impl<'a, U, F> Iterator for AdjacencyIter<U, F>
+where
+    U: Iterator<Item = &'a AdjacencyEntry>,
+    F: Iterator<Item = &'a AdjacencyEntry>,
+{
+    type Item = &'a AdjacencyEntry;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            AdjacencyIter::Unfiltered(it) => it.next(),
+            AdjacencyIter::Filtered(it) => it.next(),
+        }
+    }
+}
+
 impl<'a> MergedAdjacencyGuard<'a> {
     /// Iterate over all adjacency entries (frozen + delta, excluding tombstones).
     ///
-    /// **Fast Path**: skips the per-edge tombstone DashMap lookup whenever
-    /// tombstones are globally empty, even if delta is not (e.g. a graph
-    /// with pending uncompacted edges but zero deletes ever issued).
+    /// **Fast Path**: whenever tombstones are globally empty (even if delta is
+    /// not — e.g. a graph with pending uncompacted edges but zero deletes ever
+    /// issued), this returns the raw frozen+delta chain with no `Filter`
+    /// adapter at all, rather than a `Filter` whose predicate is a
+    /// provably-always-true `tombstones_empty || ...` branch. The choice is
+    /// made once per call, outside the per-edge loop.
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &AdjacencyEntry> + '_ {
         let frozen_slice = self.frozen.get_adjacency(self.node);
-        let tombstones_empty = self.tombstones_empty;
+        let delta_slice = self.delta_slice();
+        let base = frozen_slice.iter().chain(delta_slice.iter());
 
-        // Skip the per-edge tombstone lookup whenever tombstones are
-        // globally empty, regardless of whether delta is empty (delta
-        // emptiness only decides frozen-vs-merged iteration below).
-        let frozen_iter = frozen_slice
-            .iter()
-            .filter(move |e| tombstones_empty || !self.tombstones.contains_key(&e.edge_id));
-
-        let delta_iter = self
-            .delta
-            .as_ref()
-            .into_iter()
-            .flat_map(|d| d.iter())
-            .filter(move |e| tombstones_empty || !self.tombstones.contains_key(&e.edge_id));
-
-        frozen_iter.chain(delta_iter)
+        if self.tombstones_empty {
+            AdjacencyIter::Unfiltered(base)
+        } else {
+            let tombstones = self.tombstones;
+            AdjacencyIter::Filtered(base.filter(move |e| !tombstones.contains_key(&e.edge_id)))
+        }
     }
 
     /// Get the number of adjacency entries (frozen + delta, excluding tombstones).
