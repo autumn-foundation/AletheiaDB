@@ -9,7 +9,7 @@
 //! - Enables O(1) string equality checks (compare u32 instead of string contents)
 //! - Thread-safe without locking (uses DashMap)
 
-use crate::core::hasher::IdentityHasher;
+use crate::core::hasher::IdHashBuilder;
 use dashmap::DashMap;
 use std::fmt;
 use std::hash::BuildHasherDefault;
@@ -118,8 +118,9 @@ pub struct StringInterner {
     /// Maps strings to their IDs.
     string_to_id: DashMap<Arc<str>, InternedString>,
     /// Maps IDs back to strings.
-    /// Uses IdentityHasher for O(1) lookups without hashing overhead.
-    id_to_string: DashMap<InternedString, Arc<str>, BuildHasherDefault<IdentityHasher>>,
+    /// Uses `IdHashBuilder` for O(1) lookups without SipHash overhead, and so
+    /// that sequential `InternedString` ids spread across the map's shards.
+    id_to_string: DashMap<InternedString, Arc<str>, IdHashBuilder>,
     /// Next ID to assign.
     next_id: AtomicU32,
     /// Maximum number of strings to intern (DoS protection).

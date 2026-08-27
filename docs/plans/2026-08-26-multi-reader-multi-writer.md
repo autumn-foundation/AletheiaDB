@@ -125,7 +125,8 @@ single `RwLock` and ping-pongs a single cache line. And it gets **worse on
 bigger machines**: a 64-core server allocates 256 shards and uses 1 of them.
 
 Verified directly, outside AletheiaDB, on a bare `DashMap<u64,u64>` with 1000
-sequential keys:
+sequential keys. These are *isolated-control* numbers used to identify the
+mechanism — for the in-engine effect see [Stage 1, as landed](#stage-1-as-landed):
 
 ```
 shards available = 16  |  shards occupied by ids 0..1000:
@@ -273,6 +274,96 @@ with the same care about which bits select the shard) is the natural follow-up,
 but it is genuinely Stage 4 — there is no point paying for it while Stage 3 is
 the binding constraint.
 
+## Stage 1, as landed
+
+`IdHashBuilder` is now backed by a new `IdHasher`: `IdentityHasher` plus one
+finalizing `wrapping_mul` by the Fibonacci constant `0x9E37_79B9_7F4A_7C15`.
+The multiplier is odd, so the finalizer is a bijection on `u64` and cannot
+introduce a collision that identity hashing would have avoided.
+
+**Scope: `DashMap` only.** An earlier draft also repointed the std-`HashMap`
+aliases (`FastHashMap`/`FastHashSet` in `core/version.rs`, the write buffer's).
+That was reverted: a std `HashMap` has no shard to repair — only the
+control-byte effect — and sequential ids map to *sequential buckets* there,
+which is good for locality. The evidence justifies the change where the shard
+selector reads the hash, and nowhere else.
+
+### Measured effect
+
+Baseline vs. change, **interleaved across three passes on the same box** so
+machine drift cancels. This methodology matters more than it sounds: a naive
+before/after comparison run an hour apart reported a 5.5x gain and a 5% write
+regression, and *both* were artifacts of drift. Medians:
+
+| Workload | threads | baseline | with `IdHasher` | |
+|----------|--------:|---------:|----------------:|--|
+| `read/current` (`get_node`) | 1 | 17.6M/s | 17.3M/s | unchanged |
+| | 2 | 11.6M/s | 19.7M/s | **1.69x** |
+| | 4 | 11.6M/s | 28.2M/s | **2.44x** |
+| | 8 | 11.5M/s | 28.9M/s | **2.50x** |
+| `read/borrow` (`with_node`) | 4 | 15.8M/s | 36.6M/s | **2.32x** |
+| `write/async` | 4 | 46.7K/s | 49.0K/s | within noise |
+| `write/group_commit` | 4 | 93/s | 94/s | unchanged |
+
+The headline is not the multiple, it is the **shape**: `read/current` went from
+0.27x scaling (slower with more cores) to genuinely scaling with them. Writes
+are unaffected in either direction, which is expected — they are bound by the
+commit clock and the fsync, not by hashing. `read/snapshot` is also unchanged,
+because it is still gated by the global commit-clock mutex; that is Stage 2's
+job, and this is what "the stages depend on each other" looks like in practice.
+
+A caution for whoever measures next: the fixed build is **bimodal** on this
+box — some passes land at ~16M/s (baseline-like) and others at ~38M/s. The
+baseline, by contrast, is tightly clustered. Removing one bottleneck exposes
+the next, and what the next one is appears to depend on thread-to-core
+placement. Take medians over interleaved passes; never trust a single run.
+
+### Verification
+
+`cargo test --lib` 4625 passed / 0 failed (up 7 from the new hasher tests),
+`cargo test --doc` 419 passed / 0 failed, and the integration suite 1302 passed
+/ 3 failed across 166 targets. All three integration failures
+(`embedded_mcp_server_refuses_a_data_dir_a_live_daemon_owns`,
+`havoc_flush_deadlock::test_flush_deadlock_on_io_error`,
+`test_metadata_corruption_on_error`) were re-run against the unmodified
+baseline and **fail there identically** — they are pre-existing/environmental
+(daemon-subprocess and WAL fault-injection), not caused by this change. Notably
+nothing broke on iteration order, which the change does alter throughout.
+
+The integration suite had to be run in batches of 25 targets, purging linked
+test executables between them: linking all 216 at once exceeds this session's
+disk allowance (`target/` reaches 30G, and the first attempt failed with
+`os error 28`, which surfaces as misleading `linking with cc failed` errors).
+
+### A rejected alternative, and why
+
+A "high-half scramble" finalizer — `(id & LOW) | (id * FIB & !LOW)` — was
+built and measured alongside. It keeps the low 32 bits verbatim, so bucket
+locality for sequential ids is preserved exactly, while still scrambling the
+bits that shard selection and the control byte read. It looked strictly better
+on paper. It measured worse and far less stable (`read/current` at 4 threads:
+29.2M, 15.2M, 12.7M across passes, versus Fibonacci's steady 29.7M, 28.2M,
+26.3M), and it would have required a bespoke collision argument. Rejected in
+favor of the standard construction.
+
+### Found along the way, deliberately not fixed
+
+`IdentityHasher::update_state` assigns on the first write and then XOR-mixes.
+XOR is commutative, so a two-field composite key hashes identically in either
+field order — directly contradicting that method's own doc comment, which
+claims it "ensures that `hash((1, 2))` is not the same as `hash((2, 1))`". The
+existing `test_identity_hasher_composite_writes` even encodes the symmetric
+value `(1 ^ 2) * FNV_PRIME` as expected.
+
+It is **latent, not live**: no map in the crate is both tuple-keyed and
+id-hashed (`prop_index`'s tuple-keyed outer `DashMap` uses the default
+`RandomState`), so nothing currently collides because of it. Fixing it would
+change composite hash values, hence iteration order, hence possibly tests —
+unrelated to the shard bug and not worth folding into this change. It is now
+pinned by a characterization test named
+`known_limitation_two_field_composites_ignore_field_order`, so a future fix has
+to be deliberate rather than accidental.
+
 ## On connection pools
 
 You said "connection pools, not quite yet — but we're probably better off with
@@ -319,7 +410,7 @@ not its prerequisite.** Building it now would bound a queue of length one.
 | Stage | Change | Unlocks | Risk |
 |-------|--------|---------|------|
 | **0** | Scaling harness (`examples/concurrency_scaling.rs`) | A number to argue with; regression detection | none — additive |
-| **1** | Fix shard selection (fibonacci hash for id keys) | ~3.5x current-storage throughput; **also faster single-threaded** | low, contained; needs a test asserting shard occupancy > 1 |
+| **1** | ~~Fix shard selection (fibonacci hash for id keys)~~ **LANDED** | 2.4-2.5x concurrent `get_node` throughput; reads now scale with cores | low, contained; regression tests pin shard occupancy |
 | **2** | CAS-loop commit clock, remove the reader mutex | Readers stop contending with writers | low-medium; SI reservation invariant must be preserved exactly |
 | **3** | Commit pipeline: sequence → durability → ordered apply | **Real multi-writer.** Group commit finally batches | high — touches #3413's correctness argument |
 | **3b** | Write admission pool, mirroring `max_in_flight_queries` | Bounded in-flight commits | low, once 3 exists |

@@ -517,7 +517,7 @@ impl PropertyDelta {
             .max(self.changed.len() + self.vector_deltas.len());
 
         // Use standard HashMap for construction, PropertyMap::from_iter will handle internal structure
-        // PropertyMap uses IdentityHasher internally too
+        // PropertyMap uses the same id hasher internally too
         let mut result: FastHashMap<PropertyKey, PropertyValue> =
             FastHashMap::with_capacity_and_hasher(
                 estimated_capacity,
