@@ -76,7 +76,12 @@ impl AletheiaDB {
         let result = (|| {
             let tx_id = self.tx_id_gen.next();
             let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
-            self.visibility_manager.register_active(tx_id);
+            // Deliberately NOT registered in the active set. Membership is only
+            // ever tested for the transaction that *created* a version, and a
+            // read transaction creates none -- so registering one is invisible
+            // to every visibility check and costs two lock acquisitions plus two
+            // copy-on-write clones of the whole set (here and on drop). See
+            // `TxVisibilityManager`.
             let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
 
             Ok(ReadTransaction::new(

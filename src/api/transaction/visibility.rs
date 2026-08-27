@@ -6,6 +6,7 @@
 
 use crate::api::transaction::types::TxId;
 use crate::core::temporal::Timestamp;
+use arc_swap::ArcSwap;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -72,39 +73,70 @@ impl TransactionSnapshot {
 /// structs, visibility checks use those timestamps directly via
 /// [`Self::is_visible_with_embedded_ts`], so the map is unnecessary.
 ///
+/// # What goes in the active set
+///
+/// **Write transactions only.** The set exists to answer one question, asked in
+/// [`TransactionSnapshot::is_visible`]: was the transaction that *created* this
+/// version still in flight when I took my snapshot? Only a write transaction
+/// ever creates a version, so a read transaction's id can never be the
+/// `created_by_tx` being tested, and its membership is unobservable.
+///
+/// Registering reads anyway was pure cost, and it was the dominant cost: reads
+/// outnumber writes, so read traffic set the size of the set that every
+/// mutation had to copy, and it took the lock twice more per transaction (once
+/// to register, once to deregister on drop).
+///
 /// # Concurrency
 ///
-/// The `active` set uses `Arc`-wrapping with copy-on-write semantics (Issue #221):
-/// snapshot capture is O(1) (just an `Arc` clone), while mutations clone only when
-/// the `Arc` is shared.
+/// Snapshot capture is a lock-free `ArcSwap` load. Mutations are copy-on-write
+/// under a mutex that now only ever serializes *committers* -- off the read path
+/// entirely.
 pub struct TxVisibilityManager {
-    /// Currently active (not yet committed or aborted) transactions.
+    /// Currently active (not yet committed or aborted) **write** transactions.
     ///
-    /// Uses copy-on-write: mutations create a new `HashSet`, update it, and replace
-    /// the `Arc`.  Snapshots just clone the `Arc`, avoiding full `HashSet` clones.
-    active: Mutex<Arc<HashSet<TxId>>>,
+    /// Read with no lock; replaced wholesale under `mutate`.
+    active: ArcSwap<HashSet<TxId>>,
+    /// Serializes the read-modify-write of `active`.
+    ///
+    /// `ArcSwap` gives lock-free reads but no atomic read-modify-write, and the
+    /// mutations here are insert/remove on a shared set, so they still need
+    /// serializing. Contended only between concurrent write transactions.
+    mutate: Mutex<()>,
 }
 
 impl TxVisibilityManager {
     /// Create a new visibility manager with an empty active-transaction set.
     pub fn new() -> Self {
         TxVisibilityManager {
-            active: Mutex::new(Arc::new(HashSet::new())),
+            active: ArcSwap::from_pointee(HashSet::new()),
+            mutate: Mutex::new(()),
         }
     }
 
-    /// Register a new active transaction.  Call when a transaction begins.
-    pub fn register_active(&self, tx_id: TxId) {
-        let mut guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
-        Arc::make_mut(&mut *guard).insert(tx_id);
+    /// Copy-on-write mutation of the active set.
+    fn mutate<F: FnOnce(&mut HashSet<TxId>)>(&self, edit: F) {
+        let _serial = self.mutate.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut next = HashSet::clone(&self.active.load());
+        edit(&mut next);
+        self.active.store(Arc::new(next));
     }
 
-    /// Capture a snapshot for a transaction (O(1) — just an Arc clone).
+    /// Register a new active transaction.  Call when a **write** transaction
+    /// begins; read transactions deliberately do not register (see the type
+    /// docs).
+    pub fn register_active(&self, tx_id: TxId) {
+        self.mutate(|active| {
+            active.insert(tx_id);
+        });
+    }
+
+    /// Capture a snapshot for a transaction.
+    ///
+    /// Lock-free: one `ArcSwap` load and an `Arc` clone.
     pub fn capture_snapshot(&self, snapshot_timestamp: Timestamp) -> TransactionSnapshot {
-        let guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         TransactionSnapshot {
             snapshot_timestamp,
-            active_transactions: Arc::clone(&guard),
+            active_transactions: self.active.load_full(),
         }
     }
 
@@ -113,14 +145,16 @@ impl TxVisibilityManager {
     /// Removes the transaction from the active set.  The commit timestamp is no
     /// longer stored here — it is embedded in each version struct (Issue #238).
     pub fn register_commit(&self, tx_id: TxId) {
-        let mut guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
-        Arc::make_mut(&mut *guard).remove(&tx_id);
+        self.mutate(|active| {
+            active.remove(&tx_id);
+        });
     }
 
     /// Register a transaction abort.  Removes the transaction from the active set.
     pub fn register_abort(&self, tx_id: TxId) {
-        let mut guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
-        Arc::make_mut(&mut *guard).remove(&tx_id);
+        self.mutate(|active| {
+            active.remove(&tx_id);
+        });
     }
 
     /// Check version visibility using the commit timestamp embedded in the version
@@ -148,8 +182,7 @@ impl TxVisibilityManager {
 
     /// Number of currently active (in-flight) transactions.  Useful for monitoring.
     pub fn active_count(&self) -> usize {
-        let guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
-        guard.len()
+        self.active.load().len()
     }
 }
 

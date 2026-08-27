@@ -469,6 +469,81 @@ rows — spreads of 1.05–1.15x — carry signal, and those are the `read/snaps
 rows above. This is the third distinct way this box has produced a confident
 wrong answer; treat any single-run comparison here as unfounded.
 
+## Stage 2b, as landed — the real one
+
+The bottleneck Stage 2 uncovered, fixed. Two independent problems in
+`TxVisibilityManager` (`src/api/transaction/visibility.rs`), both on the read
+path:
+
+**Read transactions were tracked at all.** The active set answers exactly one
+question, asked in `TransactionSnapshot::is_visible`: was the transaction that
+*created* this version still in flight when I took my snapshot? Only a write
+transaction ever creates a version, so a read transaction's id can never be the
+`created_by_tx` being tested — its membership is unobservable. Registering it
+cost two lock acquisitions and two copy-on-write clones of the whole set (once
+in `read_transaction`, once in `ReadTransaction::drop`). Worse, because reads
+outnumber writes, read traffic set the *size* of the set that every mutation had
+to copy. Read transactions no longer register, and `ReadTransaction` no longer
+has a `Drop` impl.
+
+**Snapshot capture took a mutex.** `Mutex<Arc<HashSet<TxId>>>` became
+`ArcSwap<HashSet<TxId>>` plus a small mutex that serializes only the
+copy-on-write mutations — which, after the change above, only committers
+perform. `capture_snapshot` is now a lock-free load, so the read path touches no
+lock in the visibility manager at all.
+
+Together that takes a read transaction from three lock acquisitions and two
+O(concurrent-readers) set copies down to zero locks and zero copies.
+
+### Measured effect
+
+Same protocol as before — four interleaved passes, run order alternated,
+medians:
+
+| workload | 1t | 2t | 4t | 8t |
+|---|---|---|---|---|
+| `read/snapshot` | 1.57x | 2.95x | **3.92x** | 3.23x |
+| `read/snapshot` + Async writer | 1.72x | 2.66x | **3.85x** | 3.49x |
+| `read/snapshot` + GroupCommit writer | 1.63x | 2.75x | **3.64x** | 3.57x |
+
+`read/snapshot` scaling went from **0.31x to 0.63x**, and absolute throughput at
+8 threads from 942K/s to 3.04M/s. The single-threaded gain (1.57x) is the
+removed locks and copies with no contention at all.
+
+Unlike every earlier measurement on this box, this one needs no hedging: the
+samples do not overlap. Worst fixed sample at 8 threads is 1.99M/s; best
+baseline sample is 1.01M/s.
+
+`read/current`, `read/borrow` and `read/disjoint` are unchanged (0.92–1.10x, all
+inside their spreads) — correct, since they never open a read transaction. Both
+write paths are unchanged.
+
+### Verification
+
+`cargo test --lib` 4637 passed / 0 failed, `cargo test --doc` 419 passed / 0
+failed, integration 1432 passed / 3 failed across 208 targets — the same three
+that fail identically on the unmodified baseline (daemon-subprocess and WAL
+fault-injection), verified there during Stage 1.
+
+The test that asserted a read transaction enters the active set is replaced by
+two pinning the new contract: reads never enter it, writes still do.
+
+A note for whoever runs this suite next: linking all 216 integration targets at
+once exceeds this session's disk allowance, and building them at full
+parallelism OOMs the container (15 GB, 4 cores) — it was killed twice mid-run.
+Batches of 8 targets at `-j 2`, purging linked test executables between batches,
+completes.
+
+### What is left on this path
+
+`read/snapshot` is still ~8x slower in absolute terms than `read/current`
+(3.0M/s vs 27M/s at 8 threads) and still scales sub-linearly. The remaining cost
+is the per-transaction work `read_transaction` still does — an `Arc` clone of the
+active set, four more `Arc` clones for the storage handles, and the
+`ReadTransaction` allocation itself — plus whatever contention remains in
+`historical`. That is serialization point #4 territory, and worth measuring
+before assuming.
+
 ## On connection pools
 
 You said "connection pools, not quite yet — but we're probably better off with

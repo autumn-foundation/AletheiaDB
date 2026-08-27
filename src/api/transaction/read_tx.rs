@@ -363,13 +363,13 @@ impl ReadOps for ReadTransaction {
     }
 }
 
-impl Drop for ReadTransaction {
-    fn drop(&mut self) {
-        // Register abort to remove from active set
-        // This prevents memory leak in active transactions set
-        self.visibility_manager.register_abort(self.tx_id);
-    }
-}
+// No `Drop` impl on purpose.
+//
+// This used to call `register_abort` to take the transaction back out of the
+// visibility manager's active set. Read transactions no longer go *into* that
+// set (see `TxVisibilityManager`), so there is nothing to remove -- and removing
+// it was a lock acquisition plus a copy-on-write clone of the entire set on
+// every read transaction, on the drop path where it is easiest to miss.
 
 #[cfg(test)]
 mod tests {
@@ -539,41 +539,50 @@ mod tests {
     }
 
     #[test]
-    fn test_read_transaction_drop_cleanup() {
-        // Test that ReadTransaction properly cleans up when dropped
-        let current = Arc::new(CurrentStorage::new());
-        let visibility_manager = Arc::new(TxVisibilityManager::new());
-
-        let tx_id = TxId::new(42);
-
-        // Register transaction as active
-        visibility_manager.register_active(tx_id);
-        assert_eq!(visibility_manager.active_count(), 1);
+    fn read_transactions_never_enter_the_active_set() {
+        // The active set answers exactly one question: was the transaction that
+        // *created* this version still in flight when the snapshot was taken? A
+        // read transaction creates nothing, so its membership can never be
+        // tested -- registering it was unobservable work on the hottest path
+        // there is. This pins that it stays out, on both create and drop.
+        let db = crate::AletheiaDB::new().expect("db");
+        let before = db.visibility_manager.active_count();
 
         {
-            // Create read transaction
-            let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
-            let snapshot = TransactionSnapshot {
-                snapshot_timestamp: time::now(),
-                active_transactions: Arc::new(HashSet::new()),
-            };
-            let _tx = ReadTransaction::new(
-                tx_id,
-                snapshot,
-                Arc::clone(&current),
-                Arc::clone(&visibility_manager),
-                Arc::clone(&historical),
+            let _tx = db.read_transaction().expect("read tx");
+            assert_eq!(
+                db.visibility_manager.active_count(),
+                before,
+                "a read transaction must not register itself as active"
             );
+        }
 
-            // Transaction should still be active while in scope
-            assert_eq!(visibility_manager.active_count(), 1);
-        } // tx dropped here - should call register_abort
-
-        // After drop, transaction should be removed from active set
         assert_eq!(
-            visibility_manager.active_count(),
-            0,
-            "ReadTransaction should remove itself from active set on drop"
+            db.visibility_manager.active_count(),
+            before,
+            "and must leave the active set exactly as it found it"
+        );
+    }
+
+    #[test]
+    fn write_transactions_still_register_and_deregister() {
+        // The counterpart: writers DO create versions, so they must still be
+        // tracked -- removing reads from the set must not have removed writes.
+        let db = crate::AletheiaDB::new().expect("db");
+        let before = db.visibility_manager.active_count();
+
+        let tx = db.write_transaction().expect("write tx");
+        assert_eq!(
+            db.visibility_manager.active_count(),
+            before + 1,
+            "a write transaction must register as active"
+        );
+
+        drop(tx);
+        assert_eq!(
+            db.visibility_manager.active_count(),
+            before,
+            "and must deregister when it goes away"
         );
     }
 
