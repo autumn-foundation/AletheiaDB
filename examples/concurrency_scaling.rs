@@ -20,6 +20,7 @@ use aletheiadb::config::WalConfigBuilder;
 use aletheiadb::core::NodeId;
 use aletheiadb::storage::wal::DurabilityMode;
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Instant;
@@ -215,12 +216,100 @@ fn bench_reads() {
     );
 }
 
+/// Readers taking snapshots while a writer commits continuously.
+///
+/// The other read sweeps run with no writer at all, which hides the thing that
+/// actually costs a snapshot read: the commit clock used to be a mutex a
+/// committer held across its ENTIRE commit -- guards, WAL append, fsync, apply,
+/// finalize -- so a reader wanting a snapshot queued behind a whole group-commit
+/// flush. A read-only sweep never pays that, and a write-only sweep never
+/// observes it.
+///
+/// Reported number is reader throughput; the writer runs for the same window and
+/// its commit count is reported alongside so a change that simply starves the
+/// writer is visible rather than flattering.
+fn bench_reads_under_write(label: &str, mode: DurabilityMode) {
+    let (_guard, db) = make_db(mode);
+    let mut ids = Vec::with_capacity(SEED_NODES);
+    for i in 0..SEED_NODES {
+        let id = db
+            .create_node(
+                "Seed",
+                PropertyMapBuilder::new().insert("i", i as i64).build(),
+            )
+            .expect("seed");
+        ids.push(id);
+    }
+    let ids = Arc::new(ids);
+
+    let mut results = Vec::new();
+    let mut writer_commits = Vec::new();
+    for &threads in THREAD_COUNTS {
+        let stop = Arc::new(AtomicBool::new(false));
+        let commits = Arc::new(AtomicU64::new(0));
+
+        let writer = {
+            let db = Arc::clone(&db);
+            let stop = Arc::clone(&stop);
+            let commits = Arc::clone(&commits);
+            thread::spawn(move || {
+                let mut i = 0i64;
+                while !stop.load(AtomicOrdering::Relaxed) {
+                    db.write(|tx| {
+                        tx.create_node("Churn", PropertyMapBuilder::new().insert("i", i).build())
+                    })
+                    .expect("commit");
+                    commits.fetch_add(1, AtomicOrdering::Relaxed);
+                    i += 1;
+                }
+            })
+        };
+
+        let ops = {
+            let db = Arc::clone(&db);
+            let ids = Arc::clone(&ids);
+            measure(threads, READ_OPS_PER_THREAD, move |t, i| {
+                let id: NodeId = ids[(t * 7919 + i) % ids.len()];
+                let tx = db.read_transaction().expect("read tx");
+                let _ = tx.get_node(id).expect("get");
+            })
+        };
+
+        stop.store(true, AtomicOrdering::Relaxed);
+        writer.join().expect("writer");
+        writer_commits.push(commits.load(AtomicOrdering::Relaxed));
+        results.push((threads, ops));
+    }
+    report(label, &results);
+    println!(
+        "    writer commits during each window: {:?}",
+        writer_commits
+    );
+}
+
 fn main() {
     println!(
         "AletheiaDB concurrency scaling — {} cores available",
         thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(0)
+    );
+
+    bench_reads_under_write(
+        "read/snapshot+writer-async  (readers + 1 Async writer)",
+        DurabilityMode::Async {
+            flush_interval_ms: 1,
+        },
+    );
+    // The case Stage 2 is actually about: under GroupCommit a committer used to
+    // hold the commit clock across its fsync wait (~10ms), so a reader wanting a
+    // snapshot queued behind the whole flush.
+    bench_reads_under_write(
+        "read/snapshot+writer-gc     (readers + 1 GroupCommit writer)",
+        DurabilityMode::GroupCommit {
+            max_delay_ms: 10,
+            max_batch_size: 200,
+        },
     );
 
     bench_writes(

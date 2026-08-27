@@ -2,8 +2,7 @@
 //!
 //! Provides closures and manual transaction control for both read and write operations.
 use crate::api::transaction::{ReadTransaction, WriteTransaction};
-use crate::core::error::{Result, ResultExt, TransactionError};
-use crate::core::hlc::HybridTimestamp;
+use crate::core::error::{Result, ResultExt};
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::storage::index_persistence::tracker::PersistenceTracker;
@@ -29,77 +28,20 @@ fn record_tx_mutations(tracker: Option<&Arc<PersistenceTracker>>, tx: &WriteTran
 }
 
 impl AletheiaDB {
-    /// Compute a snapshot timestamp that is strictly greater than the last commit
-    /// timestamp, ensuring all previously committed transactions are visible, and
-    /// **reserve** it by advancing the HLC frontier to that value.
+    /// Hand out a snapshot timestamp, reserving it against later commits.
     ///
-    /// The MVCC visibility check uses strict less-than (`commit_ts < snapshot_ts`),
-    /// so the snapshot must be strictly greater than the most recent commit to see it.
-    /// When the system clock advances past the last commit, `now()` is sufficient.
-    /// When it hasn't (e.g., multiple operations within the same clock tick), we
-    /// advance one logical tick past the last commit.
+    /// Delegates to [`CommitClock::snapshot_for_read`], which does this without
+    /// taking any lock. The reservation, why it is load-bearing rather than an
+    /// optimization, and why a lock-free reader has to know whether a commit is
+    /// in flight are all documented on
+    /// [`crate::core::commit_clock`] -- that module is the place to read before
+    /// changing any of this.
     ///
-    /// Reservation is load-bearing for snapshot isolation, not a mere optimization.
-    /// The snapshot `S` we hand out is always strictly greater than the prior
-    /// frontier in *both* branches, so in *both* branches we advance the frontier
-    /// to `S` under the same lock guard (compare-and-advance) — the reservation is
-    /// unconditional, not limited to the same-tick case. In the wallclock-advanced
-    /// branch `now()` becomes the new frontier; in the same-tick branch the
-    /// logical-incremented stamp does. Either way this guarantees any *subsequent*
-    /// commit's HLC `send()` yields a stamp strictly greater than `S`. That matters
-    /// most when a commit lands in the same wallclock tick as the read: without the
-    /// reservation, its `send()` would recompute the identical stamp `S`, closing a
-    /// superseded version's transaction-time interval at exactly `[C1, S)`; the
-    /// half-open upper bound (`TimeRange::contains` uses `< end`) then excludes `S`,
-    /// so the historical fallback misses the version and returns `NodeNotFound` — a
-    /// snapshot-isolation violation. Reserving `S` sorts every later commit strictly
-    /// after this read, keeping it invisible to the snapshot as required.
-    ///
-    /// Lock discipline: `current_timestamp` is first in the project lock order, and
-    /// this method holds only that guard and calls into no other subsystem while
-    /// held, so the read-compute-write sequence is atomic and lock-order-safe.
+    /// This used to lock the same mutex committers hold across the *entire*
+    /// commit, so every temporal read, `AS OF` query, and snapshot-isolated
+    /// scan queued behind the write path and behind each other.
     fn snapshot_timestamp_for_read(&self) -> Result<Timestamp> {
-        // Capture current time before acquiring lock to minimize lock contention.
-        let now = crate::core::temporal::time::now();
-
-        // Hold the frontier guard across read + compute + write so the
-        // reservation is atomic against concurrent snapshots and commits.
-        let mut frontier =
-            self.current_timestamp
-                .lock()
-                .map_err(|_| TransactionError::LockPoisoned {
-                    resource: "current_timestamp".to_string(),
-                })?;
-        let last_commit = *frontier;
-
-        let snapshot =
-            if now > last_commit {
-                // Wallclock advanced past the last commit — now is sufficient.
-                now
-            } else {
-                // Wallclock hasn't advanced — advance one logical tick past the last
-                // commit so that `commit_ts < snapshot_ts` holds for all committed txns.
-                // Use checked_add to handle potential overflow (theoretically requires
-                // 4B+ events per microsecond, but we handle it for correctness).
-                let next_logical = last_commit.logical().checked_add(1).ok_or(
-                    crate::core::error::Error::Temporal(
-                        crate::core::error::TemporalError::LogicalCounterOverflow {
-                            wallclock: last_commit.wallclock(),
-                            current_logical: last_commit.logical(),
-                        },
-                    ),
-                )?;
-
-                // SAFETY: wallclock is copied from an existing valid HybridTimestamp,
-                // and next_logical is bounded by u32::MAX via checked_add above.
-                HybridTimestamp::new_unchecked(last_commit.wallclock(), next_logical)
-            };
-
-        // Reserve the snapshot tick: `snapshot` is strictly greater than
-        // `last_commit` in both branches, so this only ever advances the frontier.
-        // No future commit can now reuse or land on this exact stamp.
-        *frontier = snapshot;
-        Ok(snapshot)
+        self.current_timestamp.snapshot_for_read()
     }
 
     /// Create a new read-only transaction.
@@ -533,5 +475,115 @@ impl AletheiaDB {
             Ok(tx)
         })();
         result.record_error_metric()
+    }
+}
+
+#[cfg(test)]
+mod snapshot_visibility_tests {
+    use crate::AletheiaDB;
+    use crate::api::transaction::{ReadOps, WriteOps};
+    use crate::core::property::PropertyValue;
+    use crate::properties;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    /// End-to-end cover for the invariant the lock-free snapshot path rests on:
+    /// a commit becomes *visible* (MVCC `commit_ts < snapshot_ts`) only once its
+    /// writes are actually readable.
+    ///
+    /// Committers publish visibility after `finalize_current_commit_timestamps`.
+    /// Publish it any earlier -- or infer "in flight" wrongly in
+    /// [`crate::core::commit_clock`] -- and a reader is handed a snapshot past a
+    /// commit whose node is still absent from current storage, so this read
+    /// fails to find a node it has already been told it can see.
+    ///
+    /// Each writer commit creates one node and records its id only after the
+    /// commit returns, so every id a reader picks up is, by construction,
+    /// already committed: a `NodeNotFound` here is the anomaly, not a race in
+    /// the test.
+    #[test]
+    fn a_visible_commit_is_always_readable() {
+        let db = Arc::new(AletheiaDB::new().expect("db"));
+        let stop = Arc::new(AtomicBool::new(false));
+        let published = Arc::new(AtomicU64::new(0));
+        let ids: Arc<dashmap::DashMap<u64, u64>> = Arc::new(dashmap::DashMap::new());
+
+        let writer = {
+            let db = Arc::clone(&db);
+            let stop = Arc::clone(&stop);
+            let published = Arc::clone(&published);
+            let ids = Arc::clone(&ids);
+            std::thread::spawn(move || {
+                let mut seq = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    let mut tx = db.write_transaction().expect("tx");
+                    let id = tx
+                        .create_node("Seq", properties! { "seq" => seq as i64 })
+                        .expect("create");
+                    tx.commit().expect("commit");
+                    // Only after commit returns: from here the node is
+                    // unambiguously committed, so any reader that can see this
+                    // slot must be able to read the node.
+                    ids.insert(seq, id.as_u64());
+                    published.store(seq + 1, Ordering::Release);
+                    seq += 1;
+                }
+                seq
+            })
+        };
+
+        let readers: Vec<_> = (0..3)
+            .map(|_| {
+                let db = Arc::clone(&db);
+                let stop = Arc::clone(&stop);
+                let published = Arc::clone(&published);
+                let ids = Arc::clone(&ids);
+                std::thread::spawn(move || {
+                    let mut checked = 0u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        let count = published.load(Ordering::Acquire);
+                        if count == 0 {
+                            continue;
+                        }
+                        let tx = db.read_transaction().expect("read tx");
+                        // Every already-published node must be readable at this
+                        // snapshot -- including the newest, which is exactly the
+                        // one an unpublished-but-visible commit would lose.
+                        for seq in count.saturating_sub(8)..count {
+                            let Some(id) = ids.get(&seq).map(|e| *e.value()) else {
+                                continue;
+                            };
+                            let node = tx
+                                .get_node(crate::core::id::NodeId::new(id).expect("id"))
+                                .unwrap_or_else(|e| {
+                                    panic!(
+                                        "committed node seq={seq} id={id} was visible to the \
+                                         snapshot but could not be read: {e}"
+                                    )
+                                });
+                            assert_eq!(
+                                node.properties.get("seq"),
+                                Some(&PropertyValue::Int(seq as i64)),
+                                "node seq={seq} came back with the wrong contents"
+                            );
+                            checked += 1;
+                        }
+                    }
+                    checked
+                })
+            })
+            .collect();
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        stop.store(true, Ordering::Relaxed);
+
+        let commits = writer.join().expect("writer");
+        let checked: u64 = readers.into_iter().map(|r| r.join().expect("reader")).sum();
+
+        assert!(commits > 0, "writer made no progress");
+        assert!(
+            checked > 0,
+            "readers verified nothing, so the test proved nothing"
+        );
     }
 }

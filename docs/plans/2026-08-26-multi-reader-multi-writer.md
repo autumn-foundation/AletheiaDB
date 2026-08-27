@@ -364,6 +364,111 @@ pinned by a characterization test named
 `known_limitation_two_field_composites_ignore_field_order`, so a future fix has
 to be deliberate rather than accidental.
 
+## Stage 2, as landed — and why it did not pay
+
+Stage 2 above says the reader-side mutex is "contained, mechanical, and
+separately testable". Building it proved both halves of that wrong: it is not
+separable, and on this harness it does not pay. Both corrections are worth more
+than the change itself.
+
+### It is not separable from Stage 3
+
+The plan says readers can simply CAS the frontier instead of locking it. They
+cannot. A committer assigns its stamp `C` at the *start* of the commit and
+applies its writes at the *end*, and today a reader cannot observe that window
+only because it blocks on the very mutex the committer holds. Make the reader
+lock-free against a single frontier and it can be handed `S > C` while `C`'s
+writes are still absent from storage. MVCC visibility is
+`commit_ts < snapshot_ts`, so the reader calls `C` visible and then fails to
+find it — a snapshot-isolation violation that the mutex was preventing by
+accident rather than by design.
+
+So the clock now carries an explicit **in-flight bit** alongside the packed
+timestamp, in one 128-bit word (`portable-atomic`'s `AtomicU128`, lock-free via
+`cmpxchg16b`; verified on this target). A reader either parks exactly on an
+in-flight commit's stamp — where strict-less-than keeps it invisible — or
+reserves a fresh stamp by CAS. Committers publish visibility after
+`finalize_current_commit_timestamps`, which is the ordering the whole thing
+rests on. The bit and the timestamp must share one word: split across two cells,
+whichever order the committer writes them in leaves a window where a reader
+reads a stale flag against a fresh frontier and reserves straight past an
+unapplied commit. See `src/core/commit_clock.rs`.
+
+An earlier draft inferred "in flight" from `frontier != applied` rather than
+using a bit. That is memory-safe and preserves isolation, but it cannot tell a
+committer from another reader's reservation, so one read parked every later read
+on a single stamp until the next commit arrived. Correct, and quietly wrong: a
+frozen snapshot means a fact whose valid time starts later (#3221) never comes
+into view on an idle database. Two tests caught it.
+
+### It does not pay, and the reason matters
+
+Measured with builds interleaved across four passes and the run order alternated
+per pass (medians; ratio is Stage 2 over baseline):
+
+| workload | threads | baseline | Stage 2 | |
+|---|---|---|---|---|
+| `read/snapshot` | 8 | 996K/s | 980K/s | 0.98x |
+| `read/snapshot+writer-async` | 8 | 895K/s | 899K/s | 1.00x |
+| `read/snapshot+writer-gc` | 8 | 1.09M/s | 1.10M/s | 1.01x |
+
+Nothing moved — including the two mixed read+write workloads added to this
+harness specifically to expose what Stage 2 fixes, one of them under
+`GroupCommit`, where a committer used to hold the clock across its fsync wait.
+
+Two reasons, and the second is the useful one:
+
+1. **A CAS on one word is not more scalable than a mutex on one word.** The
+   reservation is a shared monotonic counter, so every reader still writes the
+   same cache line. Removing the lock removes lock overhead, not the coherence
+   traffic. Stage 2 changes *who blocks whom* — readers no longer queue behind a
+   committer's entire commit — not how a read-only sweep scales.
+
+2. **The snapshot bottleneck is somewhere else entirely.** `read_transaction()`
+   (`src/db/transaction.rs`) takes a *second* global mutex,
+   `visibility_manager.active` (`src/api/transaction/visibility.rs:85`), and
+   takes it **three** times per transaction: `register_active`,
+   `capture_snapshot`, and `register_abort` from `ReadTransaction::drop`. The
+   set is a `Mutex<Arc<HashSet<TxId>>>` mutated through `Arc::make_mut`, and
+   `capture_snapshot` hands every live transaction an `Arc` clone — so the
+   refcount is essentially always >1 and both mutations **deep-copy the whole
+   active set**. That is O(concurrent readers) of copying per read transaction,
+   serialized under one global lock. It explains the 28x per-thread collapse
+   from 1 to 8 threads (320ns → 8.9µs) far better than the commit clock does.
+
+Diagnosis #2 in this document is therefore misattributed: the global exclusive
+mutex on the snapshot read path is not primarily `current_timestamp`, it is
+`visibility_manager.active` — three acquisitions and two O(N) clones deep.
+**That is the real Stage 2**, and it should be done before any more of the
+commit clock is touched.
+
+### What the change is still worth
+
+It is groundwork, not a speedup, and it should be judged as such. The applied
+frontier and the in-flight bit are exactly the visibility machinery Stage 3's
+pipeline needs (its Stage C has to publish "applied through LSN N" for readers),
+and the coupling documented above means Stage 3 could not have been built
+without discovering this anyway. It also removes a real latency coupling —
+readers no longer sit behind a committer's fsync — which this throughput harness
+is not shaped to show.
+
+### Methodology, again
+
+The first Stage 2 measurement ran "fixed" first and "baseline" second in every
+pass. That is not interleaving; it systematically penalises whichever build
+always goes second, and it produced a confident-looking table showing Stage 2
+*doubling* `read/current` — a workload that never touches the commit clock. That
+impossible row is what exposed the bias.
+
+Alternating the order per pass fixed it, and then showed something else: on this
+box `read/current`, `read/borrow` and `read/disjoint` swing **2.4x within a
+single build** (13.6M, 28.6M, 26.9M, 11.8M ops/s across four passes of the same
+binary). Four samples cannot resolve anything through that, so those columns are
+reported as noise rather than as results in either direction. Only the tight
+rows — spreads of 1.05–1.15x — carry signal, and those are the `read/snapshot*`
+rows above. This is the third distinct way this box has produced a confident
+wrong answer; treat any single-run comparison here as unfounded.
+
 ## On connection pools
 
 You said "connection pools, not quite yet — but we're probably better off with

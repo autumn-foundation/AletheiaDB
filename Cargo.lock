@@ -194,6 +194,7 @@ dependencies = [
  "parking_lot",
  "parquet",
  "pbkdf2",
+ "portable-atomic",
  "proptest",
  "quick_cache",
  "rand 0.8.6",

@@ -35,6 +35,7 @@ use super::{
     ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager, WriteBuffer,
     WriteOps, WriteRequestOptions,
 };
+use crate::core::commit_clock::CommitClock;
 use crate::core::error::{Result, ResultExt, StorageError, TransactionError};
 use crate::core::graph::{Edge, Node};
 use crate::core::hlc::{
@@ -116,7 +117,7 @@ pub struct WriteTransaction {
     pub(crate) historical: Arc<RwLock<HistoricalStorage>>,
     pub(crate) temporal_indexes: Arc<TemporalIndexes>,
     pub(crate) wal: Arc<ConcurrentWalSystem>,
-    pub(crate) current_timestamp: Arc<Mutex<Timestamp>>,
+    pub(crate) current_timestamp: Arc<CommitClock>,
     pub(crate) commit_clock_observed_at: Arc<Mutex<Instant>>,
     pub(crate) visibility_manager: Arc<TxVisibilityManager>,
 
@@ -187,7 +188,7 @@ impl WriteTransaction {
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
-        current_timestamp: Arc<Mutex<Timestamp>>,
+        current_timestamp: Arc<CommitClock>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<IdGenerator>,
         edge_id_gen: Arc<IdGenerator>,
@@ -218,7 +219,7 @@ impl WriteTransaction {
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
-        current_timestamp: Arc<Mutex<Timestamp>>,
+        current_timestamp: Arc<CommitClock>,
         commit_clock_observed_at: Arc<Mutex<Instant>>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<IdGenerator>,
@@ -252,7 +253,7 @@ impl WriteTransaction {
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
-        current_timestamp: Arc<Mutex<Timestamp>>,
+        current_timestamp: Arc<CommitClock>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<IdGenerator>,
         edge_id_gen: Arc<IdGenerator>,
@@ -285,7 +286,7 @@ impl WriteTransaction {
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
-        current_timestamp: Arc<Mutex<Timestamp>>,
+        current_timestamp: Arc<CommitClock>,
         commit_clock_observed_at: Arc<Mutex<Instant>>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<IdGenerator>,
@@ -663,93 +664,107 @@ impl WriteTransaction {
         let ts_lock_acquired = std::time::Instant::now();
 
         let commit_timestamp = {
-            // Phase 2: Use HLC for distributed temporal consistency
-            // Get current physical wallclock
-            let current_wallclock = crate::core::temporal::time::now();
             let observed_at = Instant::now();
             let (mut previous_observed_at, adaptive_forward_limit_us) =
                 self.lock_adaptive_forward_jump_limit(observed_at)?;
 
             let self_heal_clock_skew = is_clock_skew_self_heal_enabled();
-            let skew_decision = evaluate_clock_skew(
-                current_wallclock.wallclock(),
-                ts.wallclock(),
-                Some(adaptive_forward_limit_us),
-                self_heal_clock_skew,
-            )
-            .map_err(|violation| TransactionError::ClockSkew {
-                wallclock: current_wallclock.wallclock(),
-                previous: ts.wallclock(),
-                drift_us: violation.drift_us,
-                max_allowed: violation.max_allowed,
-            })?;
 
-            if self_heal_clock_skew && let Some(_direction) = skew_decision.healed_direction {
-                #[cfg(feature = "observability")]
-                tracing::warn!(
-                    wallclock_ts = %current_wallclock,
-                    prev_ts = %ts,
-                    drift_us = skew_decision.drift_us,
-                    reason = _direction.as_str(),
-                    "Self-healing clock skew by clamping to local HLC frontier"
-                );
-            }
+            // Assign the commit stamp and publish it to the allocation frontier
+            // as one atomic step, marking the clock in-flight so lock-free
+            // readers park on this stamp instead of reserving past it (see
+            // `core::commit_clock`). The closure derives the stamp from
+            // whatever frontier it is handed rather than from a value captured
+            // earlier: a reader can reserve between this guard being taken and
+            // the exchange landing, and the retry has to build on that
+            // reservation instead of clobbering it.
+            let commit = ts.advance_with(|frontier| {
+                // Phase 2: Use HLC for distributed temporal consistency
+                // Get current physical wallclock
+                let current_wallclock = crate::core::temporal::time::now();
 
-            // Phase 2: Use HLC .send() method for monotonic timestamp generation
-            // This ensures: if wallclock advances, reset logical; otherwise increment logical
-            let commit = send_with_overflow_self_heal(
-                &ts,
-                skew_decision.effective_wallclock,
-                self_heal_clock_skew,
-                |error| match error {
-                    SendWithSelfHealError::InitialSend(error) => TransactionError::CommitFailed {
-                        reason: format!("HLC timestamp generation failed: {}", error),
-                    },
-                    SendWithSelfHealError::FallbackWallclockOverflow {
-                        wallclock,
-                        current_logical,
-                    } => TransactionError::CommitFailed {
-                        reason: format!(
-                            "HLC logical counter overflow at wallclock={}: {}",
-                            wallclock, current_logical
-                        ),
-                    },
-                    SendWithSelfHealError::FallbackSend(fallback_error) => {
-                        TransactionError::CommitFailed {
-                            reason: format!(
-                                "HLC timestamp generation failed while self-healing: {}",
-                                fallback_error
-                            ),
-                        }
-                    }
-                },
-            )?;
+                let skew_decision = evaluate_clock_skew(
+                    current_wallclock.wallclock(),
+                    frontier.wallclock(),
+                    Some(adaptive_forward_limit_us),
+                    self_heal_clock_skew,
+                )
+                .map_err(|violation| TransactionError::ClockSkew {
+                    wallclock: current_wallclock.wallclock(),
+                    previous: frontier.wallclock(),
+                    drift_us: violation.drift_us,
+                    max_allowed: violation.max_allowed,
+                })?;
 
-            // Observability: Warn about clock skew issues
-            #[cfg(feature = "observability")]
-            {
-                // Clock went backwards: wallclock < previous wallclock
-                if current_wallclock.wallclock() < ts.wallclock() {
+                if self_heal_clock_skew && let Some(_direction) = skew_decision.healed_direction {
+                    #[cfg(feature = "observability")]
                     tracing::warn!(
                         wallclock_ts = %current_wallclock,
-                        prev_ts = %ts,
-                        skew_us = ts.wallclock() - current_wallclock.wallclock(),
-                        logical_counter = commit.logical(),
-                        "Clock skew detected: wallclock went backwards (NTP adjustment?)"
-                    );
-                } else if commit.wallclock() > ts.wallclock() + 60_000_000 {
-                    // Large forward jump (>60 seconds)
-                    tracing::warn!(
-                        wallclock_ts = %current_wallclock,
-                        prev_ts = %ts,
-                        jump_us = commit.wallclock() - ts.wallclock(),
-                        "Large clock jump detected: timestamps will be lumpy"
+                        prev_ts = %frontier,
+                        drift_us = skew_decision.drift_us,
+                        reason = _direction.as_str(),
+                        "Self-healing clock skew by clamping to local HLC frontier"
                     );
                 }
-            }
 
-            // Update current_timestamp for next transaction's snapshot
-            *ts = commit;
+                // Phase 2: Use HLC .send() method for monotonic timestamp generation
+                // This ensures: if wallclock advances, reset logical; otherwise increment logical
+                let commit = send_with_overflow_self_heal(
+                    &frontier,
+                    skew_decision.effective_wallclock,
+                    self_heal_clock_skew,
+                    |error| match error {
+                        SendWithSelfHealError::InitialSend(error) => {
+                            TransactionError::CommitFailed {
+                                reason: format!("HLC timestamp generation failed: {}", error),
+                            }
+                        }
+                        SendWithSelfHealError::FallbackWallclockOverflow {
+                            wallclock,
+                            current_logical,
+                        } => TransactionError::CommitFailed {
+                            reason: format!(
+                                "HLC logical counter overflow at wallclock={}: {}",
+                                wallclock, current_logical
+                            ),
+                        },
+                        SendWithSelfHealError::FallbackSend(fallback_error) => {
+                            TransactionError::CommitFailed {
+                                reason: format!(
+                                    "HLC timestamp generation failed while self-healing: {}",
+                                    fallback_error
+                                ),
+                            }
+                        }
+                    },
+                )?;
+
+                // Observability: Warn about clock skew issues
+                #[cfg(feature = "observability")]
+                {
+                    // Clock went backwards: wallclock < previous wallclock
+                    if current_wallclock.wallclock() < frontier.wallclock() {
+                        tracing::warn!(
+                            wallclock_ts = %current_wallclock,
+                            prev_ts = %frontier,
+                            skew_us = frontier.wallclock() - current_wallclock.wallclock(),
+                            logical_counter = commit.logical(),
+                            "Clock skew detected: wallclock went backwards (NTP adjustment?)"
+                        );
+                    } else if commit.wallclock() > frontier.wallclock() + 60_000_000 {
+                        // Large forward jump (>60 seconds)
+                        tracing::warn!(
+                            wallclock_ts = %current_wallclock,
+                            prev_ts = %frontier,
+                            jump_us = commit.wallclock() - frontier.wallclock(),
+                            "Large clock jump detected: timestamps will be lumpy"
+                        );
+                    }
+                }
+
+                Ok(commit)
+            })?;
+
             // Persist observation only after we successfully advanced the frontier.
             *previous_observed_at = observed_at;
             drop(previous_observed_at);
@@ -892,6 +907,14 @@ impl WriteTransaction {
         // Only reached on the success path — sets commit_timestamp: Some(T) on all
         // written nodes/edges, making them visible to future snapshot readers.
         apply::finalize_current_commit_timestamps(self, commit_timestamp);
+
+        // The write is now present in current AND historical storage, so it is
+        // safe for a lock-free reader to be handed a snapshot strictly after it.
+        // Publishing any earlier would let a reader consider this commit visible
+        // (MVCC is `commit_ts < snapshot_ts`) and then fail to find it. Until
+        // this call, readers park on `commit_timestamp` itself and treat it as
+        // unseen -- see `core::commit_clock`.
+        ts.publish_applied(commit_timestamp);
 
         // Apply + finalization are complete: this write is now present in both
         // current and historical storage. Deregister the in-flight LSN so index

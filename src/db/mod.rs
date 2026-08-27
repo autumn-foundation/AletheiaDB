@@ -4,8 +4,8 @@
 //! between current storage (fast path) and historical storage (temporal path).
 
 use crate::api::transaction::TxVisibilityManager;
+use crate::core::commit_clock::CommitClock;
 use crate::core::id::{IdGenerator, TxIdGenerator};
-use crate::core::temporal::Timestamp;
 use crate::index::temporal::TemporalIndexes;
 use crate::query::planner::Statistics;
 use crate::storage::current::CurrentStorage;
@@ -273,7 +273,7 @@ pub struct AletheiaDB {
     /// (never held while acquiring another write-path primitive).
     pub(crate) in_flight: Arc<crate::api::transaction::write::InFlightLsns>,
     /// Current logical timestamp for transaction time - Mutex-protected for thread-safe increment
-    pub(crate) current_timestamp: Arc<Mutex<Timestamp>>,
+    pub(crate) current_timestamp: Arc<CommitClock>,
     /// Monotonic observation time for adaptive forward clock-skew limits.
     pub(crate) commit_clock_observed_at: Arc<Mutex<Instant>>,
     /// Transaction ID generator for MVCC
@@ -479,11 +479,9 @@ pub struct AletheiaDB {
 
 impl std::fmt::Debug for AletheiaDB {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let current_ts = self
-            .current_timestamp
-            .try_lock()
-            .map(|ts| format!("{:?}", ts))
-            .unwrap_or_else(|_| "<locked>".to_string());
+        // Lock-free: the frontier is an atomic, so Debug never blocks and
+        // never has to render "<locked>".
+        let current_ts = format!("{:?}", self.current_timestamp.load());
 
         f.debug_struct("AletheiaDB")
             .field("current_timestamp", &current_ts)
