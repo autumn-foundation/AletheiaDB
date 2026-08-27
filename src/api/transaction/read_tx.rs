@@ -43,9 +43,46 @@ pub struct ReadTransaction {
     tx_id: TxId,
     start_timestamp: crate::core::temporal::Timestamp,
     snapshot: TransactionSnapshot,
-    current: Arc<CurrentStorage>,
-    visibility_manager: Arc<TxVisibilityManager>,
-    historical: Arc<RwLock<HistoricalStorage>>,
+    handles: Arc<ReadHandles>,
+}
+
+/// The storage handles a read transaction needs, bundled behind one `Arc`.
+///
+/// Opening a read transaction used to clone three separate `Arc`s (and drop
+/// them again), which is three atomic increments and three decrements on three
+/// cache lines every thread shares. That refcount traffic -- not any lock --
+/// was the dominant cost of `read_transaction()` once the visibility manager's
+/// lock was gone: a control measuring four contended `Arc` clone+drop pairs and
+/// nothing else reproduced most of the cost, and the same collapse in scaling.
+///
+/// Bundling makes it one clone and one drop. The handles are immutable for the
+/// lifetime of the database, so the bundle is built once and shared.
+pub struct ReadHandles {
+    pub(crate) current: Arc<CurrentStorage>,
+    pub(crate) visibility_manager: Arc<TxVisibilityManager>,
+    pub(crate) historical: Arc<RwLock<HistoricalStorage>>,
+}
+
+impl std::fmt::Debug for ReadHandles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The handles themselves are not Debug; identity is all that is useful.
+        f.write_str("ReadHandles { .. }")
+    }
+}
+
+impl ReadHandles {
+    /// Bundle three handles for sharing across read transactions.
+    pub fn new(
+        current: Arc<CurrentStorage>,
+        visibility_manager: Arc<TxVisibilityManager>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+    ) -> Self {
+        Self {
+            current,
+            visibility_manager,
+            historical,
+        }
+    }
 }
 
 impl ReadTransaction {
@@ -61,18 +98,34 @@ impl ReadTransaction {
     pub(crate) fn new(
         tx_id: TxId,
         snapshot: TransactionSnapshot,
-        current: Arc<CurrentStorage>,
-        visibility_manager: Arc<TxVisibilityManager>,
-        historical: Arc<RwLock<HistoricalStorage>>,
+        handles: Arc<ReadHandles>,
     ) -> Self {
         ReadTransaction {
             tx_id,
             start_timestamp: snapshot.snapshot_timestamp,
             snapshot,
-            current,
-            visibility_manager,
-            historical,
+            handles,
         }
+    }
+
+    /// Construct from loose handles, bundling them.
+    ///
+    /// For tests and callers that hold the three `Arc`s separately. The hot
+    /// path uses [`ReadTransaction::new`] with a bundle the database built once,
+    /// so it pays one refcount increment instead of three.
+    #[cfg(test)]
+    pub(crate) fn from_parts(
+        tx_id: TxId,
+        snapshot: TransactionSnapshot,
+        current: Arc<CurrentStorage>,
+        visibility_manager: Arc<TxVisibilityManager>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+    ) -> Self {
+        Self::new(
+            tx_id,
+            snapshot,
+            Arc::new(ReadHandles::new(current, visibility_manager, historical)),
+        )
     }
 
     /// Get transaction metadata.
@@ -132,7 +185,7 @@ impl ReadTransaction {
     /// This is the slow path used when the current version is not visible
     /// or when the node has been deleted from current storage.
     fn get_node_from_historical(&self, id: NodeId) -> Result<Node> {
-        let historical = self.historical.read();
+        let historical = self.handles.historical.read();
 
         // Find version visible at our snapshot timestamp
         let version_id = historical.find_node_version_at_time(
@@ -185,8 +238,8 @@ impl ReadTransaction {
     fn filter_visible_edges(&self, mut edge_ids: Vec<EdgeId>) -> Vec<EdgeId> {
         edge_ids.retain(|&edge_id| {
             // Use embedded commit_timestamp for visibility check (Issue #238).
-            if let Ok(edge) = self.current.get_edge(edge_id) {
-                self.visibility_manager.is_visible_with_embedded_ts(
+            if let Ok(edge) = self.handles.current.get_edge(edge_id) {
+                self.handles.visibility_manager.is_visible_with_embedded_ts(
                     &self.snapshot,
                     edge.metadata.created_by_tx,
                     edge.metadata.commit_timestamp,
@@ -204,7 +257,7 @@ impl ReadTransaction {
     /// This is the slow path used when the current version is not visible
     /// or when the edge has been deleted from current storage.
     fn get_edge_from_historical(&self, id: EdgeId) -> Result<Edge> {
-        let historical = self.historical.read();
+        let historical = self.handles.historical.read();
 
         // Find version visible at our snapshot timestamp
         let version_id = historical.find_edge_version_at_time(
@@ -252,10 +305,10 @@ impl ReadTransaction {
 
 impl ReadOps for ReadTransaction {
     fn get_node(&self, id: NodeId) -> Result<Node> {
-        let result = if let Ok(current_node) = self.current.get_node(id) {
+        let result = if let Ok(current_node) = self.handles.current.get_node(id) {
             // Use embedded commit_timestamp for visibility check (HyPer/TiDB pattern, Issue #238).
             // Bypasses the TxVisibilityManager::committed map lock for the common fast path.
-            if self.visibility_manager.is_visible_with_embedded_ts(
+            if self.handles.visibility_manager.is_visible_with_embedded_ts(
                 &self.snapshot,
                 current_node.metadata.created_by_tx,
                 current_node.metadata.commit_timestamp,
@@ -275,9 +328,9 @@ impl ReadOps for ReadTransaction {
     }
 
     fn get_edge(&self, id: EdgeId) -> Result<Edge> {
-        let result = if let Ok(current_edge) = self.current.get_edge(id) {
+        let result = if let Ok(current_edge) = self.handles.current.get_edge(id) {
             // Use embedded commit_timestamp for visibility check (HyPer/TiDB pattern, Issue #238).
-            if self.visibility_manager.is_visible_with_embedded_ts(
+            if self.handles.visibility_manager.is_visible_with_embedded_ts(
                 &self.snapshot,
                 current_edge.metadata.created_by_tx,
                 current_edge.metadata.commit_timestamp,
@@ -303,7 +356,7 @@ impl ReadOps for ReadTransaction {
         // Filter edges to only return those visible in our snapshot
         // This prevents phantom reads where we see edges created after our snapshot
         // Note: CurrentStorage::get_outgoing_edges() uses frozen view when available
-        let edge_ids = self.current.get_outgoing_edges(node_id);
+        let edge_ids = self.handles.current.get_outgoing_edges(node_id);
         Ok(self.filter_visible_edges(edge_ids))
     }
 
@@ -312,7 +365,7 @@ impl ReadOps for ReadTransaction {
         self.get_node(node_id)?;
         // Filter edges to only return those visible in our snapshot
         // Note: CurrentStorage::get_incoming_edges() uses frozen view when available
-        let edge_ids = self.current.get_incoming_edges(node_id);
+        let edge_ids = self.handles.current.get_incoming_edges(node_id);
         Ok(self.filter_visible_edges(edge_ids))
     }
 
@@ -322,16 +375,19 @@ impl ReadOps for ReadTransaction {
         // filter, not an existence check.
         self.get_node(node_id)?;
         // Filter edges to only return those visible in our snapshot
-        let edge_ids = self.current.get_outgoing_edges_with_label(node_id, label);
+        let edge_ids = self
+            .handles
+            .current
+            .get_outgoing_edges_with_label(node_id, label);
         Ok(self.filter_visible_edges(edge_ids))
     }
 
     fn node_count(&self) -> usize {
-        self.current.node_count()
+        self.handles.current.node_count()
     }
 
     fn edge_count(&self) -> usize {
-        self.current.edge_count()
+        self.handles.current.edge_count()
     }
 
     fn find_nodes_by_property(
@@ -341,16 +397,18 @@ impl ReadOps for ReadTransaction {
         property_value: &PropertyValue,
     ) -> Vec<NodeId> {
         // ⚡ Bolt Optimization: Uses `.retain()` to filter in-place and avoid allocating a new `Vec`.
-        let mut node_ids = self
-            .current
-            .find_nodes_by_property(label, property_key, property_value);
+        let mut node_ids =
+            self.handles
+                .current
+                .find_nodes_by_property(label, property_key, property_value);
 
         node_ids.retain(|node_id| {
-            self.current
+            self.handles
+                .current
                 .get_node(*node_id)
                 .map(|node| {
                     // Use embedded commit_timestamp for visibility check (Issue #238).
-                    self.visibility_manager.is_visible_with_embedded_ts(
+                    self.handles.visibility_manager.is_visible_with_embedded_ts(
                         &self.snapshot,
                         node.metadata.created_by_tx,
                         node.metadata.commit_timestamp,
@@ -378,7 +436,6 @@ mod tests {
     use crate::core::temporal::time;
 
     use parking_lot::RwLock;
-    use std::collections::HashSet;
     use std::sync::Arc;
 
     // Helper to create a test ReadTransaction with snapshot
@@ -387,9 +444,9 @@ mod tests {
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(HashSet::new()),
+            active_transactions: None,
         };
-        ReadTransaction::new(tx_id, snapshot, current, visibility_manager, historical)
+        ReadTransaction::from_parts(tx_id, snapshot, current, visibility_manager, historical)
     }
 
     #[test]

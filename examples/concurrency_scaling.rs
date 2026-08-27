@@ -165,6 +165,22 @@ fn bench_reads() {
         &snapshot_results,
     );
 
+    // Diagnostic: transaction construction with no read at all. The delta
+    // against read/snapshot is what one get_node costs inside a transaction;
+    // the delta against read/current is what the transaction object costs.
+    let mut txn_only_results = Vec::new();
+    for &threads in THREAD_COUNTS {
+        let db = Arc::clone(&db);
+        let ops = measure(threads, READ_OPS_PER_THREAD, move |_t, _i| {
+            let _tx = db.read_transaction().expect("read tx");
+        });
+        txn_only_results.push((threads, ops));
+    }
+    report(
+        "read/txn-only  (read_transaction, no read)",
+        &txn_only_results,
+    );
+
     let mut current_results = Vec::new();
     for &threads in THREAD_COUNTS {
         let db = Arc::clone(&db);
@@ -287,6 +303,39 @@ fn bench_reads_under_write(label: &str, mode: DurabilityMode) {
     );
 }
 
+/// Control: what four contended `Arc` clone+drop pairs cost on this box.
+///
+/// `read_transaction` clones an `Arc` for each storage handle it hands the
+/// transaction, plus one for the active-transaction set -- and drops them all
+/// again. Each pair is an atomic increment and decrement on a cache line every
+/// thread shares. This measures that alone, with no database involved, so the
+/// transaction-construction cost can be attributed rather than guessed at.
+fn bench_arc_control() {
+    let shared: Arc<Vec<u8>> = Arc::new(vec![0u8; 64]);
+    let a = Arc::new(1u64);
+    let b = Arc::new(2u64);
+    let c = Arc::new(3u64);
+    let handles = Arc::new((shared, a, b, c));
+
+    let mut results = Vec::new();
+    for &threads in THREAD_COUNTS {
+        let handles = Arc::clone(&handles);
+        let ops = measure(threads, READ_OPS_PER_THREAD, move |_t, _i| {
+            let (s, a, b, c) = &*handles;
+            let s = Arc::clone(s);
+            let a = Arc::clone(a);
+            let b = Arc::clone(b);
+            let c = Arc::clone(c);
+            std::hint::black_box((&s, &a, &b, &c));
+        });
+        results.push((threads, ops));
+    }
+    report(
+        "control/arc     (4 contended Arc clone+drop pairs)",
+        &results,
+    );
+}
+
 fn main() {
     println!(
         "AletheiaDB concurrency scaling — {} cores available",
@@ -294,6 +343,8 @@ fn main() {
             .map(|n| n.get())
             .unwrap_or(0)
     );
+
+    bench_arc_control();
 
     bench_reads_under_write(
         "read/snapshot+writer-async  (readers + 1 Async writer)",

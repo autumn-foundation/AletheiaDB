@@ -280,6 +280,15 @@ pub struct AletheiaDB {
     pub(crate) tx_id_gen: Arc<TxIdGenerator>,
     /// Transaction visibility manager for Snapshot Isolation
     pub(crate) visibility_manager: Arc<TxVisibilityManager>,
+    /// Storage handles bundled behind one `Arc`, built on first use and shared
+    /// by every read transaction.
+    ///
+    /// `current`, `historical` and `visibility_manager` are never replaced after
+    /// construction, so this is safe to cache. See `ReadHandles` for why it
+    /// exists: cloning three `Arc`s per read transaction was the dominant cost
+    /// of opening one.
+    pub(crate) read_handles:
+        std::sync::OnceLock<Arc<crate::api::transaction::read_tx::ReadHandles>>,
     /// ID generators for nodes, edges, and versions (shared with transactions)
     /// IdGenerator uses AtomicU64 internally, so no external Mutex is needed.
     pub(crate) node_id_gen: Arc<IdGenerator>,

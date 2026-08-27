@@ -39,8 +39,11 @@
 //!
 //! - bits 0..96 hold the packed timestamp -- the highest stamp handed out to
 //!   anyone, whether assigned to a commit or reserved by a reader;
-//! - the top bit is set from the moment a committer assigns its stamp until the
-//!   moment its writes are visible in storage.
+//! - bit 127 is set from the moment a committer assigns its stamp until the
+//!   moment its writes are visible in storage;
+//! - bit 126 marks the timestamp as a reader's reservation rather than a commit
+//!   stamp, which is what lets a later reader share it instead of installing its
+//!   own.
 //!
 //! Both live in one 128-bit cell, which is the point: a reader's decision
 //! ("is a commit in flight?") and its reservation are then a single atomic
@@ -60,10 +63,26 @@
 //!     if state.in_flight() {
 //!         return state.timestamp();     // park exactly ON the commit stamp:
 //!     }                                 // strict < keeps it invisible
+//!     if state.reserved() && state.timestamp() >= now {
+//!         return state.timestamp();     // share a live reservation: NO write
+//!     }
 //!     let s = max(now, state.timestamp() + 1 logical);
-//!     if frontier.compare_exchange(state, s).is_ok() { return s }
+//!     if frontier.compare_exchange(state, s | RESERVED).is_ok() { return s }
 //! }
 //! ```
+//!
+//! The middle branch is what keeps this cheap. Replacing the reader's mutex with
+//! a CAS did not help at all on its own -- an atomic read-modify-write on one
+//! shared word serializes on that cache line much as a lock does. So most reads
+//! must not write. A reservation is already strictly greater than every applied
+//! commit and no future commit can land on it, so a later reader can simply
+//! return it. Only the first reader after a commit, or the first after the
+//! wallclock ticks past the standing reservation, pays for a CAS.
+//!
+//! Sharing bounds staleness to the resolution of the clock: a shared snapshot is
+//! refreshed as soon as `now` moves past it. That matters -- an indefinitely
+//! frozen snapshot would keep a fact whose valid time starts later (Issue #3221)
+//! from ever coming into view on an idle database.
 //!
 //! Parking is safe because committers are serialized: if a commit is in flight,
 //! every commit ordered before it has already applied, so a snapshot at exactly
@@ -132,10 +151,28 @@ fn unpack(v: u128) -> Timestamp {
 /// Lives above the 96 bits `pack` uses, so it never disturbs the timestamp.
 const IN_FLIGHT: u128 = 1 << 127;
 
+/// Second flag bit: the frontier currently holds a reader's *reservation*
+/// rather than a commit stamp.
+///
+/// This is what lets most reads be a pure load. A reservation is already
+/// strictly greater than every applied commit, so a later reader can simply
+/// return it instead of installing one of its own -- no atomic RMW, no write to
+/// the shared cache line. It is only refreshed once the wallclock has moved past
+/// it, which bounds how stale a shared snapshot can be to the resolution of the
+/// clock itself (one microsecond).
+///
+/// Without this bit a reader cannot tell whether the frontier is a reservation
+/// it may share or a commit stamp it must sort after, and must conservatively
+/// CAS a fresh stamp every single time.
+const RESERVED: u128 = 1 << 126;
+
+/// Everything that is not a flag.
+const TS_MASK: u128 = !(IN_FLIGHT | RESERVED);
+
 /// The timestamp carried by a frontier word, ignoring the in-flight bit.
 #[inline]
 fn state_timestamp(state: u128) -> Timestamp {
-    unpack(state & !IN_FLIGHT)
+    unpack(state & TS_MASK)
 }
 
 /// Hybrid-logical commit clock shared by every reader and writer.
@@ -201,9 +238,23 @@ impl CommitClock {
                 return Ok(state_timestamp(state));
             }
 
-            // Quiescent. Reserve a stamp strictly greater than the frontier.
             let last = state_timestamp(state);
             let now = crate::core::temporal::time::now();
+
+            // Fast path: an existing reservation already sits at or ahead of the
+            // wallclock. Share it. It is strictly greater than every applied
+            // commit (that is what made it a valid reservation), and no future
+            // commit can land on it, because committers derive their stamp from
+            // this same frontier. So this read needs no write at all -- which is
+            // the whole point: a CAS on one shared word does not scale any
+            // better than a mutex on one shared word.
+            if state & RESERVED != 0 && last >= now {
+                return Ok(last);
+            }
+
+            // Either the frontier is a commit stamp we must sort after, or the
+            // wallclock has moved past the last reservation and it is time for a
+            // fresh one. Both need a real reservation installed.
             let snapshot = if now > last {
                 now
             } else {
@@ -221,7 +272,12 @@ impl CommitClock {
 
             if self
                 .frontier
-                .compare_exchange_weak(state, pack(snapshot), Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange_weak(
+                    state,
+                    pack(snapshot) | RESERVED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
                 .is_ok()
             {
                 return Ok(snapshot);
@@ -499,17 +555,40 @@ mod tests {
     }
 
     #[test]
-    fn quiescent_reads_reserve_strictly_increasing_stamps() {
+    fn quiescent_reads_never_go_backwards_and_do_move_forward() {
+        // Reads share a standing reservation within one clock tick, so
+        // consecutive snapshots may be equal -- that is the optimization. What
+        // must hold is that they never regress, and that they do advance once
+        // the wallclock moves, or an idle database would freeze its snapshot
+        // and never show a fact whose valid time starts later.
         let clock = CommitClock::new(time::now());
-        let mut previous = clock.snapshot_for_read().expect("snapshot");
+        let first = clock.snapshot_for_read().expect("snapshot");
+        let mut previous = first;
+        let mut shared = 0;
         for _ in 0..1_000 {
             let next = clock.snapshot_for_read().expect("snapshot");
             assert!(
-                next > previous,
-                "reservations must strictly increase: {next} !> {previous}"
+                next >= previous,
+                "snapshots must never regress: {next} < {previous}"
             );
+            if next == previous {
+                shared += 1;
+            }
             previous = next;
         }
+        assert!(
+            shared > 0,
+            "no snapshot was shared, so the fast path never engaged"
+        );
+
+        // Now let the wallclock move and confirm the reservation refreshes.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let after_idle = clock.snapshot_for_read().expect("snapshot");
+        assert!(
+            after_idle > previous,
+            "a standing reservation must refresh once the wallclock passes it: \
+             {after_idle} !> {previous}"
+        );
     }
 
     #[test]
@@ -696,31 +775,43 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_reservations_are_unique() {
-        // Two readers must never be handed the same *reserved* stamp, or both
-        // would believe they had ordered a later commit after themselves.
-        // (Readers parked on an in-flight stamp legitimately share it, so this
-        // exercises the quiescent path with no writer running.)
+    fn concurrent_reads_are_monotonic_and_a_later_commit_still_outranks_them_all() {
+        // Readers deliberately SHARE a reservation now, so uniqueness is not the
+        // property to test. What still has to hold -- and is what the
+        // reservation exists for -- is that no commit ever lands on a stamp
+        // already handed to a reader.
         let clock = Arc::new(CommitClock::new(time::now()));
         let handles: Vec<_> = (0..4)
             .map(|_| {
                 let clock = Arc::clone(&clock);
                 std::thread::spawn(move || {
-                    (0..5_000)
-                        .map(|_| clock.snapshot_for_read().expect("snapshot"))
-                        .collect::<Vec<_>>()
+                    let mut seen = Vec::with_capacity(5_000);
+                    let mut previous: Option<Timestamp> = None;
+                    for _ in 0..5_000 {
+                        let s = clock.snapshot_for_read().expect("snapshot");
+                        if let Some(p) = previous {
+                            assert!(s >= p, "a thread saw its snapshots regress: {s} < {p}");
+                        }
+                        previous = Some(s);
+                        seen.push(s);
+                    }
+                    seen
                 })
             })
             .collect();
 
-        let mut all: Vec<Timestamp> = handles
+        let all: Vec<Timestamp> = handles
             .into_iter()
             .flat_map(|h| h.join().expect("reader"))
             .collect();
-        let total = all.len();
-        all.sort();
-        all.dedup();
-        assert_eq!(all.len(), total, "reserved snapshots must be unique");
+
+        let highest = *all.iter().max().expect("snapshots");
+        let commit = commit_on(&clock);
+        assert!(
+            commit > highest,
+            "a commit landed at or below a snapshot already handed out: \
+             {commit} !> {highest}"
+        );
     }
 
     #[test]

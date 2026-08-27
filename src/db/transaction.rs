@@ -28,6 +28,17 @@ fn record_tx_mutations(tracker: Option<&Arc<PersistenceTracker>>, tx: &WriteTran
 }
 
 impl AletheiaDB {
+    /// The shared read-transaction handle bundle, built on first use.
+    fn read_handles(&self) -> &Arc<crate::api::transaction::read_tx::ReadHandles> {
+        self.read_handles.get_or_init(|| {
+            Arc::new(crate::api::transaction::read_tx::ReadHandles::new(
+                Arc::clone(&self.current),
+                Arc::clone(&self.visibility_manager),
+                Arc::clone(&self.historical),
+            ))
+        })
+    }
+
     /// Hand out a snapshot timestamp, reserving it against later commits.
     ///
     /// Delegates to [`CommitClock::snapshot_for_read`], which does this without
@@ -84,12 +95,12 @@ impl AletheiaDB {
             // `TxVisibilityManager`.
             let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
 
+            // One refcount increment, not three: the handles are bundled once
+            // and shared (see `ReadHandles`).
             Ok(ReadTransaction::new(
                 tx_id,
                 snapshot,
-                Arc::clone(&self.current),
-                Arc::clone(&self.visibility_manager),
-                Arc::clone(&self.historical),
+                Arc::clone(self.read_handles()),
             ))
         })();
         result.record_error_metric()

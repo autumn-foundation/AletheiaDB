@@ -25,7 +25,7 @@ mod tombstone_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
 
         let tx = WriteTransaction::new(
@@ -105,7 +105,7 @@ mod general_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
 
         let tx = WriteTransaction::new(
@@ -1136,7 +1136,7 @@ mod general_tests {
         // Create initial transaction to set up nodes and one edge
         let snapshot1 = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
         let mut tx1 = WriteTransaction::new(
             tx_id_gen.next(),
@@ -1168,7 +1168,7 @@ mod general_tests {
         // Create second transaction with interleaved operations
         let snapshot2 = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
         let mut tx2 = WriteTransaction::new(
             tx_id_gen.next(),
@@ -1594,7 +1594,7 @@ mod general_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
 
         let tx = WriteTransaction::new(
@@ -1677,7 +1677,7 @@ mod conflict_detection_tests {
         fn create_tx(&self) -> WriteTransaction {
             let snapshot = TransactionSnapshot {
                 snapshot_timestamp: self.current_timestamp.load(),
-                active_transactions: Arc::new(std::collections::HashSet::new()),
+                active_transactions: None,
             };
 
             WriteTransaction::new(
@@ -2986,7 +2986,7 @@ mod timestamp_ordering_tests {
         fn create_tx(&self) -> WriteTransaction {
             let snapshot = TransactionSnapshot {
                 snapshot_timestamp: self.current_timestamp.load(),
-                active_transactions: Arc::new(std::collections::HashSet::new()),
+                active_transactions: None,
             };
 
             WriteTransaction::new(
@@ -4017,7 +4017,7 @@ mod find_nodes_by_property_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
 
         let tx = WriteTransaction::new(
@@ -4068,7 +4068,7 @@ mod find_nodes_by_property_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
 
         let tx = WriteTransaction::new(
@@ -4133,7 +4133,7 @@ mod find_nodes_by_property_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
 
         let mut tx = WriteTransaction::new(
@@ -4184,7 +4184,7 @@ mod find_nodes_by_property_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
 
         let mut tx = WriteTransaction::new(
@@ -4279,7 +4279,7 @@ mod lock_poisoning_tests {
         ) -> WriteTransaction {
             let snapshot = TransactionSnapshot {
                 snapshot_timestamp: time::now(),
-                active_transactions: Arc::new(std::collections::HashSet::new()),
+                active_transactions: None,
             };
             WriteTransaction::new(
                 self.tx_id_gen.next(),
@@ -4303,7 +4303,7 @@ mod lock_poisoning_tests {
         ) -> WriteTransaction {
             let snapshot = TransactionSnapshot {
                 snapshot_timestamp: time::now(),
-                active_transactions: Arc::new(std::collections::HashSet::new()),
+                active_transactions: None,
             };
             WriteTransaction::new_with_clock_observed_at(
                 self.tx_id_gen.next(),
@@ -4514,7 +4514,7 @@ mod buffer_aware_read_tests {
         fn create_tx(&self) -> WriteTransaction {
             let snapshot = TransactionSnapshot {
                 snapshot_timestamp: self.current_timestamp.load(),
-                active_transactions: Arc::new(std::collections::HashSet::new()),
+                active_transactions: None,
             };
 
             WriteTransaction::new(

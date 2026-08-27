@@ -544,6 +544,76 @@ active set, four more `Arc` clones for the storage handles, and the
 `historical`. That is serialization point #4 territory, and worth measuring
 before assuming.
 
+## Stage 2c, as landed — the cost was refcounts, not locks
+
+With no lock left on the snapshot read path, `read_transaction()` was still
+2.2M/s at 8 threads and scaling 0.24x, against `read/current`'s 17M/s at 0.94x.
+Two diagnostics settled why, before anything was changed:
+
+- **`read/txn-only`** — open a read transaction and do no read at all. 2.18M/s
+  at 8 threads. So essentially the whole cost of a snapshot read is
+  *constructing the transaction*, not reading through it.
+- **`control/arc`** — four contended `Arc` clone+drop pairs and nothing else, no
+  database involved. 3.69M/s at 8 threads, scaling 0.17x.
+
+The control reproduces most of the cost and the same collapse in scaling. The
+bottleneck was never a lock: it was **atomic refcount traffic**. Opening a
+transaction cloned four `Arc`s — `current`, `visibility_manager`, `historical`,
+and the active-transaction set — and dropped them all again. Eight atomic
+read-modify-writes on four cache lines every thread shares.
+
+Three changes, in the order they were measured:
+
+1. **Shared reservations on the commit clock.** Every read was doing a CAS on
+   the frontier. A reservation is already strictly greater than every applied
+   commit and no commit can land on it, so a later reader can simply return it;
+   the frontier carries a `RESERVED` bit so a reader can tell a reservation it
+   may share from a commit stamp it must sort after. Only the first reader after
+   a commit — or after the wallclock ticks past the standing reservation — pays
+   a CAS. Refreshing on the wallclock is what keeps this from freezing the
+   snapshot, which would hide a fact whose valid time starts later (#3221).
+   **Measured on its own: ~6%.** Not the bottleneck either, but it makes the
+   read path load-only.
+2. **Bundled storage handles.** `current`, `visibility_manager` and `historical`
+   are never replaced after construction, so they are bundled behind one
+   `Arc<ReadHandles>`, built once and cached on the database. Three refcount
+   pairs become one. **~33%.**
+3. **Optional active set.** `TransactionSnapshot::active_transactions` is now
+   `Option<Arc<HashSet<TxId>>>`, and `capture_snapshot` returns `None` — a plain
+   atomic load of a counter, no `Arc` clone — whenever no write transaction is
+   in flight. **The largest of the three.**
+
+### Measured effect
+
+Four interleaved passes, run order alternated, medians, against Stage 2b:
+
+| workload | 1t | 2t | 4t | 8t |
+|---|---|---|---|---|
+| `read/txn-only` | 1.71x | **2.33x** | 2.19x | 2.11x |
+| `read/snapshot` | 1.34x | 1.55x | 1.64x | **1.66x** |
+| `read/snapshot` + Async writer | 1.30x | 1.51x | 1.42x | 1.40x |
+| `read/snapshot` + GroupCommit writer | 1.15x | 1.40x | 1.32x | 1.25x |
+
+Samples do not overlap on either headline row. `control/arc` is 1.00x (it is
+outside the database — a control that moved would have invalidated the
+attribution), and `read/current`, `read/borrow`, `read/disjoint` and both write
+paths are unchanged.
+
+### Cumulative, Stage 2b + 2c
+
+`read/snapshot` at 8 threads has gone from **942K/s to ~3.0M/s** across the two
+stages, and scaling from 0.31x to 0.63x. `read_transaction()` itself is 3.4µs →
+1.5µs.
+
+### What is left
+
+`read/snapshot` is still ~5x below `read/current` in absolute terms. What
+remains is one `Arc` clone, the `ReadTransaction` allocation, the `tx_id`
+generator's `fetch_add`, and whatever contention `historical` adds. Removing the
+last `Arc` means making `ReadTransaction` borrow from the database rather than
+own handles — a lifetime change to a public type, and a real API break, so it
+should be a deliberate decision rather than a performance patch.
+
 ## On connection pools
 
 You said "connection pools, not quite yet — but we're probably better off with
