@@ -614,6 +614,127 @@ last `Arc` means making `ReadTransaction` borrow from the database rather than
 own handles — a lifetime change to a public type, and a real API break, so it
 should be a deliberate decision rather than a performance patch.
 
+## Stage 3, as landed — group commit can group now
+
+Diagnosis #3 said the commit clock is held across the fsync, so no two
+transactions can ever be registered-and-unflushed at once and the batch size is
+structurally pinned at one. That was a claim about the code, not a measurement.
+Two predictions follow from it, both cheap to check, and both had to hold before
+touching the most safety-critical path in the system:
+
+1. throughput tracks `1 / max_delay_ms` — every commit waits out the whole
+   window alone;
+2. plain `Synchronous` **beats** `GroupCommit`, because a group of one gains
+   nothing from batching and pays the entire window as latency.
+
+Both held, starkly. At 8 writers: `Synchronous` 4062/s against `GroupCommit`
+749/s at 10 ms, 1404/s at 5 ms, 5068/s at 1 ms. The advertised
+"ACID + high throughput" mode was **45x slower** than the simple one, and it is
+the mode `AletheiaDB::open()` selects by default.
+
+### The change
+
+`gc.wait_for_flush(epoch)` moved out of the `current_timestamp` critical
+section: it now runs after apply and after the lock is released, rather than in
+the middle of the commit while the lock every other committer needs is still
+held. N committers reach the wait concurrently and collapse into one fsync.
+
+Ordering apply before the flush is what Postgres and friends do — log the
+record, apply to memory, flush the log, only then acknowledge — and the three
+things that could go wrong do not:
+
+- **The ACID promise is unchanged.** `commit()` still does not return until the
+  write is durable.
+- **A crash between apply and flush** loses the in-memory state too, and
+  recovery correctly omits a frame that never reached disk. No caller was told
+  the commit succeeded.
+- **A dependent transaction cannot overtake it.** The WAL flushes in LSN order,
+  so flushing through a later reader's frame necessarily flushes this one first.
+
+Issue #3413's property is preserved and slightly strengthened: the guards, the
+WAL append and apply all still run under one held lock, and the fsync no longer
+sits in the middle of that sequence.
+
+**What does change is the failure path**, and it is the one thing to weigh here:
+if the flush errors, the transaction returns `Err` with its writes already
+applied and visible, where before the error arrived pre-apply and the writes
+stayed invisible. That is the standard consequence of applying before flushing —
+a WAL flush failure means memory is ahead of the log and the database can no
+longer honour its durability contract. It affects `GroupCommit` only;
+`Synchronous` fsyncs inside `wal.commit()`, before apply, exactly as before.
+
+### Measured effect
+
+Four interleaved passes, run order alternated, medians:
+
+| writers | mode | before | after | |
+|---|---|---|---|---|
+| 8 | `GroupCommit{10ms}` | 93/s | 743/s | 7.99x |
+| 8 | `GroupCommit{5ms}` | 178/s | 1423/s | 7.99x |
+| 8 | `GroupCommit{1ms}` | 694/s | 5144/s | 7.41x |
+| 8 | `Synchronous` | 3994/s | 4045/s | 1.01x |
+| 32 | `GroupCommit{10ms}` | 93/s | 2938/s | **31.6x** |
+| 32 | `GroupCommit{5ms}` | 178/s | 5538/s | 31.0x |
+| 32 | `GroupCommit{1ms}` | 683/s | 18996/s | 27.8x |
+| 32 | `Synchronous` | 4111/s | 4128/s | 1.00x |
+
+The speedup equals the writer count, which is the mechanism showing through: the
+batch is now every waiting committer instead of exactly one. The baseline is
+**exactly 93/s on all four passes at both 8 and 32 writers** — one batch per
+10 ms window no matter how many threads are pushing. Spreads are 1.00–1.01x on
+the 32-writer rows; the samples do not come close to overlapping.
+
+`Synchronous` is unchanged, as it must be: it never used this code path.
+
+### The default is still mistuned
+
+Group commit now scales with concurrency (throughput ≈ writers / `max_delay_ms`)
+while `Synchronous` is flat at ~4100/s, fsync-bound. So the crossover depends on
+load: at 8 writers `GroupCommit` needs `max_delay_ms` ≤ 1 ms to beat
+`Synchronous`; at 32 writers ≤ 5 ms. The shipped default is **10 ms**, which
+loses to `Synchronous` at both.
+
+That is now a tuning question rather than an architectural one, but the default
+should be revisited — and the documented "~100K+/sec" for `GroupCommit` is not
+reachable at any setting measured here.
+
+### A latent bug this uncovered
+
+Landing the change turned one integration test red that had never failed:
+`concurrent_insert_and_lookup` (`tests/property_secondary_index.rs`) began
+panicking with `NodeNotFound` on an id that `find_nodes_by_property` had just
+returned. Baseline was clean over **120** runs; with the change it reproduced in
+seconds.
+
+The root cause is in `CurrentIndexes::insert_node` (`src/index/current.rs`) and
+predates all of this work: it published the node into the **property index
+before** inserting it into `self.nodes`. An index entry is a pointer to the
+node, so indexing first opens a window in which a lookup is handed an id that
+cannot be resolved. The window is two instructions wide, which is why it went
+unnoticed — at ~93 applies per second it is effectively unreachable. Once
+commits actually batch, applies run 8–30x more often and it is easy to hit.
+
+The fix is to publish the node first and the index second, capturing the prior
+label/properties for the diff beforehand (cloning them is a refcount bump —
+`PropertyMap` is `Arc`-backed — not a deep copy). A regression test drives
+`insert_node` directly, which takes the commit path out of the picture and
+reproduces the original bug in well under a second; it was confirmed to fail
+against the old ordering and pass against the new one.
+
+Worth stating plainly, because it generalises: **unblocking concurrency exposes
+races that serialization was hiding.** Anything else in this codebase that has
+only ever run behind the commit clock at ~93 writes/second is now running 8–30x
+more often, and the next stage should expect more of these rather than treat
+this one as a coincidence.
+
+### A caution about the sanity block
+
+In this run the read workloads all showed large "changes" (`read/current` 1.93x,
+`read/borrow` 1.70x) from a diff that touches only the commit path. The tell is
+`control/arc`, which also moved 1.29x — and it runs entirely outside the
+database. That block is the bimodal machine noise documented above, not an
+effect. This is precisely why the control was added.
+
 ## On connection pools
 
 You said "connection pools, not quite yet — but we're probably better off with

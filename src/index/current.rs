@@ -267,18 +267,38 @@ impl CurrentIndexes {
         // is the single choke point every hydration path funnels through
         // (create, update, replace, WAL replay, index-persistence load), so the
         // index rebuilds for free at load.
-        if !self.prop_index_enabled.is_empty() {
+        //
+        // ORDERING: the node must be published in `self.nodes` BEFORE it is
+        // published in the property index, never the other way round. The index
+        // is a pointer *to* the node, so indexing first opens a window in which
+        // `find_nodes_by_property` returns an id that `get_node` cannot resolve
+        // -- a lookup racing an insert gets `NodeNotFound` for a node the index
+        // just told it about. The window is a couple of instructions wide, and
+        // it went unnoticed because group commit could only apply ~93 writes a
+        // second; once commits actually batch it reproduces in seconds.
+        let reindex = if self.prop_index_enabled.is_empty() {
+            None
+        } else {
             let old = self.nodes.get(&node_id).map(|e| {
                 let prior = e.value();
                 (prior.label, prior.properties.clone())
             });
+            // Cloning the new label and property map is cheap -- `PropertyMap`
+            // is `Arc`-backed, so this is a refcount bump, not a deep copy --
+            // and it is what lets the node move into the map first.
+            Some((old, node.label, node.properties.clone()))
+        };
+
+        self.nodes.insert(node.id, node);
+
+        if let Some((old, new_label, new_props)) = reindex {
             let (old_label, old_props) = match &old {
                 Some((label, props)) => (Some(*label), Some(props)),
                 None => (None, None),
             };
-            self.reindex_node_property(node_id, old_label, old_props, node.label, &node.properties);
+            self.reindex_node_property(node_id, old_label, old_props, new_label, &new_props);
         }
-        self.nodes.insert(node.id, node);
+
         self.node_headers.insert(header.id, header);
         self.ns_nodes.entry(ns_id).or_default().insert(node_id);
     }
@@ -2776,6 +2796,101 @@ mod node_header_index_tests {
             indexes.filter_nodes_by_label(user_label).count(),
             1,
             "new label should match"
+        );
+    }
+}
+
+#[cfg(test)]
+mod property_index_publish_order_tests {
+    use super::*;
+    use crate::core::graph::Node;
+    use crate::core::id::{NodeId, VersionId};
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMapBuilder;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+
+    /// A secondary index entry must never be visible before the node it points
+    /// at.
+    ///
+    /// `insert_node` used to publish the property index first and the node
+    /// second, so a lookup racing an insert could be handed an id and then fail
+    /// to resolve it -- `find_nodes_by_property` returns `NodeId(n)`,
+    /// `get_node(n)` says `NodeNotFound`. The window is two instructions wide,
+    /// which is why it survived: at the commit rates group commit could reach
+    /// (~93/s, before the flush wait moved out of the commit lock) the
+    /// integration suite never hit it in 120 runs. Driving `insert_node`
+    /// directly removes the commit path from the picture and reproduces it in
+    /// well under a second.
+    #[test]
+    fn a_property_index_hit_always_resolves_to_a_node() {
+        let indexes = Arc::new(CurrentIndexes::new());
+        let label = GLOBAL_INTERNER.intern("Item").unwrap();
+        let key = GLOBAL_INTERNER.intern("batch").unwrap();
+        assert!(indexes.enable_property_index(label, key));
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let dangling = Arc::new(AtomicU64::new(0));
+        let probes = Arc::new(AtomicU64::new(0));
+
+        let writer = {
+            let indexes = Arc::clone(&indexes);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut id = 1u64;
+                while !stop.load(AtomicOrdering::Relaxed) && id < 200_000 {
+                    indexes.insert_node(Node::new(
+                        NodeId::new(id).unwrap(),
+                        label,
+                        PropertyMapBuilder::new().insert("batch", "v").build(),
+                        VersionId::new(1).unwrap(),
+                    ));
+                    id += 1;
+                }
+                id
+            })
+        };
+
+        let readers: Vec<_> = (0..3)
+            .map(|_| {
+                let indexes = Arc::clone(&indexes);
+                let stop = Arc::clone(&stop);
+                let dangling = Arc::clone(&dangling);
+                let probes = Arc::clone(&probes);
+                std::thread::spawn(move || {
+                    let vk = crate::index::property_index::value_key(
+                        &crate::core::property::PropertyValue::from("v"),
+                    )
+                    .expect("string values are indexable");
+                    while !stop.load(AtomicOrdering::Relaxed) {
+                        for id in indexes.find_nodes_by_property_indexed(label, key, &vk) {
+                            probes.fetch_add(1, AtomicOrdering::Relaxed);
+                            if indexes.get_node(id).is_none() {
+                                dangling.fetch_add(1, AtomicOrdering::Relaxed);
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        stop.store(true, AtomicOrdering::Relaxed);
+
+        let written = writer.join().expect("writer");
+        for r in readers {
+            r.join().expect("reader");
+        }
+
+        assert!(written > 1, "writer made no progress");
+        assert!(
+            probes.load(AtomicOrdering::Relaxed) > 0,
+            "readers probed nothing, so the test proved nothing"
+        );
+        assert_eq!(
+            dangling.load(AtomicOrdering::Relaxed),
+            0,
+            "the property index handed out ids that did not resolve to a node"
         );
     }
 }

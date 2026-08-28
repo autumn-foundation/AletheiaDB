@@ -336,6 +336,81 @@ fn bench_arc_control() {
     );
 }
 
+/// Does group commit actually batch?
+///
+/// The design doc claims it cannot: a committer holds the commit clock across
+/// its own fsync wait, so no second transaction can be registered-and-unflushed
+/// at the same time, and batch size is structurally pinned at one. That is a
+/// claim about the code, not a measurement. Two predictions fall out of it, and
+/// both are cheap to check:
+///
+/// 1. Throughput tracks `1 / max_delay_ms` -- every commit waits out the full
+///    window alone, so halving the window doubles throughput.
+/// 2. `Synchronous` BEATS `GroupCommit`, because a group of one gains nothing
+///    from batching and pays the whole window in latency.
+///
+/// If either fails, the diagnosis is wrong and Stage 3 needs rethinking.
+fn bench_durability_modes(threads: usize) {
+    println!("\nwrite/durability-modes  ({threads} concurrent writers)");
+    println!(
+        "  {:>34}  {:>14}  {:>12}",
+        "mode", "commits/sec", "ms/commit"
+    );
+
+    let modes: Vec<(String, DurabilityMode, usize)> = vec![
+        ("Synchronous".to_string(), DurabilityMode::Synchronous, 60),
+        (
+            "GroupCommit { max_delay_ms: 10 }".to_string(),
+            DurabilityMode::GroupCommit {
+                max_delay_ms: 10,
+                max_batch_size: 200,
+            },
+            40,
+        ),
+        (
+            "GroupCommit { max_delay_ms: 5 }".to_string(),
+            DurabilityMode::GroupCommit {
+                max_delay_ms: 5,
+                max_batch_size: 200,
+            },
+            40,
+        ),
+        (
+            "GroupCommit { max_delay_ms: 1 }".to_string(),
+            DurabilityMode::GroupCommit {
+                max_delay_ms: 1,
+                max_batch_size: 200,
+            },
+            60,
+        ),
+    ];
+
+    for (label, mode, ops) in modes {
+        let (_guard, db) = make_db(mode);
+        let db_for_body = Arc::clone(&db);
+        let rate = measure(threads, ops, move |t, i| {
+            db_for_body
+                .write(|tx| {
+                    tx.create_node(
+                        "Durability",
+                        PropertyMapBuilder::new()
+                            .insert("thread", t as i64)
+                            .insert("i", i as i64)
+                            .build(),
+                    )
+                })
+                .expect("commit");
+        });
+        println!(
+            "  {:>34}  {:>14.0}  {:>12.2}",
+            label,
+            rate,
+            1000.0 * (threads as f64) / rate
+        );
+        drop(db);
+    }
+}
+
 fn main() {
     println!(
         "AletheiaDB concurrency scaling — {} cores available",
@@ -345,6 +420,12 @@ fn main() {
     );
 
     bench_arc_control();
+
+    bench_durability_modes(8);
+    // Group commit's whole advantage is amortising one fsync over many waiting
+    // committers, so its standing against Synchronous depends on how many there
+    // are. Measure a second, higher concurrency to see where the crossover is.
+    bench_durability_modes(32);
 
     bench_reads_under_write(
         "read/snapshot+writer-async  (readers + 1 Async writer)",
