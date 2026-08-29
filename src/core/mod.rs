@@ -27,6 +27,7 @@
 
 pub mod changefeed;
 pub mod changefeed_subscription;
+pub mod commit_clock;
 pub mod constraint;
 pub mod error;
 pub mod graph;

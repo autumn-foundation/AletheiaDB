@@ -72,6 +72,9 @@ bytemuck = { version = "1.25.0", features = ["extern_crate_alloc", "derive"] }
 dashmap = "6.1"
 crc32fast = "1.4"
 parking_lot = "0.12"
+# 128-bit atomics: lock-free via cmpxchg16b (x86-64) / casp (aarch64).
+# Backs the commit clock's allocation frontier (src/core/commit_clock.rs).
+portable-atomic = { version = "1.13", features = ["fallback"] }
 # SIMD-accelerated vector distance kernels (Issue #426). Optional: enabled via
 # the `simsimd` feature (on by default). Provides runtime-dispatched x86
 # AVX2/AVX-512 AND ARM NEON/SVE kernels, replacing the crate's hand-written

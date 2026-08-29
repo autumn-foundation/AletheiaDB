@@ -4,8 +4,8 @@
 //! between current storage (fast path) and historical storage (temporal path).
 
 use crate::api::transaction::TxVisibilityManager;
+use crate::core::commit_clock::CommitClock;
 use crate::core::id::{IdGenerator, TxIdGenerator};
-use crate::core::temporal::Timestamp;
 use crate::index::temporal::TemporalIndexes;
 use crate::query::planner::Statistics;
 use crate::storage::current::CurrentStorage;
@@ -273,13 +273,22 @@ pub struct AletheiaDB {
     /// (never held while acquiring another write-path primitive).
     pub(crate) in_flight: Arc<crate::api::transaction::write::InFlightLsns>,
     /// Current logical timestamp for transaction time - Mutex-protected for thread-safe increment
-    pub(crate) current_timestamp: Arc<Mutex<Timestamp>>,
+    pub(crate) current_timestamp: Arc<CommitClock>,
     /// Monotonic observation time for adaptive forward clock-skew limits.
     pub(crate) commit_clock_observed_at: Arc<Mutex<Instant>>,
     /// Transaction ID generator for MVCC
     pub(crate) tx_id_gen: Arc<TxIdGenerator>,
     /// Transaction visibility manager for Snapshot Isolation
     pub(crate) visibility_manager: Arc<TxVisibilityManager>,
+    /// Storage handles bundled behind one `Arc`, built on first use and shared
+    /// by every read transaction.
+    ///
+    /// `current`, `historical` and `visibility_manager` are never replaced after
+    /// construction, so this is safe to cache. See `ReadHandles` for why it
+    /// exists: cloning three `Arc`s per read transaction was the dominant cost
+    /// of opening one.
+    pub(crate) read_handles:
+        std::sync::OnceLock<Arc<crate::api::transaction::read_tx::ReadHandles>>,
     /// ID generators for nodes, edges, and versions (shared with transactions)
     /// IdGenerator uses AtomicU64 internally, so no external Mutex is needed.
     pub(crate) node_id_gen: Arc<IdGenerator>,
@@ -479,11 +488,9 @@ pub struct AletheiaDB {
 
 impl std::fmt::Debug for AletheiaDB {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let current_ts = self
-            .current_timestamp
-            .try_lock()
-            .map(|ts| format!("{:?}", ts))
-            .unwrap_or_else(|_| "<locked>".to_string());
+        // Lock-free: the frontier is an atomic, so Debug never blocks and
+        // never has to render "<locked>".
+        let current_ts = format!("{:?}", self.current_timestamp.load());
 
         f.debug_struct("AletheiaDB")
             .field("current_timestamp", &current_ts)

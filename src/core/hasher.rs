@@ -1,9 +1,24 @@
-//! Optimized hasher for unique integer keys.
+//! Optimized hashers for internal integer id keys.
 //!
-//! This module provides [`IdentityHasher`], a hasher that passes through integer values
-//! unchanged. It is intended for use with `HashMap` and `HashSet` where the keys
-//! are already high-quality unique identifiers (like `NodeId`, `EdgeId`, or `InternedString`),
-//! avoiding the unnecessary overhead of hashing (SipHash).
+//! Two types, and picking the wrong one has cost real throughput before:
+//!
+//! - [`IdHashBuilder`] (backed by [`IdHasher`]) is what id-keyed maps and sets
+//!   should use. **Reach for this one.**
+//! - [`IdentityHasher`] is the raw pass-through it is built on, kept public
+//!   because it is a useful primitive, but it must not be handed to a `DashMap`
+//!   — see below.
+//!
+//! Both avoid the overhead of hashing (SipHash) keys that are already unique
+//! identifiers (like `NodeId`, `EdgeId`, or `InternedString`).
+//!
+//! # Why not just pass the id through?
+//!
+//! Because AletheiaDB's ids are *sequential*, not random, and two things read
+//! the high bits of a hash: `DashMap` chooses a shard from them, and
+//! `hashbrown` derives its SIMD control byte from them. A sequential id has no
+//! high bits set, so a pass-through hash puts **every** entry in shard 0 and
+//! gives every entry the same control byte. [`IdHasher`] adds a single
+//! finalizing multiply that fixes both while staying ~1 cycle.
 //!
 //! # The Story of IdentityHasher
 //!
@@ -44,18 +59,152 @@ use std::hash::{BuildHasherDefault, Hasher};
 const FNV_PRIME: u64 = 0x100000001b3;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 
+/// Multiplier for [`IdHasher`]'s finalizer: 2^64 / phi, rounded to the nearest
+/// odd integer. This is Knuth's multiplicative ("Fibonacci") hash constant.
+///
+/// Odd, therefore coprime with 2^64, therefore `x -> x.wrapping_mul(FIB)` is a
+/// *bijection* on `u64`. Two distinct ids can never be mapped onto the same
+/// hash, so the finalizer cannot introduce a collision that identity hashing
+/// would have avoided.
+const FIB_MULTIPLIER: u64 = 0x9E37_79B9_7F4A_7C15;
+
 /// [`BuildHasher`](std::hash::BuildHasher) for maps/sets keyed by internal,
-/// already-random ids (`NodeId`, `EdgeId`, `InternedString`, ...). Avoids
+/// sequential ids (`NodeId`, `EdgeId`, `NamespaceId`, `InternedString`, ...).
+///
+/// This is the blessed builder for id-keyed maps, and it is backed by
+/// [`IdHasher`] rather than [`IdentityHasher`] — see that type for why a raw
+/// pass-through hash is actively harmful once the map is a `DashMap`. Avoids
 /// SipHash overhead on hot-path point lookups; see [`IdentityHasher`]'s
 /// Safety Warning before using it for anything keyed by untrusted input.
-pub type IdHashBuilder = BuildHasherDefault<IdentityHasher>;
+pub type IdHashBuilder = BuildHasherDefault<IdHasher>;
 
-/// A highly optimized hasher for pre-hashed or unique integer keys.
+/// A one-multiply hasher for internal integer ids: [`IdentityHasher`] plus a
+/// finalizing multiply that moves entropy into the **high** bits.
+///
+/// # Why this exists
+///
+/// [`IdentityHasher`] returns the key unchanged, which is ideal for the *bucket
+/// index* of a hash table (that reads the low bits, and sequential ids are
+/// perfectly distributed there). It is a poor hash for the two places that read
+/// the **high** bits:
+///
+/// 1. **`DashMap` shard selection.** `DashMap` picks a shard with
+///    `(hash << 7) >> shift`, where `shift = 64 - log2(shard_amount)` — that is,
+///    from the top bits. A sequential id has none set, so with an identity hash
+///    every entry lands in shard 0 and every read and write on the map
+///    serializes on that one shard's lock. On a 16-shard map an id must exceed
+///    2^53 to reach shard 1; on a 64-core box (256 shards) fifteen out of
+///    sixteen shards were already idle before this, and 255 of 256 after.
+/// 2. **`hashbrown`'s SIMD control byte.** The top 7 bits become the per-entry
+///    tag that probing compares against. Identity-hashed sequential ids all
+///    share the tag `0`, so every probe group reports a match and falls through
+///    to a full key comparison.
+///
+/// A single `wrapping_mul` by [`FIB_MULTIPLIER`] fixes both. Because the
+/// multiplier is odd the map is a bijection, so no collision is introduced;
+/// because it is irrational-derived the high bits vary richly for inputs that
+/// differ only in the low bits.
+///
+/// # Performance
+///
+/// One integer multiply (~1 cycle) on top of [`IdentityHasher`]. Measured
+/// end-to-end through `AletheiaDB::get_node` on a 4-core box, interleaving the
+/// two builds across three passes to cancel machine drift
+/// (`examples/concurrency_scaling.rs`):
+///
+/// | threads | pass-through | `IdHasher` | |
+/// |--------:|-------------:|-----------:|--|
+/// | 1 | 17.6M/s | 17.3M/s | unchanged |
+/// | 2 | 11.6M/s | 19.7M/s | 1.69x |
+/// | 4 | 11.6M/s | 28.2M/s | 2.44x |
+/// | 8 | 11.5M/s | 28.9M/s | 2.50x |
+///
+/// Single-threaded cost is in the noise; the multiply buys back roughly what
+/// the improved control-byte distribution saves. Commit throughput is
+/// unaffected (writes are bound by the commit clock and fsync, not by hashing).
+///
+/// # Safety
+///
+/// Inherits [`IdentityHasher`]'s HashDoS exposure: an attacker who chooses keys
+/// can still force collisions, since the finalizer is a public bijection. Use
+/// it for internal ids only.
+///
+/// # Examples
+///
+/// ```rust
+/// use std::hash::{BuildHasher, Hasher};
+/// use aletheiadb::core::hasher::{IdHashBuilder, IdHasher};
+///
+/// // Distinct ids keep distinct hashes: the finalizer is a bijection.
+/// let build = IdHashBuilder::default();
+/// let hash_of = |id: u64| {
+///     let mut h = build.build_hasher();
+///     h.write_u64(id);
+///     h.finish()
+/// };
+/// assert_ne!(hash_of(1), hash_of(2));
+///
+/// // ...but unlike an identity hash, the high bits actually move.
+/// assert_ne!(hash_of(1) >> 57, hash_of(2) >> 57);
+/// # let _ = IdHasher::default();
+/// ```
+#[derive(Default)]
+pub struct IdHasher(IdentityHasher);
+
+impl Hasher for IdHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.write(bytes);
+    }
+
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.0.write_u8(i);
+    }
+
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.0.write_u16(i);
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.0.write_u32(i);
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0.write_u64(i);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.0.write_usize(i);
+    }
+
+    /// The identity hash, finalized by one multiply so the high bits vary.
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0.finish().wrapping_mul(FIB_MULTIPLIER)
+    }
+}
+
+/// A highly optimized hasher for pre-hashed or **already-random** integer keys.
 ///
 /// This hasher implements a "pass-through" strategy for `u64` and `u32` values,
 /// treating the input integer directly as the hash code. This eliminates the
 /// CPU overhead of cryptographic hash functions (like SipHash) when the keys
-/// are already high-quality random identifiers (e.g., `NodeId`, `EdgeId`, `InternedString`).
+/// are already high-quality random identifiers.
+///
+/// # Prefer [`IdHasher`] for AletheiaDB ids
+///
+/// AletheiaDB's `NodeId`/`EdgeId`/`InternedString` are allocated *sequentially*,
+/// not randomly, so they have no entropy in their high bits. Passing them
+/// through unchanged starves `DashMap`'s shard selection (every entry lands in
+/// shard 0, serializing the whole map on one lock) and `hashbrown`'s SIMD
+/// control byte. Use [`IdHashBuilder`] for those; this type is the primitive it
+/// is built from, and is appropriate directly only when the keys really are
+/// uniformly distributed over the full 64-bit range.
 ///
 /// # Performance
 ///
@@ -890,5 +1039,197 @@ mod sentinel_identity_hasher_tests {
         assert_eq!(h.finish(), 42);
         assert_ne!(h.finish(), 0);
         assert_ne!(h.finish(), 1);
+    }
+}
+
+#[cfg(test)]
+mod id_hasher_shard_distribution_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::hash::BuildHasher;
+
+    /// Mirrors `DashMap::determine_shard`, which is `pub(crate)` upstream:
+    ///
+    /// ```ignore
+    /// // dashmap-6.1.0/src/lib.rs
+    /// pub(crate) fn determine_shard(&self, hash: usize) -> usize {
+    ///     // Leave the high 7 bits for the HashBrown SIMD tag.
+    ///     (hash << 7) >> self.shift
+    /// }
+    /// ```
+    ///
+    /// `shard_amount` is `available_parallelism() * 4` rounded up to a power of
+    /// two, and `shift = 64 - log2(shard_amount)`. Reproduced here rather than
+    /// called so the invariant is pinned even though the real function is
+    /// private; if DashMap ever changes this formula, these tests describe the
+    /// property we relied on and should be revisited.
+    fn determine_shard(hash: u64, shard_amount: usize) -> usize {
+        let shift = usize::BITS as usize - shard_amount.trailing_zeros() as usize;
+        ((hash as usize) << 7) >> shift
+    }
+
+    fn hash_with<S: BuildHasher>(build: &S, id: u64) -> u64 {
+        let mut h = build.build_hasher();
+        h.write_u64(id);
+        h.finish()
+    }
+
+    fn shards_touched<S: BuildHasher>(
+        build: &S,
+        ids: impl Iterator<Item = u64>,
+        n: usize,
+    ) -> usize {
+        ids.map(|id| determine_shard(hash_with(build, id), n))
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    /// The regression this whole change exists to prevent: sequential ids must
+    /// reach more than one `DashMap` shard. With a pass-through hash they all
+    /// land in shard 0 and every operation on the map serializes on one lock.
+    #[test]
+    fn sequential_ids_spread_across_dashmap_shards() {
+        let ids = || 1u64..=10_000;
+        let fixed = BuildHasherDefault::<IdHasher>::default();
+        let broken = BuildHasherDefault::<IdentityHasher>::default();
+
+        // Checked across every plausible machine size, since `shard_amount`
+        // is derived from the core count at runtime. Bigger boxes allocate
+        // *more* shards, which made the old behavior worse, not better.
+        for shard_amount in [4usize, 16, 64, 256, 1024] {
+            let used = shards_touched(&fixed, ids(), shard_amount);
+            assert_eq!(
+                used, shard_amount,
+                "IdHasher should reach every one of {shard_amount} shards, reached {used}"
+            );
+
+            // Pin the bug itself, so this test explains what it is defending.
+            let used_broken = shards_touched(&broken, ids(), shard_amount);
+            assert_eq!(
+                used_broken, 1,
+                "a pass-through hash is expected to collapse to a single shard \
+                 (that is the bug IdHasher fixes); it reached {used_broken}"
+            );
+        }
+    }
+
+    /// The finalizer multiplies by an odd constant, which is a bijection on
+    /// `u64` — so it can never turn two distinct ids into one hash.
+    #[test]
+    fn finalizer_introduces_no_collisions() {
+        let build = BuildHasherDefault::<IdHasher>::default();
+        let seen: BTreeSet<u64> = (0u64..50_000).map(|id| hash_with(&build, id)).collect();
+        assert_eq!(seen.len(), 50_000, "IdHasher collided on distinct ids");
+    }
+
+    /// `hashbrown` derives its per-entry SIMD control byte from the top 7 bits.
+    /// Under a pass-through hash every sequential id shares the tag 0, so every
+    /// probe group false-matches and falls through to a full key comparison.
+    #[test]
+    fn sequential_ids_vary_the_hashbrown_control_byte() {
+        let fixed = BuildHasherDefault::<IdHasher>::default();
+        let broken = BuildHasherDefault::<IdentityHasher>::default();
+
+        fn distinct_tags<S: BuildHasher>(build: &S) -> usize {
+            (1u64..=1000)
+                .map(|id| hash_with(build, id) >> 57)
+                .collect::<BTreeSet<_>>()
+                .len()
+        }
+
+        let fixed_tags = distinct_tags(&fixed);
+        assert!(
+            fixed_tags > 100,
+            "expected the control byte to vary widely, got {fixed_tags} distinct tags"
+        );
+        assert_eq!(
+            distinct_tags(&broken),
+            1,
+            "pass-through hashing is expected to produce a single control byte"
+        );
+    }
+
+    /// The finalizer must not *cost* us the property identity hashing was good
+    /// at: multiplying by an odd constant is bijective modulo any power of two,
+    /// so the low bits that drive the bucket index still cover every bucket.
+    #[test]
+    fn low_bits_still_cover_every_bucket() {
+        let build = BuildHasherDefault::<IdHasher>::default();
+        for bucket_bits in [4u32, 8, 12] {
+            let buckets = 1usize << bucket_bits;
+            let mask = (buckets - 1) as u64;
+            let used: BTreeSet<u64> = (0..buckets as u64)
+                .map(|id| hash_with(&build, id) & mask)
+                .collect();
+            assert_eq!(
+                used.len(),
+                buckets,
+                "expected {buckets} distinct bucket indexes, got {}",
+                used.len()
+            );
+        }
+    }
+
+    /// The finalizer is applied exactly once, at the end, and leaves the
+    /// composite mixing `IdHasher` inherits from `IdentityHasher` untouched.
+    #[test]
+    fn finalizer_is_applied_once_over_inherited_mixing() {
+        let mut composite = IdHasher::default();
+        composite.write_u64(1);
+        composite.write_u64(2);
+
+        let mut inherited = IdentityHasher::default();
+        inherited.write_u64(1);
+        inherited.write_u64(2);
+
+        assert_eq!(
+            composite.finish(),
+            inherited.finish().wrapping_mul(FIB_MULTIPLIER),
+            "IdHasher must be exactly IdentityHasher plus one finalizing multiply"
+        );
+
+        // And it still mixes rather than letting the last write win.
+        let mut single = IdHasher::default();
+        single.write_u64(2);
+        assert_ne!(composite.finish(), single.finish());
+    }
+
+    /// **Known limitation, pre-dating `IdHasher` and deliberately not changed
+    /// here.** `IdentityHasher::update_state` assigns on the first write and
+    /// then XOR-mixes, and XOR is commutative — so a two-field composite key
+    /// hashes the same in either field order, contradicting `update_state`'s
+    /// own doc comment ("ensures that `hash((1, 2))` is not the same as
+    /// `hash((2, 1))`"). `IdHasher` inherits this.
+    ///
+    /// It is latent rather than live: no map in the crate is both tuple-keyed
+    /// *and* id-hashed (`prop_index`'s tuple-keyed outer `DashMap` uses the
+    /// default `RandomState`), so nothing currently collides. This test pins
+    /// the behavior so a future fix is a deliberate, visible change rather than
+    /// an accidental one.
+    #[test]
+    fn known_limitation_two_field_composites_ignore_field_order() {
+        let mut a = IdHasher::default();
+        a.write_u64(1);
+        a.write_u64(2);
+
+        let mut b = IdHasher::default();
+        b.write_u64(2);
+        b.write_u64(1);
+
+        assert_eq!(
+            a.finish(),
+            b.finish(),
+            "if this now differs, the inherited XOR mixing was fixed -- update \
+             this test and IdentityHasher::update_state's doc comment together"
+        );
+    }
+
+    /// Equal keys must hash equally — the contract every `HashMap` depends on.
+    #[test]
+    fn equal_keys_hash_equally() {
+        let build = BuildHasherDefault::<IdHasher>::default();
+        for id in [0u64, 1, 42, u64::MAX] {
+            assert_eq!(hash_with(&build, id), hash_with(&build, id));
+        }
     }
 }

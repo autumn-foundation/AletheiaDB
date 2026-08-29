@@ -34,7 +34,7 @@
 //! **elided** from every user-facing property view and surfaced instead as a
 //! first-class `namespace` field.
 
-use crate::core::hasher::IdentityHasher;
+use crate::core::hasher::IdHashBuilder;
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
 use dashmap::DashMap;
@@ -535,7 +535,7 @@ struct NamespaceInterner {
     /// name → id
     forward: DashMap<Box<str>, u32>,
     /// id → name (for reverse resolution in cold paths, e.g. per-namespace stats)
-    reverse: DashMap<u32, Arc<str>, BuildHasherDefault<IdentityHasher>>,
+    reverse: DashMap<u32, Arc<str>, IdHashBuilder>,
     next: AtomicU32,
 }
 

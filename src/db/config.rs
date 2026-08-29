@@ -3,6 +3,7 @@
 //! Provides AletheiaDB initialization methods, including AletheiaDB::new() and AletheiaDB::with_unified_config().
 use crate::api::transaction::TxVisibilityManager;
 use crate::config::AletheiaDBConfig;
+use crate::core::commit_clock::CommitClock;
 use crate::core::error::{Result, ResultExt, StorageError};
 use crate::core::id::{IdGenerator, TxIdGenerator};
 use crate::core::temporal::time;
@@ -312,12 +313,7 @@ fn bootstrap_timestamp(
 
 pub(crate) fn seed_startup_current_timestamp(db: &AletheiaDB) -> Result<()> {
     let startup_timestamp = bootstrap_timestamp(&db.current, &db.historical);
-    let mut current_timestamp = db.current_timestamp.lock().map_err(|_| {
-        crate::core::error::Error::Storage(StorageError::LockPoisoned {
-            resource: "current_timestamp".to_string(),
-        })
-    })?;
-    *current_timestamp = startup_timestamp;
+    db.current_timestamp.reset_to(startup_timestamp)?;
     Ok(())
 }
 
@@ -1090,10 +1086,11 @@ impl AletheiaDB {
                 temporal_indexes: Arc::new(TemporalIndexes::new()),
                 wal,
                 in_flight: Arc::new(crate::api::transaction::write::InFlightLsns::new()),
-                current_timestamp: Arc::new(Mutex::new(time::now())),
+                current_timestamp: Arc::new(CommitClock::new(time::now())),
                 commit_clock_observed_at: Arc::new(Mutex::new(Instant::now())),
                 tx_id_gen: Arc::new(TxIdGenerator::new()),
                 visibility_manager: Arc::new(TxVisibilityManager::new()),
+                read_handles: std::sync::OnceLock::new(),
                 node_id_gen: Arc::new(IdGenerator::new()),
                 edge_id_gen: Arc::new(IdGenerator::new()),
                 version_id_gen: Arc::new(IdGenerator::new()),
@@ -1832,10 +1829,11 @@ impl AletheiaDB {
                 temporal_indexes: Arc::new(TemporalIndexes::new()),
                 wal,
                 in_flight: Arc::new(crate::api::transaction::write::InFlightLsns::new()),
-                current_timestamp: Arc::new(Mutex::new(time::now())),
+                current_timestamp: Arc::new(CommitClock::new(time::now())),
                 commit_clock_observed_at: Arc::new(Mutex::new(Instant::now())),
                 tx_id_gen: Arc::new(TxIdGenerator::new()),
                 visibility_manager: Arc::new(TxVisibilityManager::new()),
+                read_handles: std::sync::OnceLock::new(),
                 node_id_gen: Arc::new(IdGenerator::new()),
                 edge_id_gen: Arc::new(IdGenerator::new()),
                 version_id_gen: Arc::new(IdGenerator::new()),

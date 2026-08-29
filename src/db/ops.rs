@@ -3197,10 +3197,7 @@ mod tests {
         /// These tests are single-threaded, so no commit can slip between
         /// the two phases.
         fn anchor_after_commits(db: &AletheiaDB) -> crate::core::temporal::Timestamp {
-            let committed = *db
-                .current_timestamp
-                .lock()
-                .expect("current_timestamp mutex poisoned");
+            let committed = db.current_timestamp.load();
             // Phase 1: anchor strictly after every committed stamp.
             let mut anchor = time::now();
             while anchor <= committed {
