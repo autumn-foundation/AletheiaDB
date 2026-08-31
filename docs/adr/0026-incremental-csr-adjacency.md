@@ -1,6 +1,7 @@
 # ADR-0026: Incremental CSR Adjacency Index
 
-**Status:** Accepted
+**Status:** Accepted (compaction scheduling superseded by
+[ADR-0060](0060-background-adjacency-maintenance.md), Issue #3810)
 **Date:** 2026-01-26
 **Implemented:** 2026-01-26
 **Deciders:** AletheiaDB Core Team
@@ -260,6 +261,13 @@ pub fn compact(&self) {
 ```
 
 ### Background Compaction Strategy
+
+> **Superseded by [ADR-0060](0060-background-adjacency-maintenance.md).** The
+> per-index scheduler below was never started by any shipping constructor, so
+> compaction never ran in a real database (Issue #3810). It is replaced by a
+> single process-wide maintenance worker with a write-quiescence trigger and a
+> duty-cycle rate limit; the `compact()` sketch below also predates the
+> publish-before-retire protocol that keeps concurrent reads from tearing.
 
 **Thread-based scheduler:**
 
