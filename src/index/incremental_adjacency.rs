@@ -1380,6 +1380,114 @@ mod tests {
         assert_eq!(index.tombstone_count(), 0);
     }
 
+    /// Retiring a tombstone while a reader still holds the pre-compaction CSR
+    /// resurrects the deleted edge: the retired CSR still contains it, and the
+    /// guard consults the tombstone map lazily while iterating, so once the
+    /// tombstone is gone that reader sees a deleted edge (Issue #3810).
+    ///
+    /// `compact()` therefore only retires tombstones once nothing can still be
+    /// reading the CSR it just replaced. Without that check the first assertion
+    /// fails: the tombstone is retired while the guard is live.
+    ///
+    /// The guard is held on a *separate* thread from the compaction. Taking a
+    /// shard guard and then the compaction lock on one thread is the deadlock
+    /// hazard documented in CLAUDE.md, because compaction's retire pass needs
+    /// the same shard.
+    #[test]
+    fn tombstones_are_not_retired_while_a_reader_holds_the_retired_csr() {
+        use crate::core::interning::InternedString;
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+
+        let index = Arc::new(IncrementalAdjacencyIndex::new());
+        let node = NodeId::new(1).unwrap();
+        let label = InternedString::from_raw(1);
+        let doomed = EdgeId::new(1).unwrap();
+
+        index.insert(
+            node,
+            AdjacencyEntry::new(NodeId::new(2).unwrap(), doomed, label),
+        );
+        index.insert(
+            node,
+            AdjacencyEntry::new(NodeId::new(3).unwrap(), EdgeId::new(2).unwrap(), label),
+        );
+        index.compact();
+        assert_eq!(index.frozen_edge_count(), 2, "setup: both edges frozen");
+        assert_eq!(index.delta_edge_count(), 0, "setup: delta drained");
+
+        index.delete(doomed);
+        assert_eq!(index.tombstone_count(), 1, "setup: one tombstone pending");
+
+        let guard_taken = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+
+        let reader = {
+            let index = Arc::clone(&index);
+            let guard_taken = Arc::clone(&guard_taken);
+            let release = Arc::clone(&release);
+            std::thread::spawn(move || {
+                // Pins the CSR that the compaction below is about to retire.
+                // The delta is empty, so this guard holds no delta shard lock
+                // and cannot block compaction's retire pass.
+                let guard = index.get_adjacency(node);
+                guard_taken.store(true, Ordering::Release);
+
+                // Bounded so a regression cannot hang the suite: on the happy
+                // path `release` is set as soon as the compaction returns.
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let mut saw_doomed = false;
+                while !release.load(Ordering::Acquire) && Instant::now() < deadline {
+                    saw_doomed |= guard.iter().any(|e| e.edge_id == doomed);
+                    std::thread::yield_now();
+                }
+                saw_doomed
+            })
+        };
+
+        // Make sure the guard really is held before compacting.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !guard_taken.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(
+            guard_taken.load(Ordering::Acquire),
+            "reader never acquired its guard"
+        );
+
+        index.compact();
+
+        // The guard is still live, so the tombstone must have been deferred
+        // rather than retired underneath it.
+        let deferred = index.tombstone_count();
+        release.store(true, Ordering::Release);
+        let saw_doomed = reader.join().expect("reader thread panicked");
+
+        assert_eq!(
+            deferred, 1,
+            "the tombstone was retired while a reader still held the retired CSR"
+        );
+        assert!(
+            !saw_doomed,
+            "the deleted edge became visible to a reader holding the retired CSR"
+        );
+
+        // Once no reader holds it, a later compaction retires the tombstone and
+        // the edge is gone for good.
+        index.compact();
+        assert_eq!(index.tombstone_count(), 0, "tombstone never retired");
+        assert_eq!(
+            index.frozen_edge_count(),
+            1,
+            "the deleted edge must be gone"
+        );
+        let remaining = index.get_adjacency(node);
+        assert!(
+            remaining.iter().all(|e| e.edge_id != doomed),
+            "the deleted edge survived compaction"
+        );
+    }
+
     /// Two compactions running at once must not lose edges (Issue #3810).
     ///
     /// Each compaction snapshots `frozen`, drains the delta into a *local*

@@ -1759,6 +1759,40 @@ mod tests {
         assert_eq!(indexes.in_degree(NodeId::new(2).unwrap()), 2);
     }
 
+    /// The two adjacency indexes compact independently, so exporting them with
+    /// two separate calls could capture an edge in one direction's frozen CSR
+    /// and not the other's -- and the restore path then reconstructed *both*
+    /// deltas from the outgoing set alone (Issue #3810).
+    ///
+    /// `export_csr_pair` holds both compaction locks across the two exports, so
+    /// the halves always describe the same edge set.
+    #[test]
+    fn export_csr_pair_captures_both_directions_at_the_same_point() {
+        let indexes = CurrentIndexes::new();
+        indexes.insert_edge(create_test_edge(0, 0, 1, "KNOWS"));
+        indexes.insert_edge(create_test_edge(1, 0, 2, "KNOWS"));
+        indexes.insert_edge(create_test_edge(2, 1, 2, "KNOWS"));
+        indexes.compact_adjacency();
+
+        let ((_, _, out_edge_ids), (_, _, in_edge_ids)) = indexes.export_csr_pair();
+
+        let mut out_sorted = out_edge_ids.clone();
+        out_sorted.sort_unstable();
+        let mut in_sorted = in_edge_ids.clone();
+        in_sorted.sort_unstable();
+
+        assert_eq!(
+            out_sorted, in_sorted,
+            "the exported outgoing and incoming CSRs must describe the same edge \
+             set; a difference is the skew export_csr_pair exists to prevent"
+        );
+        assert_eq!(
+            out_sorted,
+            vec![0, 1, 2],
+            "all three edges must be captured"
+        );
+    }
+
     #[test]
     fn test_lazy_rebuild_after_delete() {
         let indexes = CurrentIndexes::new();

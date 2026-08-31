@@ -1176,4 +1176,81 @@ mod sentry_tests {
         assert_eq!(index.node_count(), 2);
         assert_eq!(index.max_node_id(), 20);
     }
+
+    /// A persisted CSR may name an edge the persisted edge list no longer has:
+    /// the two are snapshots of a live database taken at slightly different
+    /// instants, so an edge deleted in between is in one and not the other.
+    ///
+    /// Such an entry must be DROPPED, not materialized (Issue #3810). Before
+    /// the fix it became `AdjacencyEntry::new(NodeId(0), edge_id, from_raw(0))`
+    /// -- a phantom adjacency to node 0 under label 0, conjured on restore --
+    /// and because the placeholder kept its slot, every following node's
+    /// offsets still pointed at it.
+    #[test]
+    fn import_csr_drops_entries_whose_edge_is_absent_and_rebuilds_offsets() {
+        // Node 10 owns edges 100, 101; node 20 owns edge 102.
+        let node_ids: Vec<u64> = vec![10, 20];
+        let offsets: Vec<u64> = vec![0, 2, 3];
+        let edge_ids: Vec<u64> = vec![100, 101, 102];
+
+        // Edge 101 is missing from the edge list: deleted after the CSR
+        // snapshot was taken, its tombstone not yet compacted away.
+        let mut edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
+        let target = NodeId::new(99).unwrap();
+        let label = crate::core::interning::InternedString::from_raw(1);
+        edges_map.insert(EdgeId::new(100).unwrap(), (target, label));
+        edges_map.insert(EdgeId::new(102).unwrap(), (target, label));
+
+        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+
+        // The absent edge is gone, not replaced by a placeholder.
+        assert_eq!(index.edge_count(), 2, "the absent edge must be dropped");
+
+        // No phantom: nothing points at node 0 under label 0, and edge 101
+        // appears nowhere.
+        let node_10 = index.get_adjacency(NodeId::new(10).unwrap());
+        let node_20 = index.get_adjacency(NodeId::new(20).unwrap());
+        for entry in node_10.iter().chain(node_20.iter()) {
+            assert_ne!(
+                entry.target,
+                NodeId::new_unchecked(0),
+                "phantom adjacency to node 0 materialized on import"
+            );
+            assert_ne!(
+                entry.edge_id,
+                EdgeId::new(101).unwrap(),
+                "the absent edge leaked into the index"
+            );
+        }
+
+        // Offsets were rebuilt around the hole rather than left pointing past
+        // it: node 10 keeps only edge 100, and node 20 still resolves to 102
+        // (with stale offsets it would have read the dropped slot instead).
+        assert_eq!(node_10.len(), 1, "node 10 keeps only its surviving edge");
+        assert_eq!(node_10[0].edge_id, EdgeId::new(100).unwrap());
+        assert_eq!(node_20.len(), 1, "node 20's edge must not be shifted away");
+        assert_eq!(node_20[0].edge_id, EdgeId::new(102).unwrap());
+    }
+
+    /// The all-present path must not drop anything -- guards the `dropped`
+    /// bookkeeping in the opposite direction from the test above.
+    #[test]
+    fn import_csr_keeps_every_entry_when_no_edge_is_absent() {
+        let node_ids: Vec<u64> = vec![10, 20];
+        let offsets: Vec<u64> = vec![0, 2, 3];
+        let edge_ids: Vec<u64> = vec![100, 101, 102];
+
+        let mut edges_map = HashMap::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
+        let target = NodeId::new(99).unwrap();
+        let label = crate::core::interning::InternedString::from_raw(1);
+        for id in [100u64, 101, 102] {
+            edges_map.insert(EdgeId::new(id).unwrap(), (target, label));
+        }
+
+        let index = AdjacencyIndex::import_csr(node_ids, offsets, edge_ids, &edges_map);
+
+        assert_eq!(index.edge_count(), 3);
+        assert_eq!(index.get_adjacency(NodeId::new(10).unwrap()).len(), 2);
+        assert_eq!(index.get_adjacency(NodeId::new(20).unwrap()).len(), 1);
+    }
 }
