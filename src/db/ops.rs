@@ -1207,6 +1207,43 @@ impl AletheiaDB {
         self.current.get_edge_source(edge_id).record_error_metric()
     }
 
+    /// Layer occupancy of the two current-state adjacency indexes (Issue #3810).
+    ///
+    /// Adjacency reads (`get_outgoing_edges`, `get_incoming_edges`, traversal)
+    /// take the frozen-CSR fast path only while both indexes are compacted --
+    /// i.e. while `stats.is_fully_compacted()` holds. Background maintenance
+    /// restores that state on its own shortly after writes go quiet; this is
+    /// how you observe it.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use aletheiadb::AletheiaDB;
+    /// let db = AletheiaDB::new()?;
+    /// let stats = db.adjacency_stats();
+    /// assert_eq!(stats.outgoing.frozen_edges, 0);
+    /// assert!(stats.is_fully_compacted());
+    /// # Ok::<(), aletheiadb::Error>(())
+    /// ```
+    pub fn adjacency_stats(&self) -> crate::index::current::AdjacencyIndexStats {
+        self.current.adjacency_stats()
+    }
+
+    /// Merge the adjacency delta buffers into the frozen CSR now (Issue #3810).
+    ///
+    /// Background maintenance does this automatically once writes go quiet, so
+    /// an application normally never needs to call it. It is useful to force a
+    /// deterministic state: right after a bulk load, before benchmarking reads,
+    /// or when background maintenance is disabled via
+    /// [`AdjacencyMaintenanceConfig::disabled`](crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig::disabled).
+    ///
+    /// Cost is O(E log E) in the number of edges; reads and writes stay
+    /// lock-free and correct throughout (readers keep using the previous frozen
+    /// CSR until the new one is swapped in atomically).
+    pub fn compact_adjacency(&self) {
+        self.current.compact_adjacency();
+    }
+
     /// Get outgoing edges from a node (current state).
     pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         self.current.get_outgoing_edges(node_id)

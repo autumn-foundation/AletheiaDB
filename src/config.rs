@@ -1066,6 +1066,13 @@ pub struct AletheiaDBConfig {
     /// unset), so a database's behavior is unchanged unless an operator opts
     /// in. See [`ReplicationConfig`] for what each field wires up.
     pub replication: ReplicationConfig,
+    /// Background adjacency-index maintenance (Issue #3810). **Enabled by
+    /// default**: a shared, process-wide worker compacts the delta buffer into
+    /// the frozen CSR once writes go quiet, which is the only way reads reach
+    /// the ADR-0026 frozen fast path. Disable with
+    /// [`AdjacencyMaintenanceConfig::disabled`] to keep compaction strictly
+    /// explicit (`AletheiaDB::compact_adjacency`).
+    pub adjacency: crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig,
 }
 
 /// Builder for unified database configuration.
@@ -1106,6 +1113,15 @@ impl AletheiaDBConfigBuilder {
     /// Set persistence configuration.
     pub fn persistence(mut self, persistence_config: PersistenceConfig) -> Self {
         self.config.persistence = persistence_config;
+        self
+    }
+
+    /// Set the background adjacency-maintenance policy (Issue #3810).
+    pub fn adjacency(
+        mut self,
+        adjacency_config: crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig,
+    ) -> Self {
+        self.config.adjacency = adjacency_config;
         self
     }
 

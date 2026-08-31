@@ -21,6 +21,7 @@ use arc_swap::{ArcSwap, Guard};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use dashmap::mapref::one::Ref;
+use parking_lot::Mutex;
 use smallvec::SmallVec;
 
 use crate::core::hasher::IdHashBuilder;
@@ -57,9 +58,57 @@ pub struct IncrementalAdjacencyIndex {
     /// Configuration
     config: IncrementalConfig,
 
+    /// True while compaction has published a new frozen CSR whose absorbed
+    /// delta entries have not been retired yet (Issue #3810).
+    ///
+    /// Compaction publishes the new CSR **before** retiring the delta entries it
+    /// merged (see [`compact`](Self::compact) for why the opposite order tears
+    /// reads). For that window an entry can be in *both* layers, so readers
+    /// must not emit it twice. This flag is a pure performance gate: when it is
+    /// set, a delta entry is emitted only if the frozen slice being read does
+    /// not already contain it. A stale `true` costs one extra binary search; a
+    /// stale `false` is impossible for a reader that has already loaded the new
+    /// CSR, because the flag is set before that CSR is published and cleared
+    /// only after every absorbed entry has been retired.
+    publish_window: AtomicBool,
+
+    /// Serializes [`compact`](Self::compact) with itself.
+    ///
+    /// Compaction snapshots `frozen`, drains `delta`/`tombstones` into local
+    /// buffers, rebuilds a new CSR from that snapshot, and stores it. Two
+    /// compactions running concurrently would each snapshot the *same* frozen
+    /// CSR while only one of them drains a given delta entry -- the later store
+    /// then overwrites the earlier one and the drained edges are **lost**
+    /// (Issue #3810). Reads and writes are unaffected: this lock is taken only
+    /// by compaction, never on the read or insert path.
+    compaction_lock: Mutex<()>,
+
     /// Test-only: Force panic during next compaction (hidden from public API)
     #[doc(hidden)]
     test_panic_on_compact: AtomicBool,
+}
+
+/// Occupancy of one adjacency index's two layers (Issue #3810).
+///
+/// The frozen-CSR read fast path ([`IncrementalAdjacencyIndex::frozen_view`])
+/// is available exactly when `delta_edges == 0 && tombstones == 0`, so this
+/// snapshot is the direct observable for "are reads on the fast path?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AdjacencyLayerStats {
+    /// Edges in the immutable frozen CSR.
+    pub frozen_edges: usize,
+    /// Edges in the mutable delta buffer, not yet merged into the frozen CSR.
+    pub delta_edges: usize,
+    /// Pending deletions not yet applied to the frozen CSR.
+    pub tombstones: usize,
+}
+
+impl AdjacencyLayerStats {
+    /// Whether reads of this index take the frozen-CSR fast path.
+    #[inline]
+    pub fn is_compacted(&self) -> bool {
+        self.delta_edges == 0 && self.tombstones == 0
+    }
 }
 
 /// Tombstone record for deleted edges with temporal metadata.
@@ -155,6 +204,8 @@ impl IncrementalAdjacencyIndex {
                 ..AdjacencyStats::new()
             },
             config,
+            publish_window: AtomicBool::new(false),
+            compaction_lock: Mutex::new(()),
             test_panic_on_compact: AtomicBool::new(false),
         }
     }
@@ -198,6 +249,15 @@ impl IncrementalAdjacencyIndex {
     /// If you need to preserve existing data, use `try_import_frozen_csr` instead which
     /// returns an error if data would be lost.
     pub fn import_frozen_csr(&self, frozen_csr: Arc<AdjacencyIndex>) {
+        // Serialized against compaction (Issue #3810): a background compaction
+        // publishing a CSR rebuilt from the pre-import layers would otherwise
+        // overwrite the imported one.
+        let _serialize = self.compaction_lock.lock();
+        self.import_frozen_csr_locked(frozen_csr);
+    }
+
+    /// The import body. Callers must hold `compaction_lock`.
+    fn import_frozen_csr_locked(&self, frozen_csr: Arc<AdjacencyIndex>) {
         // Replace frozen CSR
         self.frozen.store(frozen_csr);
 
@@ -224,6 +284,11 @@ impl IncrementalAdjacencyIndex {
     /// - `Ok(())` if import succeeded (delta and tombstones were empty)
     /// - `Err(String)` describing uncommitted data that would be lost
     pub fn try_import_frozen_csr(&self, frozen_csr: Arc<AdjacencyIndex>) -> Result<(), String> {
+        // Hold the compaction lock across the check AND the import so a
+        // concurrent compaction cannot empty the delta between them
+        // (Issue #3810). `import_frozen_csr` re-locks; the lock is not
+        // re-entrant, so the check is inlined here instead.
+        let _serialize = self.compaction_lock.lock();
         let delta_count = self.delta.len();
         let tombstone_count = self.tombstones.len();
 
@@ -235,7 +300,7 @@ impl IncrementalAdjacencyIndex {
             ));
         }
 
-        self.import_frozen_csr(frozen_csr);
+        self.import_frozen_csr_locked(frozen_csr);
         Ok(())
     }
 
@@ -247,6 +312,19 @@ impl IncrementalAdjacencyIndex {
     /// Get tombstone count.
     pub fn tombstone_count(&self) -> usize {
         self.stats.tombstone_count.load(Ordering::Relaxed)
+    }
+
+    /// Snapshot this index's layer occupancy (Issue #3810).
+    ///
+    /// The three counters are read independently and are not a consistent
+    /// snapshot under concurrent writes -- they are progress/observability
+    /// counters, not a transactional view.
+    pub fn layer_stats(&self) -> AdjacencyLayerStats {
+        AdjacencyLayerStats {
+            frozen_edges: self.frozen_edge_count(),
+            delta_edges: self.delta_edge_count(),
+            tombstones: self.tombstone_count(),
+        }
     }
 
     /// Insert an edge into the delta buffer. O(1) amortized.
@@ -297,32 +375,59 @@ impl IncrementalAdjacencyIndex {
     /// **Fast Path Optimization**: If delta and tombstones are globally empty
     /// (common after compaction), skips expensive DashMap lookups entirely.
     /// This reduces hot-path overhead from ~40ns to ~10ns.
+    ///
+    /// # Read order is load-bearing (Issue #3810)
+    ///
+    /// Compaction moves edges from the delta buffer into the frozen CSR --
+    /// two structures a reader observes with separate loads. The order of those
+    /// loads is what keeps the pair consistent:
+    ///
+    /// - **Fast path: counters before frozen.** Compaction decrements the layer
+    ///   counters only *after* publishing the new CSR, so observing zero here
+    ///   (acquire) proves the CSR loaded next already contains everything the
+    ///   delta held. Loading frozen first would let a reader pair a
+    ///   pre-compaction CSR with a post-retire (empty) delta and return an
+    ///   adjacency list missing every edge -- on a freshly built graph, an
+    ///   **empty** one.
+    /// - **Merged path: delta before frozen.** Same reasoning without the
+    ///   counters: an entry missing from the delta read must already have been
+    ///   retired, which happens strictly after the CSR carrying it was
+    ///   published, so the CSR loaded afterwards has it. Taking the delta
+    ///   reference first also pins that shard against retirement for as long as
+    ///   the guard lives.
+    /// - **Merged path: publish window after frozen.** The window flag is set
+    ///   before the new CSR is published, so a reader holding the new CSR is
+    ///   guaranteed to see the flag and de-duplicate the entries the CSR and
+    ///   the delta momentarily share.
     pub fn get_adjacency(&self, node: NodeId) -> MergedAdjacencyGuard<'_> {
-        let frozen_guard = self.frozen.load();
-
-        // Fast path: if no delta and no tombstones globally, skip DashMap lookups
-        // Uses relaxed ordering since we're just checking for optimization, not correctness
-        let delta_empty = self.stats.delta_edge_count.load(Ordering::Relaxed) == 0;
-        let tombstones_empty = self.stats.tombstone_count.load(Ordering::Relaxed) == 0;
+        // Fast path: if no delta and no tombstones globally, skip DashMap lookups.
+        // Acquire (not relaxed): this is the synchronisation edge described
+        // above, not just an optimisation hint.
+        let delta_empty = self.stats.delta_edge_count.load(Ordering::Acquire) == 0;
+        let tombstones_empty = self.stats.tombstone_count.load(Ordering::Acquire) == 0;
 
         if delta_empty && tombstones_empty {
             return MergedAdjacencyGuard {
                 node,
-                frozen: frozen_guard,
+                frozen: self.frozen.load(),
                 delta: None,
                 tombstones: &self.tombstones,
+                publish_window: false,
                 fast_path: true, // Skip per-edge tombstone checks
                 tombstones_empty: true,
             };
         }
 
         let delta_guard = self.delta.get(&node);
+        let frozen_guard = self.frozen.load();
+        let publish_window = self.publish_window.load(Ordering::Acquire);
 
         MergedAdjacencyGuard {
             node,
             frozen: frozen_guard,
             delta: delta_guard,
             tombstones: &self.tombstones,
+            publish_window,
             fast_path: false,
             // Delta may be non-empty (forcing the merged path below), but
             // tombstones can independently still be globally empty -- e.g.
@@ -367,13 +472,61 @@ impl IncrementalAdjacencyIndex {
 
     /// Compact delta into frozen, rebuilding the CSR. O(E log E).
     ///
-    /// This merges all edges from frozen + delta (excluding tombstones) into
-    /// a new frozen CSR, then atomically swaps it. The delta and tombstones
-    /// are cleared after compaction.
+    /// Merges frozen + delta (excluding tombstones) into a new CSR, publishes
+    /// it, then retires the delta entries and tombstones that went into it.
+    /// Readers stay lock-free throughout: they keep using the previous CSR
+    /// until the new one is published, and never block on this call.
     ///
-    /// Readers can continue accessing the old frozen CSR during compaction
-    /// thanks to ArcSwap's lock-free design.
+    /// # Publish order (Issue #3810)
+    ///
+    /// The order below is a correctness contract, not an implementation
+    /// detail. Compaction moves edges between two structures a reader observes
+    /// separately, so *some* window is unavoidable; the question is which one:
+    ///
+    /// - **Retire the delta first, publish the CSR second** (the original
+    ///   order) leaves a window in which the delta no longer holds an edge and
+    ///   the published CSR does not hold it yet. A reader landing there returns
+    ///   an adjacency list **missing** those edges -- on a freshly built graph,
+    ///   where every edge is still in the delta, it returns an **empty** list.
+    ///   That window is as long as the O(E log E) rebuild.
+    /// - **Publish the CSR first, retire the delta second** (this order) leaves
+    ///   a window in which an edge is in *both* -- a duplicate, not a loss --
+    ///   and a duplicate is filterable: [`merged_into_frozen`] names exactly
+    ///   those edge ids for the length of the window, and readers filter them
+    ///   the same way they filter tombstones.
+    ///
+    /// Retiring is therefore selective (only the entries this compaction
+    /// merged), so writes that land mid-compaction stay in the delta rather
+    /// than being dropped.
+    ///
+    /// Serialized with itself by `compaction_lock`: two concurrent compactions
+    /// would each rebuild from the same frozen CSR while only one of them
+    /// retired a given delta entry, and the later publish would drop the
+    /// other's edges.
     pub fn compact(&self) {
+        let _serialize = self.compaction_lock.lock();
+        self.compact_locked();
+    }
+
+    /// Compact only if no other compaction is in flight. Returns whether this
+    /// call performed the compaction.
+    ///
+    /// Used by the background maintenance worker (Issue #3810): when an
+    /// explicit [`compact`](Self::compact) is already running the delta is
+    /// already being drained, and queueing behind it would only delay the
+    /// worker's other indexes.
+    pub fn try_compact(&self) -> bool {
+        match self.compaction_lock.try_lock() {
+            Some(_serialize) => {
+                self.compact_locked();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The compaction body. Callers must hold `compaction_lock`.
+    fn compact_locked(&self) {
         // Test-only panic injection for testing panic recovery (hidden from public API)
         if self.test_panic_on_compact.swap(false, Ordering::Relaxed) {
             panic!("Test-injected panic during compaction");
@@ -386,41 +539,28 @@ impl IncrementalAdjacencyIndex {
         // while the old one, delta, and tombstones are still in memory.
         // Peak memory ~ 2 * (frozen + delta).
 
-        // 1. Drain Tombstones
-        // We use a local set to filter edges during this compaction.
-        // Using DashMap::retain to remove them from the main set.
+        // 1. SNAPSHOT tombstones (copy, do not remove yet).
+        //    Removing them here would resurrect a deleted edge for the length of
+        //    the rebuild: the old CSR still holds it and nothing would filter it.
         let mut local_tombstones = HashSet::new();
-        self.tombstones.retain(|edge_id, _| {
-            local_tombstones.insert(*edge_id);
-            false // Remove from main map
-        });
-        // Subtract drained tombstones from stats
-        self.stats
-            .tombstone_count
-            .fetch_sub(local_tombstones.len(), Ordering::Relaxed);
+        for entry in self.tombstones.iter() {
+            local_tombstones.insert(*entry.key());
+        }
 
-        // 2. Drain Delta
-        // Use retain to atomically move entries from DashMap to local buffer.
-        // This prevents race conditions where new edges inserted during iteration
-        // would be lost by a subsequent clear().
+        // 2. SNAPSHOT delta (copy, do not remove yet). Entries inserted after
+        //    this snapshot are simply not part of this compaction and stay in
+        //    the delta, visible to readers throughout.
         let delta_count_estimate = self.stats.delta_edge_count.load(Ordering::Relaxed);
         let mut local_delta = Vec::with_capacity(delta_count_estimate);
-        let mut drained_edge_count = 0;
-
-        self.delta.retain(|source, edges| {
-            for entry in edges.iter() {
-                local_delta.push((*source, *entry));
-                drained_edge_count += 1;
+        for entry in self.delta.iter() {
+            let source = *entry.key();
+            for adj in entry.value().iter() {
+                local_delta.push((source, *adj));
             }
-            false // Remove from main map
-        });
-        // Subtract drained delta edges from stats
-        self.stats
-            .delta_edge_count
-            .fetch_sub(drained_edge_count, Ordering::Relaxed);
+        }
 
         // Estimate capacity: frozen + delta (we don't subtract tombstones to stay safe)
-        let estimated_capacity = frozen.edge_count() + drained_edge_count;
+        let estimated_capacity = frozen.edge_count() + local_delta.len();
         let mut all_edges = Vec::with_capacity(estimated_capacity);
 
         // 3. Collect edges from frozen (excluding tombstones)
@@ -434,11 +574,11 @@ impl IncrementalAdjacencyIndex {
             }
         }
 
-        // 4. Collect edges from delta (filtering with local_tombstones)
-        // Note: Delta might contain edges that were also tombstoned just before drain
-        for (source, adj) in local_delta {
+        // 4. Collect edges from the delta snapshot (filtering with local_tombstones)
+        // Note: Delta might contain edges that were also tombstoned just before the snapshot
+        for (source, adj) in &local_delta {
             if !local_tombstones.contains(&adj.edge_id) {
-                all_edges.push((source, adj.target, adj.edge_id, adj.label));
+                all_edges.push((*source, adj.target, adj.edge_id, adj.label));
             }
         }
 
@@ -446,16 +586,104 @@ impl IncrementalAdjacencyIndex {
         let new_frozen = AdjacencyIndex::build(all_edges);
         let new_edge_count = new_frozen.edge_count();
 
-        // 6. Atomic swap (lock-free for readers!)
-        self.frozen.store(Arc::new(new_frozen));
+        // 6. Open the publish window BEFORE swapping the CSR in, so any reader
+        //    that observes the new CSR also observes the instruction to
+        //    de-duplicate the delta entries that CSR already contains.
+        let window = !local_delta.is_empty();
+        if window {
+            self.publish_window.store(true, Ordering::Release);
+        }
 
-        // 7. Update statistics
+        // 7. Atomic swap (lock-free for readers!)
+        self.frozen.store(Arc::new(new_frozen));
         self.stats
             .frozen_edge_count
             .store(new_edge_count, Ordering::Release);
+
+        // 8. Retire exactly what this compaction merged. Selective, so a write
+        //    that landed after the snapshot survives in the delta.
+        let retired_delta = self.retire_delta(&local_delta);
+        let retired_tombstones = self.retire_tombstones(&local_tombstones);
+
+        // 9. Only now drop the counters. A reader that sees them at zero is
+        //    guaranteed (release/acquire) to see the published CSR *and* a
+        //    delta with nothing left to merge, which is what makes the
+        //    `get_adjacency` / `frozen_view` fast path safe.
+        if retired_delta > 0 {
+            self.stats
+                .delta_edge_count
+                .fetch_sub(retired_delta, Ordering::Release);
+        }
+        if retired_tombstones > 0 {
+            self.stats
+                .tombstone_count
+                .fetch_sub(retired_tombstones, Ordering::Release);
+        }
+
+        // 10. Close the publish window: the delta no longer holds anything the
+        //     CSR also holds.
+        if window {
+            self.publish_window.store(false, Ordering::Release);
+        }
+
         self.stats
             .last_compaction
             .store(Utc::now().timestamp() as u64, Ordering::Release);
+    }
+
+    /// Remove exactly the delta entries listed in `merged` (compaction step 8).
+    ///
+    /// Returns how many entries were actually removed, which is what the delta
+    /// counter is decremented by -- never the snapshot's length, so a
+    /// concurrently retried/duplicated removal can never underflow the counter.
+    fn retire_delta(&self, merged: &[(NodeId, AdjacencyEntry)]) -> usize {
+        let mut retired = 0usize;
+        let mut per_node: Vec<(NodeId, HashSet<EdgeId, IdHashBuilder>)> = Vec::new();
+        for (source, adj) in merged {
+            match per_node.last_mut() {
+                Some((node, ids)) if *node == *source => {
+                    ids.insert(adj.edge_id);
+                }
+                _ => {
+                    let mut ids = HashSet::with_hasher(IdHashBuilder::default());
+                    ids.insert(adj.edge_id);
+                    per_node.push((*source, ids));
+                }
+            }
+        }
+
+        for (source, ids) in per_node {
+            // The `get_mut` guard is dropped before `remove_if`, which re-checks
+            // emptiness under the shard write lock, so a concurrent insert can
+            // never lose its entry (same pattern as the namespace index).
+            let now_empty = match self.delta.get_mut(&source) {
+                Some(mut entries) => {
+                    let before = entries.len();
+                    entries.retain(|entry| !ids.contains(&entry.edge_id));
+                    retired += before - entries.len();
+                    entries.is_empty()
+                }
+                None => false,
+            };
+            if now_empty {
+                self.delta
+                    .remove_if(&source, |_, entries| entries.is_empty());
+            }
+        }
+        retired
+    }
+
+    /// Remove exactly the tombstones listed in `merged` (compaction step 8).
+    ///
+    /// Returns how many were actually removed.
+    fn retire_tombstones(&self, merged: &HashSet<EdgeId>) -> usize {
+        let mut retired = 0usize;
+        for edge_id in merged {
+            if self.tombstones.remove(edge_id).is_some() {
+                retired += 1;
+            }
+        }
+        retired
     }
 
     /// Get a frozen-only view for read transactions (hot path optimization).
@@ -485,11 +713,18 @@ impl IncrementalAdjacencyIndex {
     /// }
     /// ```
     pub fn frozen_view(&self) -> Option<FrozenAdjacencyView> {
-        // Only available when delta and tombstones are empty
-        if self.stats.delta_edge_count.load(Ordering::Relaxed) > 0 {
+        // Only available when delta and tombstones are empty.
+        //
+        // Acquire, and strictly BEFORE loading `frozen`: compaction drops these
+        // counters only after publishing the new CSR, so reading zero here is
+        // what proves the CSR loaded below is not the pre-compaction one.
+        // Loading `frozen` first would let this return a view missing every
+        // edge a concurrent compaction had just retired from the delta
+        // (Issue #3810).
+        if self.stats.delta_edge_count.load(Ordering::Acquire) > 0 {
             return None;
         }
-        if self.stats.tombstone_count.load(Ordering::Relaxed) > 0 {
+        if self.stats.tombstone_count.load(Ordering::Acquire) > 0 {
             return None;
         }
 
@@ -538,6 +773,12 @@ pub struct MergedAdjacencyGuard<'a> {
     frozen: Guard<Arc<AdjacencyIndex>>,
     delta: Option<Ref<'a, NodeId, SmallVec<[AdjacencyEntry; 8]>>>,
     tombstones: &'a DashMap<EdgeId, Tombstone, IdHashBuilder>,
+    /// Whether a compaction publish window was open when this guard was built
+    /// (Issue #3810): the frozen CSR below may already contain entries the
+    /// delta below still holds, so the delta half is de-duplicated against the
+    /// frozen slice. False in the overwhelmingly common case -- see
+    /// [`IncrementalAdjacencyIndex::compact`].
+    publish_window: bool,
     /// True if both delta and tombstones are globally empty, allowing
     /// `fast_len()` to return the frozen count in O(1) without iterating.
     fast_path: bool,
@@ -546,6 +787,22 @@ pub struct MergedAdjacencyGuard<'a> {
     /// the per-edge tombstone lookup even when the merged (non-frozen-view)
     /// path is taken because delta has pending edges.
     tombstones_empty: bool,
+}
+
+/// Whether `slice` (one node's frozen adjacency run) already contains `entry`.
+///
+/// Frozen runs are produced by [`AdjacencyIndex::build`], which sorts by
+/// `(source, target, edge_id)`, so within one node's run the key
+/// `(target, edge_id)` is sorted and this is a binary search. The CSR import
+/// path preserves that order, so the invariant holds for persisted indexes too.
+/// Should a run ever be unsorted, the search can only fail to find a present
+/// entry (it never reports a match that is not there), so the worst case is a
+/// duplicate inside a compaction publish window, never a lost edge.
+#[inline]
+fn frozen_slice_contains(slice: &[AdjacencyEntry], entry: &AdjacencyEntry) -> bool {
+    slice
+        .binary_search_by(|probe| (probe.target, probe.edge_id).cmp(&(entry.target, entry.edge_id)))
+        .is_ok()
 }
 
 /// Two-variant iterator letting `MergedAdjacencyGuard::iter()` pick, once per
@@ -576,7 +833,8 @@ where
 impl<'a> MergedAdjacencyGuard<'a> {
     /// Iterate over all adjacency entries (frozen + delta, excluding tombstones).
     ///
-    /// **Fast Path**: whenever tombstones are globally empty (even if delta is
+    /// **Fast Path**: whenever tombstones are globally empty and no compaction
+    /// publish window is open (even if delta is
     /// not — e.g. a graph with pending uncompacted edges but zero deletes ever
     /// issued), this returns the raw frozen+delta chain with no `Filter`
     /// adapter at all, rather than a `Filter` whose predicate is a
@@ -586,14 +844,27 @@ impl<'a> MergedAdjacencyGuard<'a> {
     pub fn iter(&self) -> impl Iterator<Item = &AdjacencyEntry> + '_ {
         let frozen_slice = self.frozen.get_adjacency(self.node);
         let delta_slice = self.delta_slice();
-        let base = frozen_slice.iter().chain(delta_slice.iter());
 
-        if self.tombstones_empty {
-            AdjacencyIter::Unfiltered(base)
-        } else {
-            let tombstones = self.tombstones;
-            AdjacencyIter::Filtered(base.filter(move |e| !tombstones.contains_key(&e.edge_id)))
+        if self.tombstones_empty && !self.publish_window {
+            return AdjacencyIter::Unfiltered(frozen_slice.iter().chain(delta_slice.iter()));
         }
+
+        let tombstones = self.tombstones;
+        let tombstones_empty = self.tombstones_empty;
+        let publish_window = self.publish_window;
+
+        let live_frozen = frozen_slice
+            .iter()
+            .filter(move |e| tombstones_empty || !tombstones.contains_key(&e.edge_id));
+        // The delta half additionally drops entries the frozen slice already
+        // carries: inside a compaction publish window the two layers overlap
+        // for exactly the entries that were just absorbed.
+        let live_delta = delta_slice.iter().filter(move |e| {
+            (tombstones_empty || !tombstones.contains_key(&e.edge_id))
+                && !(publish_window && frozen_slice_contains(frozen_slice, e))
+        });
+
+        AdjacencyIter::Filtered(live_frozen.chain(live_delta))
     }
 
     /// Get the number of adjacency entries (frozen + delta, excluding tombstones).
@@ -647,6 +918,10 @@ impl<'a> MergedAdjacencyGuard<'a> {
     }
 
     /// Fast path: if no delta and no tombstones, return frozen slice directly.
+    ///
+    /// A compaction publish window does not disqualify this: the window only
+    /// duplicates entries that are in *both* layers, and this path is taken
+    /// only when this node has no delta entries at all.
     #[inline]
     pub fn as_slice(&self) -> Option<&[AdjacencyEntry]> {
         if self.delta.is_none() && self.tombstones.is_empty() {
@@ -874,6 +1149,93 @@ mod tests {
         assert_eq!(index.frozen_edge_count(), 0);
         assert_eq!(index.delta_edge_count(), 0);
         assert_eq!(index.tombstone_count(), 0);
+    }
+
+    /// Two compactions running at once must not lose edges (Issue #3810).
+    ///
+    /// Each compaction snapshots `frozen`, drains the delta into a *local*
+    /// buffer, and stores a rebuilt CSR. Without serialization, both snapshot
+    /// the same frozen CSR while only one drains a given delta entry, and the
+    /// later store silently drops the other's edges. Background maintenance
+    /// makes this interleaving reachable in production (the worker can run
+    /// while an explicit `compact_adjacency()` is in flight).
+    #[test]
+    fn concurrent_compaction_does_not_lose_edges() {
+        use crate::core::interning::InternedString;
+        use std::sync::atomic::AtomicBool;
+
+        const EDGES: u64 = 4_000;
+
+        let index = Arc::new(IncrementalAdjacencyIndex::new());
+        let node = NodeId::new(1).unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+
+        let writer = {
+            let index = Arc::clone(&index);
+            let done = Arc::clone(&done);
+            thread::spawn(move || {
+                for i in 1..=EDGES {
+                    index.insert(
+                        node,
+                        AdjacencyEntry::new(
+                            NodeId::new(i + 1).unwrap(),
+                            EdgeId::new(i).unwrap(),
+                            InternedString::from_raw(1),
+                        ),
+                    );
+                }
+                done.store(true, Ordering::SeqCst);
+            })
+        };
+
+        let compactors: Vec<_> = (0..3)
+            .map(|_| {
+                let index = Arc::clone(&index);
+                let done = Arc::clone(&done);
+                thread::spawn(move || {
+                    while !done.load(Ordering::SeqCst) {
+                        index.compact();
+                    }
+                })
+            })
+            .collect();
+
+        writer.join().unwrap();
+        for c in compactors {
+            c.join().unwrap();
+        }
+        index.compact();
+
+        let guard = index.get_adjacency(node);
+        let mut seen: Vec<u64> = guard.iter().map(|e| e.edge_id.as_u64()).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen.len() as u64,
+            EDGES,
+            "concurrent compaction lost {} edges",
+            EDGES - seen.len() as u64
+        );
+    }
+
+    /// `try_compact` reports whether it did the work, and never blocks.
+    #[test]
+    fn try_compact_reports_whether_it_ran() {
+        use crate::core::interning::InternedString;
+
+        let index = IncrementalAdjacencyIndex::new();
+        let node = NodeId::new(1).unwrap();
+        index.insert(
+            node,
+            AdjacencyEntry::new(
+                NodeId::new(2).unwrap(),
+                EdgeId::new(1).unwrap(),
+                InternedString::from_raw(1),
+            ),
+        );
+        assert!(index.try_compact());
+        assert_eq!(index.delta_edge_count(), 0);
+        assert_eq!(index.frozen_edge_count(), 1);
     }
 
     #[test]

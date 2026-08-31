@@ -11,13 +11,38 @@ use crate::core::interning::InternedString;
 use crate::core::namespace::{Namespace, NamespaceId, intern_namespace, resolve_namespace_id};
 use crate::core::property::PropertyMap;
 use crate::index::adjacency::AdjacencyEntry;
-use crate::index::incremental_adjacency::{CompactionScheduler, IncrementalAdjacencyIndex};
+use crate::index::adjacency_maintenance::{self, AdjacencyMaintenanceConfig};
+use crate::index::incremental_adjacency::{
+    AdjacencyLayerStats, CompactionScheduler, IncrementalAdjacencyIndex,
+};
 use crate::index::property_index::{ValueKey, value_key};
 use dashmap::{DashMap, DashSet};
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
+
+/// Layer occupancy of a database's two adjacency indexes (Issue #3810).
+///
+/// Returned by [`CurrentIndexes::adjacency_stats`],
+/// [`CurrentStorage::adjacency_stats`](crate::storage::current::CurrentStorage::adjacency_stats)
+/// and [`AletheiaDB::adjacency_stats`](crate::AletheiaDB::adjacency_stats).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AdjacencyIndexStats {
+    /// Outgoing (source -> targets) adjacency index.
+    pub outgoing: AdjacencyLayerStats,
+    /// Incoming (target -> sources) adjacency index.
+    pub incoming: AdjacencyLayerStats,
+}
+
+impl AdjacencyIndexStats {
+    /// Whether **both** directions are compacted, i.e. every adjacency read
+    /// currently takes the frozen-CSR fast path.
+    #[inline]
+    pub fn is_fully_compacted(&self) -> bool {
+        self.outgoing.is_compacted() && self.incoming.is_compacted()
+    }
+}
 
 // Note: AdjacencyGuard was removed in favor of MergedAdjacencyGuard from incremental_adjacency.
 // The new guard supports merging frozen CSR + delta buffer on-the-fly.
@@ -141,15 +166,32 @@ pub struct CurrentIndexes {
 impl CurrentIndexes {
     /// Create new empty indexes with incremental adjacency.
     ///
-    /// Uses incremental CSR adjacency indexes for O(1) inserts and deletes.
-    /// No background compaction - call `compact_adjacency()` manually when needed.
+    /// The adjacency indexes are registered with the shared background
+    /// maintenance worker (Issue #3810), which compacts them once writes go
+    /// quiet so reads reach the frozen-CSR fast path. Registration is a `Weak`
+    /// reference: dropping these indexes deregisters them, with no shutdown
+    /// call and no `Drop` impl required.
+    ///
+    /// Use [`with_maintenance_config`](Self::with_maintenance_config) with
+    /// [`AdjacencyMaintenanceConfig::disabled`] for the pre-#3810 behavior
+    /// (compaction only when `compact_adjacency()` is called explicitly).
     pub fn new() -> Self {
+        Self::with_maintenance_config(AdjacencyMaintenanceConfig::default())
+    }
+
+    /// Create new empty indexes with an explicit background-maintenance policy.
+    pub fn with_maintenance_config(maintenance: AdjacencyMaintenanceConfig) -> Self {
+        let outgoing = Arc::new(IncrementalAdjacencyIndex::new());
+        let incoming = Arc::new(IncrementalAdjacencyIndex::new());
+        adjacency_maintenance::register(&outgoing, maintenance.clone());
+        adjacency_maintenance::register(&incoming, maintenance);
+
         CurrentIndexes {
             nodes: DashMap::with_hasher(BuildHasherDefault::default()),
             node_headers: DashMap::with_hasher(BuildHasherDefault::default()),
             edges: DashMap::with_hasher(BuildHasherDefault::default()),
-            outgoing: Arc::new(IncrementalAdjacencyIndex::new()),
-            incoming: Arc::new(IncrementalAdjacencyIndex::new()),
+            outgoing,
+            incoming,
             outgoing_compaction: None,
             incoming_compaction: None,
             max_node_id: AtomicU64::new(0),
@@ -160,11 +202,16 @@ impl CurrentIndexes {
         }
     }
 
-    /// Create new indexes with background compaction enabled.
+    /// Create new indexes with a **dedicated** per-index compaction thread.
     ///
-    /// Background thread will automatically compact adjacency indexes
-    /// when thresholds are exceeded. Call `shutdown_background_compaction()`
-    /// before dropping to cleanly stop the background thread.
+    /// Two threads (outgoing + incoming) are spawned for these indexes alone and
+    /// must be stopped with [`shutdown_background_compaction`](Self::shutdown_background_compaction)
+    /// before dropping.
+    ///
+    /// Prefer plain [`new`](Self::new): since Issue #3810 it enrolls the indexes
+    /// in the shared, process-wide maintenance worker instead -- one thread for
+    /// the whole process, no shutdown obligation. These indexes deliberately do
+    /// **not** also enroll there, so exactly one compactor owns them.
     pub fn new_with_background_compaction() -> Self {
         let outgoing = Arc::new(IncrementalAdjacencyIndex::new());
         let incoming = Arc::new(IncrementalAdjacencyIndex::new());
@@ -217,6 +264,18 @@ impl CurrentIndexes {
                 .map_err(|e| format!("Incoming compaction thread panicked: {:?}", e))?;
         }
         Ok(())
+    }
+
+    /// Snapshot of both adjacency indexes' layer occupancy (Issue #3810).
+    ///
+    /// `delta_edges == 0 && tombstones == 0` is exactly the condition under
+    /// which reads take the frozen-CSR fast path, so this is the direct
+    /// observable for whether background maintenance has caught up.
+    pub fn adjacency_stats(&self) -> AdjacencyIndexStats {
+        AdjacencyIndexStats {
+            outgoing: self.outgoing.layer_stats(),
+            incoming: self.incoming.layer_stats(),
+        }
     }
 
     /// Get frozen edge count for outgoing adjacency (for testing).

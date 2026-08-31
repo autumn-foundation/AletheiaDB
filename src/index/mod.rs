@@ -7,6 +7,7 @@
 //! - Vector indexes: Approximate nearest neighbor search for embeddings
 
 pub mod adjacency;
+pub mod adjacency_maintenance;
 pub mod current;
 pub mod incremental_adjacency;
 pub mod property_index;
@@ -16,10 +17,11 @@ pub mod vector;
 
 // Re-export commonly used types
 pub use adjacency::{AdjacencyEntry, AdjacencyIndex};
-pub use current::CurrentIndexes;
+pub use adjacency_maintenance::AdjacencyMaintenanceConfig;
+pub use current::{AdjacencyIndexStats, CurrentIndexes};
 pub use incremental_adjacency::{
-    CompactionScheduler, FrozenAdjacencyView, IncrementalAdjacencyIndex, IncrementalConfig,
-    Tombstone,
+    AdjacencyLayerStats, CompactionScheduler, FrozenAdjacencyView, IncrementalAdjacencyIndex,
+    IncrementalConfig, Tombstone,
 };
 pub use property_index::{PropertyIndexInfo, ValueKey, value_key};
 pub use temporal::{IndexTemporalExtent, TemporalIndexes};
