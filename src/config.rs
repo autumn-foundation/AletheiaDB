@@ -1617,6 +1617,50 @@ mod tests {
 
     #[test]
     #[cfg(feature = "config-toml")]
+    fn test_toml_adjacency_section_round_trips() {
+        use crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig;
+
+        // Background adjacency maintenance (Issue #3810) must be tunable from
+        // an on-disk config, and -- because it is ON by default -- an existing
+        // config with no `[adjacency]` section must keep the default policy.
+        let toml_str = r#"
+[adjacency]
+enabled = false
+tick_interval_ms = 25
+quiet_ticks = 3
+duty_cycle_percent = 50
+quiescent_amortization = 0
+        "#;
+
+        let config = AletheiaDBConfig::from_toml_str(toml_str).unwrap();
+        assert!(!config.adjacency.enabled);
+        assert_eq!(config.adjacency.tick_interval_ms, 25);
+        assert_eq!(config.adjacency.quiet_ticks, 3);
+        assert_eq!(config.adjacency.duty_cycle_percent, 50);
+        assert_eq!(config.adjacency.quiescent_amortization, 0);
+        // Unspecified keys keep their defaults.
+        assert_eq!(
+            config.adjacency.min_compaction_interval_ms,
+            AdjacencyMaintenanceConfig::default().min_compaction_interval_ms
+        );
+
+        let rendered = config.to_toml_string().unwrap();
+        assert!(
+            rendered.contains("[adjacency]"),
+            "rendered TOML: {rendered}"
+        );
+        let reparsed = AletheiaDBConfig::from_toml_str(&rendered).unwrap();
+        assert_eq!(reparsed.adjacency, config.adjacency);
+
+        // Omitting the section leaves maintenance enabled: without it the
+        // frozen-CSR read fast path is unreachable (Issue #3810).
+        let bare = AletheiaDBConfig::from_toml_str("[wal]\nnum_stripes = 4\n").unwrap();
+        assert_eq!(bare.adjacency, AdjacencyMaintenanceConfig::default());
+        assert!(bare.adjacency.enabled);
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
     fn test_toml_chain_section_round_trips() {
         // The opt-in provenance hash chain (Issue #3351) must round-trip
         // through TOML via the `[chain]` section so `aletheia verify` can be

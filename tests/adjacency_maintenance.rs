@@ -7,10 +7,16 @@
 //! `get_incoming_edges` call in a real database permanently took the merged
 //! (delta) path.
 //!
+//! Registration is a deliberate no-op under Miri (see
+//! `adjacency_maintenance::register`), so this whole file is excluded there
+//! rather than waiting 20s per test for a worker that will never run.
+//!
 //! These tests pin the shipped behavior: a database built through the public
 //! API drains its delta/tombstone layers on its own once writes go quiet, the
 //! maintenance costs one process-wide worker (not two threads per database),
 //! it is opt-out-able, and it never changes what a read returns.
+
+#![cfg(not(miri))]
 
 use aletheiadb::AletheiaDBConfig;
 use aletheiadb::index::adjacency_maintenance::{self, AdjacencyMaintenanceConfig};
@@ -89,10 +95,17 @@ fn background_maintenance_drains_delta_after_write_burst() {
     );
 
     let stats = db.adjacency_stats();
-    assert_eq!(stats.outgoing.delta_edges, 0);
-    assert_eq!(stats.incoming.delta_edges, 0);
-    assert_eq!(stats.outgoing.frozen_edges, 600);
-    assert_eq!(stats.incoming.frozen_edges, 600);
+    let expected_edges = 200 * 3;
+    assert_eq!(stats.outgoing.delta_edges, 0, "outgoing delta: {stats:?}");
+    assert_eq!(stats.incoming.delta_edges, 0, "incoming delta: {stats:?}");
+    assert_eq!(
+        stats.outgoing.frozen_edges, expected_edges,
+        "every written edge must end up in the frozen CSR: {stats:?}"
+    );
+    assert_eq!(
+        stats.incoming.frozen_edges, expected_edges,
+        "every written edge must end up in the frozen CSR: {stats:?}"
+    );
 }
 
 /// AC4: the drained graph is below every configured compaction threshold, so
@@ -265,21 +278,29 @@ fn maintenance_does_not_spawn_a_thread_per_database() {
         .is_fully_compacted()));
     assert!(adjacency_maintenance::worker_is_running());
 
-    let before_off = thread_count();
-    let without = make(AdjacencyMaintenanceConfig::disabled());
-    let cost_without = thread_count().saturating_sub(before_off);
-    drop(without);
+    // Measure both halves the same way: build, sample, drop, let teardown
+    // settle, so neither figure carries the other's exiting threads.
+    fn cost_of(maintenance: AdjacencyMaintenanceConfig) -> usize {
+        let baseline = thread_count();
+        let dbs = make(maintenance);
+        let peak = thread_count();
+        assert_eq!(dbs.len(), DBS);
+        drop(dbs);
+        // Let teardown settle so the next measurement starts from a quiet
+        // process rather than counting these databases' exiting threads.
+        let _ = wait_until(Duration::from_secs(5), || thread_count() <= baseline + 2);
+        peak.saturating_sub(baseline)
+    }
 
-    let before_on = thread_count();
-    let with = make(AdjacencyMaintenanceConfig::default());
-    let cost_with = thread_count().saturating_sub(before_on);
+    let cost_without = cost_of(AdjacencyMaintenanceConfig::disabled());
+    let cost_with = cost_of(AdjacencyMaintenanceConfig::default());
 
-    assert_eq!(with.len(), DBS);
     assert!(
         cost_with <= cost_without + 2,
         "{DBS} databases cost {cost_with} threads with background adjacency \
          maintenance and {cost_without} without it; maintenance must not spawn \
-         a thread per database"
+         a thread per database (a per-database thread would cost {} more)",
+        DBS
     );
 }
 
@@ -379,8 +400,19 @@ fn explicit_compaction_never_tears_a_concurrent_read() {
             let observed_min = Arc::clone(&observed_min);
             let source = ids[0];
             std::thread::spawn(move || {
+                let mut reads = 0usize;
                 while !stop.load(Ordering::Relaxed) {
-                    let edges = db.get_outgoing_edges(source);
+                    // Alternate the two read paths: `get_outgoing_edges`
+                    // collects through `MergedAdjacencyGuard::iter`, while
+                    // `get_outgoing_edges_iter` walks the frozen and delta
+                    // slices directly -- they de-duplicate the publish window
+                    // separately, so both need covering.
+                    let edges: Vec<_> = if reads.is_multiple_of(2) {
+                        db.get_outgoing_edges(source)
+                    } else {
+                        db.get_outgoing_edges_iter(source).collect()
+                    };
+                    reads += 1;
                     let mut unique = edges.clone();
                     unique.sort();
                     unique.dedup();
@@ -389,6 +421,7 @@ fn explicit_compaction_never_tears_a_concurrent_read() {
                         observed_min.fetch_min(edges.len(), Ordering::Relaxed);
                     }
                 }
+                reads
             })
         })
         .collect();
@@ -401,9 +434,14 @@ fn explicit_compaction_never_tears_a_concurrent_read() {
     }
 
     stop.store(true, Ordering::Relaxed);
+    let mut reads = 0usize;
     for r in readers {
-        r.join().expect("reader panicked");
+        reads += r.join().expect("reader panicked");
     }
+    assert!(
+        reads > 1_000,
+        "readers only managed {reads} reads; the race window was barely sampled"
+    );
 
     assert_eq!(
         torn.load(Ordering::Relaxed),

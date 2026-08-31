@@ -563,9 +563,17 @@ pub(crate) fn persist_graph_index(
     }
     graph_data.edge_count = graph_data.edges.len() as u64;
 
-    // Export CSR adjacency structures for fast loading
-    let (outgoing_node_ids, outgoing_offsets, outgoing_neighbors) = current.export_outgoing_csr();
-    let (incoming_node_ids, incoming_offsets, incoming_neighbors) = current.export_incoming_csr();
+    // Export CSR adjacency structures for fast loading.
+    //
+    // As ONE compaction-consistent pair (Issue #3810): the outgoing and
+    // incoming indexes are compacted independently by the background
+    // maintenance worker, so two separate exports can capture an edge in one
+    // direction's CSR and not the other's, and the restore path would then
+    // either duplicate it in one direction's adjacency or lose it there.
+    let (
+        (outgoing_node_ids, outgoing_offsets, outgoing_neighbors),
+        (incoming_node_ids, incoming_offsets, incoming_neighbors),
+    ) = current.export_csr_pair();
 
     graph_data.outgoing_node_ids = outgoing_node_ids;
     graph_data.outgoing_offsets = outgoing_offsets;

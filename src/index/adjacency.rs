@@ -171,25 +171,48 @@ impl AdjacencyIndex {
         let offsets_usize = Self::convert_offsets(offsets);
 
         let mut adjacency_entries = Vec::with_capacity(edge_ids.len());
+        // Offsets are rebuilt as we go, because an edge id present in the CSR
+        // but absent from `edges_map` is DROPPED rather than materialized as a
+        // placeholder (Issue #3810).
+        //
+        // The persisted edge list and the persisted CSR are two snapshots of a
+        // live database taken at slightly different instants, so the CSR can
+        // legitimately name an edge the edge list no longer has (deleted, but
+        // its tombstone not yet compacted away). A placeholder entry for it was
+        // a phantom edge -- adjacency to node 0 under label 0 -- silently
+        // materialized on restore, and it also broke the per-node
+        // `(target, edge_id)` ordering the frozen runs rely on. Dropping it is
+        // sound: the edge is either genuinely gone, or still in the edge list
+        // and therefore re-added to the delta by the caller's reconstruction
+        // pass.
+        let mut rebuilt_offsets: Vec<usize> = Vec::with_capacity(offsets_usize.len());
+        let mut dropped = 0usize;
 
-        for &edge_id_u64 in &edge_ids {
-            let edge_id = EdgeId::new_unchecked(edge_id_u64);
-            if let Some((target, label)) = edges_map.get(&edge_id) {
-                adjacency_entries.push(AdjacencyEntry::new(*target, edge_id, *label));
-            } else {
-                // Edge not found - this shouldn't happen with valid data
-                // Use a placeholder to maintain CSR structure integrity
-                adjacency_entries.push(AdjacencyEntry::new(
-                    NodeId::new(0).unwrap(),
-                    edge_id,
-                    InternedString::from_raw(0),
-                ));
+        for window in offsets_usize.windows(2) {
+            rebuilt_offsets.push(adjacency_entries.len());
+            for &edge_id_u64 in &edge_ids[window[0]..window[1]] {
+                let edge_id = EdgeId::new_unchecked(edge_id_u64);
+                match edges_map.get(&edge_id) {
+                    Some((target, label)) => {
+                        adjacency_entries.push(AdjacencyEntry::new(*target, edge_id, *label))
+                    }
+                    None => dropped += 1,
+                }
             }
+        }
+        rebuilt_offsets.push(adjacency_entries.len());
+
+        if dropped > 0 {
+            eprintln!(
+                "Warning: {} persisted adjacency entries referenced edges that are not in the \
+                 persisted edge list and were dropped on import",
+                dropped
+            );
         }
 
         Self {
             node_ids: node_ids_typed,
-            offsets: offsets_usize,
+            offsets: rebuilt_offsets,
             edges: adjacency_entries,
             max_node_id,
         }

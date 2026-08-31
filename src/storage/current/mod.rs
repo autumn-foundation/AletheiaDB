@@ -11,7 +11,7 @@ use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::temporal::Timestamp;
 use crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig;
-use crate::index::current::{AdjacencyIndexStats, CurrentIndexes};
+use crate::index::current::{AdjacencyIndexStats, CurrentIndexes, ExportedCsrPair};
 use crate::index::vector::hnsw::{HnswConfig, HnswIndex};
 use crate::index::vector::temporal::{TemporalVectorConfig, TemporalVectorIndex};
 use crate::index::vector::{TemporalSearchResults, VectorIndex};
@@ -962,7 +962,8 @@ impl CurrentStorage {
     ///
     /// - After bulk inserts (to move many edges from delta to frozen)
     /// - To reduce delta size before persistence
-    /// - Usually not needed if background compaction is enabled
+    /// - Rarely needed since Issue #3810: background maintenance compacts on
+    ///   its own once writes go quiet (unless it is disabled by config)
     ///
     /// # Performance
     ///
@@ -1192,6 +1193,13 @@ impl CurrentStorage {
     /// Export incoming CSR adjacency data for persistence.
     pub fn export_incoming_csr(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
         self.indexes.export_incoming_csr()
+    }
+
+    /// Export both directions' frozen CSRs as one compaction-consistent pair
+    /// (Issue #3810). See
+    /// [`CurrentIndexes::export_csr_pair`](crate::index::CurrentIndexes::export_csr_pair).
+    pub fn export_csr_pair(&self) -> ExportedCsrPair {
+        self.indexes.export_csr_pair()
     }
 
     /// Import CSR adjacency data from persistence.

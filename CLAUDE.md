@@ -83,6 +83,16 @@ Current implementation notes: `wal` is a `ConcurrentWalSystem`, `temporal_indexe
 
 If code must acquire both adjacency indexes, acquire `outgoing` before `incoming`. Neither adjacency index may call back into `historical`, `wal`, or `current_timestamp` while held.
 
+Two primitives sit **below** the adjacency indexes in this order (Issue #3810):
+each `IncrementalAdjacencyIndex`'s `compaction_lock` (taken only by compaction,
+CSR import, and the consistent CSR-pair export -- never on a read or insert
+path), and the process-global adjacency-maintenance registry mutex (taken by
+`register()` and by the maintenance worker's tick, and never while holding any
+other AletheiaDB lock). A thread must not take an adjacency *shard* guard (a
+`MergedAdjacencyGuard` / `OutgoingEdgesIter`) and then take that index's
+`compaction_lock` on the same thread: compaction's retire pass needs the same
+shard.
+
 ## Testing Requirements
 
 **See [TESTING.md](TESTING.md) for detailed testing instructions.**
@@ -324,6 +334,8 @@ contract (counters→frozen on the fast path; delta→frozen→publish-window on
 merged path) and is documented at each reader.
 
 ```rust
+use aletheiadb::{AletheiaDB, AletheiaDBConfig, AdjacencyMaintenanceConfig};
+
 let db = AletheiaDB::new()?;
 db.adjacency_stats().is_fully_compacted();   // true == reads are on the fast path
 db.compact_adjacency();                       // force it now (bulk load, benchmarks)

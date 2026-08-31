@@ -17,6 +17,7 @@ mod common;
 
 use aletheiadb::core::id::IdGenerator;
 use aletheiadb::core::interning::StringInterner;
+use aletheiadb::index::adjacency_maintenance::AdjacencyMaintenanceConfig;
 use aletheiadb::{CurrentStorage, PropertyMapBuilder};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -28,7 +29,8 @@ use std::thread;
 ///
 /// Creates a directed graph where each node has `out_degree` outgoing edges.
 fn create_test_graph(node_count: usize, out_degree: usize) -> CurrentStorage {
-    let storage = CurrentStorage::new();
+    let storage =
+        CurrentStorage::with_adjacency_maintenance(AdjacencyMaintenanceConfig::disabled());
 
     // Create nodes
     let node_ids: Vec<_> = (0..node_count)
@@ -188,7 +190,9 @@ fn bench_edge_creation(c: &mut Criterion) {
     c.bench_function("edge_creation", |b| {
         b.iter_batched(
             || {
-                let storage = CurrentStorage::new();
+                let storage = CurrentStorage::with_adjacency_maintenance(
+                    AdjacencyMaintenanceConfig::disabled(),
+                );
                 let n1 = storage
                     .create_node("Person", PropertyMapBuilder::new().build())
                     .unwrap();
@@ -600,7 +604,8 @@ fn bench_find_nodes_by_property(c: &mut Criterion) {
     for graph_size in [100, 1000, 10000] {
         // Create a graph where each node has a "category" property
         // with ~10% matching a specific value
-        let storage = CurrentStorage::new();
+        let storage =
+            CurrentStorage::with_adjacency_maintenance(AdjacencyMaintenanceConfig::disabled());
         for i in 0..graph_size {
             let category = format!("cat_{}", i % 10);
             storage
@@ -636,7 +641,8 @@ fn bench_find_nodes_by_property(c: &mut Criterion) {
 fn bench_property_lookup_vs_scan(c: &mut Criterion) {
     use aletheiadb::core::property::PropertyValue;
 
-    let storage = CurrentStorage::new();
+    let storage =
+        CurrentStorage::with_adjacency_maintenance(AdjacencyMaintenanceConfig::disabled());
     for i in 0..1000 {
         let name = format!("user_{}", i);
         storage
@@ -691,7 +697,8 @@ fn bench_get_outgoing_allocation_overhead(c: &mut Criterion) {
 
     // Create a test graph at the index level with varying degrees
     for out_degree in [1, 10, 100] {
-        let indexes = CurrentIndexes::new();
+        let indexes =
+            CurrentIndexes::with_maintenance_config(AdjacencyMaintenanceConfig::disabled());
         let node_id = aletheiadb::NodeId::new(0).unwrap();
         let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 

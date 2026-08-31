@@ -1225,6 +1225,7 @@ impl AletheiaDB {
     /// assert!(stats.is_fully_compacted());
     /// # Ok::<(), aletheiadb::Error>(())
     /// ```
+    #[must_use = "the statistics snapshot should be used"]
     pub fn adjacency_stats(&self) -> crate::index::current::AdjacencyIndexStats {
         self.current.adjacency_stats()
     }
@@ -1237,9 +1238,24 @@ impl AletheiaDB {
     /// or when background maintenance is disabled via
     /// [`AdjacencyMaintenanceConfig::disabled`](crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig::disabled).
     ///
-    /// Cost is O(E log E) in the number of edges; reads and writes stay
-    /// lock-free and correct throughout (readers keep using the previous frozen
-    /// CSR until the new one is swapped in atomically).
+    /// Cost is O(E log E) in the number of edges. Reads stay correct and never
+    /// block on it: they keep using the previous frozen CSR until the new one is
+    /// published atomically, and the entries the two layers briefly share are
+    /// de-duplicated. Compacting an already-compacted index is a cheap no-op.
+    ///
+    /// # Deadlock
+    ///
+    /// Retiring the merged delta entries takes the same per-shard locks a live
+    /// adjacency guard holds, so do not call this while holding an adjacency
+    /// iterator from the *same* thread:
+    ///
+    /// ```ignore
+    /// let edges = db.get_outgoing_edges_iter(node); // holds a shard guard
+    /// db.compact_adjacency();                       // deadlocks: same shard
+    /// ```
+    ///
+    /// Collect the iterator (or drop it) first. Other threads are unaffected --
+    /// they never wait on compaction, compaction waits on them.
     pub fn compact_adjacency(&self) {
         self.current.compact_adjacency();
     }

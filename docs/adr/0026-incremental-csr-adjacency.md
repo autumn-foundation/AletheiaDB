@@ -266,7 +266,7 @@ pub fn compact(&self) {
 > per-index scheduler below was never started by any shipping constructor, so
 > compaction never ran in a real database (Issue #3810). It is replaced by a
 > single process-wide maintenance worker with a write-quiescence trigger and a
-> duty-cycle rate limit; the `compact()` sketch below also predates the
+> duty-cycle rate limit; the `compact()` sketch *above* also predates the
 > publish-before-retire protocol that keeps concurrent reads from tearing.
 
 **Thread-based scheduler:**
@@ -486,8 +486,11 @@ struct CurrentIndexes {
 **Phase 2**: Read path with merged guard ✓
 **Phase 3**: Tombstones & delete ✓
 **Phase 4**: Compaction logic ✓
-**Phase 5**: Background compaction thread ✓
-**Phase 6**: CurrentIndexes integration ✓
+**Phase 5**: Background compaction thread ✓ *(implemented but never started by
+any shipping constructor -- see [ADR-0060](0060-background-adjacency-maintenance.md),
+Issue #3810)*
+**Phase 6**: CurrentIndexes integration ✓ *(the scheduler was never wired into
+`CurrentStorage::new()`; completed by ADR-0060)*
 **Phase 7**: Persistence integration ✓
 **Phase 8**: Benchmarks & validation ✓
 

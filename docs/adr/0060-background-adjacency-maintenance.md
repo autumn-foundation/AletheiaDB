@@ -138,7 +138,22 @@ long-lived guards (e.g. `get_outgoing_edges_iter`).
 `import_frozen_csr`, by a mutex taken only by compaction — never on the read or
 insert path.
 
-### 6. Default on, opt-out via the unified config
+### 6. An amortization floor on the quiescence trigger
+
+A quiescent index is compacted only when `pending >= frozen_edges /
+quiescent_amortization` (default 10,000, i.e. 0.01% of the graph). Without a
+floor, one edge per second written into a 6M-edge graph goes quiescent every
+second and buys a full O(E log E) rebuild -- roughly 340MB of transient
+allocation -- to merge a single edge, forever. The duty-cycle limiter bounds the
+CPU that costs but not the memory churn or the pointlessness.
+
+The floor never blocks the case Issue #3810 is about: a small graph (600 edges,
+`frozen` still 0 on the first compaction) always clears it. Its cost is that a
+very large graph taking a slow trickle of writes keeps its reads on the merged
+path for longer; `should_compact()`'s absolute thresholds still bound how far
+the delta grows. Set `quiescent_amortization: 0` to compact on any pending work.
+
+### 7. Default on, opt-out via the unified config
 
 `AletheiaDBConfig::adjacency` (`AdjacencyMaintenanceConfig`) tunes or disables
 it; `AdjacencyMaintenanceConfig::disabled()` restores exactly the pre-#3810
@@ -176,9 +191,26 @@ the product exactly where Issue #3810 found it.
 - The merged read path carries one extra atomic load (the publish-window flag)
   and, inside a window, one binary search per delta entry.
 - Retirement takes the delta shard write locks, so a thread that holds a
-  `MergedAdjacencyGuard` and then calls `compact()` on the same index from the
-  same thread would deadlock. Callers hold guards briefly; the background worker
-  never holds one.
+  `MergedAdjacencyGuard` (or an `OutgoingEdgesIter`) and then calls
+  `compact_adjacency()` on the same database from the same thread would
+  deadlock. Documented on `AletheiaDB::compact_adjacency`. Other threads are
+  unaffected: they never wait on compaction, compaction waits on them -- which
+  in turn means one long-held adjacency iterator delays the shared worker for
+  every database in the process.
+- The two counter loads on the read fast path went `Relaxed` -> `Acquire`. Free
+  on x86-64; a real (small) barrier on aarch64. They are the synchronisation
+  edge that makes the fast path safe, so they cannot be weakened; packing the
+  two counters into one `AtomicU64` to halve them is a possible follow-up.
+- The process-global worker and its registry mutex are not `fork()`-safe: a
+  child process inherits the registry but not the thread, so maintenance
+  silently stops there (and a fork taken while the registry lock was held would
+  deadlock the child's first database construction). Embedders that fork after
+  constructing a database should disable maintenance in the child, or fork
+  first.
+- A write-only database (ingest sink, replica) pays the compaction budget for a
+  read fast path nobody uses. A read-demand signal was considered and rejected
+  for v1: the cheap forms still touch the read path, which this ADR is
+  deliberately keeping free of policy.
 
 ### Neutral
 
@@ -204,6 +236,27 @@ Rejected.
 
 **Making `should_compact()`'s ratio branch fire at `frozen == 0`.** Degenerates
 to "compact on every insert". Rejected in favor of the quiescence trigger.
+
+## Adjacent defects fixed here
+
+Enabling compaction made three latent bugs reachable; all three are fixed in the
+same change, with regression tests:
+
+1. **Torn reads** (above): the publish/retire order.
+2. **Non-idempotent recovery.** `AdjacencyIndex::build` does not de-duplicate,
+   so a compaction that unwound between publishing and retiring left the next
+   compaction collecting the same edge twice -- permanently. The publish window
+   is now an RAII guard that records the interruption, and the next compaction
+   de-duplicates (paid only after an actual panic).
+3. **Persisted CSR skew.** The outgoing and incoming indexes are compacted
+   independently, so persistence exporting them with two separate calls could
+   capture an edge in one direction's CSR and not the other's; the restore path
+   then decided *both* directions' delta from the outgoing set alone, silently
+   duplicating that edge in one direction or dropping it from the other.
+   Persistence now exports the pair under both compaction locks, and delta
+   reconstruction derives each direction from its own CSR. Relatedly, a CSR
+   entry whose edge is missing from the persisted edge list is now dropped on
+   import instead of being materialized as a phantom edge to node 0.
 
 ## References
 

@@ -18,7 +18,7 @@ pub mod vector;
 // Re-export commonly used types
 pub use adjacency::{AdjacencyEntry, AdjacencyIndex};
 pub use adjacency_maintenance::AdjacencyMaintenanceConfig;
-pub use current::{AdjacencyIndexStats, CurrentIndexes};
+pub use current::{AdjacencyIndexStats, CurrentIndexes, ExportedCsr, ExportedCsrPair};
 pub use incremental_adjacency::{
     AdjacencyLayerStats, CompactionScheduler, FrozenAdjacencyView, IncrementalAdjacencyIndex,
     IncrementalConfig, Tombstone,

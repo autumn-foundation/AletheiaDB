@@ -22,6 +22,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
+/// One direction's exported CSR arrays: `(node_ids, offsets, edge_ids)`.
+///
+/// Matches [`IncrementalAdjacencyIndex::export_frozen_csr`](crate::index::IncrementalAdjacencyIndex::export_frozen_csr).
+pub type ExportedCsr = (Vec<u64>, Vec<u64>, Vec<u64>);
+
+/// Both directions' exported CSR arrays: `(outgoing, incoming)`.
+pub type ExportedCsrPair = (ExportedCsr, ExportedCsr);
+
 /// Layer occupancy of a database's two adjacency indexes (Issue #3810).
 ///
 /// Returned by [`CurrentIndexes::adjacency_stats`],
@@ -1315,7 +1323,8 @@ impl CurrentIndexes {
     ///
     /// - After bulk inserts (to move many edges from delta to frozen)
     /// - To reduce delta size before persistence
-    /// - Usually not needed if background compaction is enabled
+    /// - Rarely needed since Issue #3810: background maintenance compacts on
+    ///   its own once writes go quiet (unless it is disabled by config)
     ///
     /// # Performance
     ///
@@ -1388,6 +1397,26 @@ impl CurrentIndexes {
     /// Call `compact_adjacency()` first to include recent changes.
     pub fn export_incoming_csr(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
         self.incoming.export_frozen_csr()
+    }
+
+    /// Export both directions' frozen CSRs as one compaction-consistent pair.
+    ///
+    /// The two indexes are compacted independently by the background
+    /// maintenance worker (Issue #3810), so exporting them with two separate
+    /// calls can capture an edge in one direction's CSR and not the other's --
+    /// a skew the restore path then has to guess about. Holding both compaction
+    /// locks across the two exports rules that out: no edge can move from a
+    /// delta buffer into a frozen CSR in between.
+    ///
+    /// Locks are taken outgoing-then-incoming, matching the adjacency lock
+    /// order in CLAUDE.md.
+    pub fn export_csr_pair(&self) -> ExportedCsrPair {
+        let _outgoing = self.outgoing.lock_compaction();
+        let _incoming = self.incoming.lock_compaction();
+        (
+            self.outgoing.export_frozen_csr(),
+            self.incoming.export_frozen_csr(),
+        )
     }
 
     /// Import CSR data for both outgoing and incoming adjacency.
@@ -1471,26 +1500,38 @@ impl CurrentIndexes {
         self.incoming.import_frozen_csr(Arc::new(incoming_csr));
 
         // ===== Phase 7: Reconstruct Delta Buffer =====
-        // Build set of edge IDs that are in frozen CSR
-        let frozen_edge_ids: HashSet<EdgeId> = outgoing_edge_ids
+        // Build the set of edge IDs each direction's frozen CSR carries.
+        //
+        // The two sets are derived SEPARATELY (Issue #3810). They used to be
+        // assumed identical, which held only while nothing ever compacted: the
+        // two indexes are now compacted independently by the background
+        // maintenance worker, so a persisted snapshot can legitimately carry an
+        // edge in one direction's CSR and not the other's. Deciding both deltas
+        // from the outgoing set alone would then either duplicate that edge in
+        // the incoming adjacency (frozen + delta) or drop it from the incoming
+        // adjacency entirely.
+        let frozen_outgoing_ids: HashSet<EdgeId> = outgoing_edge_ids
             .iter()
-            .map(|&id| EdgeId::new(id).unwrap())
+            .filter_map(|&id| EdgeId::new(id).ok())
+            .collect();
+        let frozen_incoming_ids: HashSet<EdgeId> = incoming_edge_ids
+            .iter()
+            .filter_map(|&id| EdgeId::new(id).ok())
             .collect();
 
         // Iterate through all edges in DashMap
-        // For edges NOT in frozen, insert into delta
+        // For edges NOT in frozen, insert into delta -- per direction.
         for entry in self.edges.iter() {
             let edge = entry.value();
 
-            // If edge is NOT in frozen CSR, it belongs in delta
-            if !frozen_edge_ids.contains(&edge.id) {
-                // Insert into outgoing delta
+            if !frozen_outgoing_ids.contains(&edge.id) {
                 self.outgoing.insert(
                     edge.source,
                     crate::index::adjacency::AdjacencyEntry::new(edge.target, edge.id, edge.label),
                 );
+            }
 
-                // Insert into incoming delta
+            if !frozen_incoming_ids.contains(&edge.id) {
                 self.incoming.insert(
                     edge.target,
                     crate::index::adjacency::AdjacencyEntry::new(edge.source, edge.id, edge.label),

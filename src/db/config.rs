@@ -1805,6 +1805,12 @@ impl AletheiaDB {
     /// This maintains backward compatibility with the old API.
     /// For new code, prefer using [`with_unified_config`](Self::with_unified_config).
     ///
+    /// Background adjacency maintenance (Issue #3810) uses the default policy
+    /// here, since this signature carries no place to configure it; use
+    /// [`with_unified_config`](Self::with_unified_config) with
+    /// [`AdjacencyMaintenanceConfig::disabled`](crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig::disabled)
+    /// to opt out.
+    ///
     /// # Errors
     ///
     /// Returns an error if WAL initialization fails (e.g., cannot create WAL directory).

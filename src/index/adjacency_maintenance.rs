@@ -116,9 +116,10 @@ const MAX_SLEEP: Duration = Duration::from_secs(60);
 ///     .build();
 /// assert!(!config.adjacency.enabled);
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(default))]
+#[non_exhaustive]
 pub struct AdjacencyMaintenanceConfig {
     /// Whether this database's adjacency indexes are serviced by the shared
     /// background worker. Default: `true`.
@@ -146,6 +147,23 @@ pub struct AdjacencyMaintenanceConfig {
     /// (1..=100). Default: 10, i.e. a compaction that took 200ms makes that
     /// index ineligible for the next 1.8s.
     pub duty_cycle_percent: u32,
+
+    /// Amortization floor for the quiescence trigger: a quiescent index is
+    /// compacted only when its pending count is at least
+    /// `frozen_edges / quiescent_amortization`. Default: 10,000 (0.01% of the
+    /// graph).
+    ///
+    /// Without a floor, one edge written per second into a 6M-edge graph would
+    /// go quiescent every second and buy a full O(E log E) rebuild -- roughly
+    /// 340MB of transient allocation -- to merge a single edge, forever. The
+    /// floor makes the rebuild pay for itself in edges merged; the size
+    /// thresholds in [`IncrementalAdjacencyIndex::should_compact`] still bound
+    /// how far the delta can grow meanwhile.
+    ///
+    /// The cost is that a very large graph taking a slow trickle of writes
+    /// keeps its reads on the merged path for longer. Set to 0 to compact on
+    /// any pending work regardless of graph size.
+    pub quiescent_amortization: u32,
 }
 
 impl Default for AdjacencyMaintenanceConfig {
@@ -157,16 +175,68 @@ impl Default for AdjacencyMaintenanceConfig {
             quiet_ticks: 1,
             min_compaction_interval_ms: 250,
             duty_cycle_percent: 10,
+            quiescent_amortization: 10_000,
         }
     }
 }
 
 impl AdjacencyMaintenanceConfig {
+    /// Chainable setter for [`enabled`](Self::enabled).
+    #[must_use]
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Chainable setter for [`tick_interval_ms`](Self::tick_interval_ms).
+    #[must_use]
+    pub fn with_tick_interval_ms(mut self, ms: u64) -> Self {
+        self.tick_interval_ms = ms;
+        self
+    }
+
+    /// Chainable setter for [`idle_tick_interval_ms`](Self::idle_tick_interval_ms).
+    #[must_use]
+    pub fn with_idle_tick_interval_ms(mut self, ms: u64) -> Self {
+        self.idle_tick_interval_ms = ms;
+        self
+    }
+
+    /// Chainable setter for [`quiet_ticks`](Self::quiet_ticks).
+    #[must_use]
+    pub fn with_quiet_ticks(mut self, ticks: u32) -> Self {
+        self.quiet_ticks = ticks;
+        self
+    }
+
+    /// Chainable setter for
+    /// [`min_compaction_interval_ms`](Self::min_compaction_interval_ms).
+    #[must_use]
+    pub fn with_min_compaction_interval_ms(mut self, ms: u64) -> Self {
+        self.min_compaction_interval_ms = ms;
+        self
+    }
+
+    /// Chainable setter for [`duty_cycle_percent`](Self::duty_cycle_percent).
+    #[must_use]
+    pub fn with_duty_cycle_percent(mut self, percent: u32) -> Self {
+        self.duty_cycle_percent = percent;
+        self
+    }
+
+    /// Chainable setter for [`quiescent_amortization`](Self::quiescent_amortization).
+    #[must_use]
+    pub fn with_quiescent_amortization(mut self, amortization: u32) -> Self {
+        self.quiescent_amortization = amortization;
+        self
+    }
+
     /// Configuration with background maintenance turned off.
     ///
     /// Reads stay correct -- they take the merged (delta) path -- and
     /// [`AletheiaDB::compact_adjacency`](crate::AletheiaDB::compact_adjacency)
     /// remains available for explicit control.
+    #[must_use]
     pub fn disabled() -> Self {
         Self {
             enabled: false,
@@ -186,6 +256,10 @@ impl AdjacencyMaintenanceConfig {
             .clamp(self.tick_interval_ms, 60_000);
         self.min_compaction_interval_ms = self.min_compaction_interval_ms.min(600_000);
         self.duty_cycle_percent = self.duty_cycle_percent.clamp(1, 100);
+        // At least one confirming sample: `quiet_ticks: 0` would treat the very
+        // first sighting of pending work as quiescence and compact in the
+        // middle of a write burst.
+        self.quiet_ticks = self.quiet_ticks.max(1);
         self
     }
 
@@ -230,9 +304,12 @@ struct Registration {
 struct ServiceState {
     entries: Vec<Registration>,
     next_id: u64,
-    /// Set once a worker thread is running (or once spawning it failed, in
-    /// which case maintenance degrades to "not running" rather than panicking).
+    /// Set once a worker thread is running.
     worker_started: bool,
+    /// Set if the worker thread could not be spawned: maintenance degrades to
+    /// "not running" for the process rather than panicking or retrying (and
+    /// accumulating registrations nothing would ever prune).
+    unavailable: bool,
 }
 
 struct Service {
@@ -267,6 +344,39 @@ pub(crate) fn register(index: &Arc<IncrementalAdjacencyIndex>, config: Adjacency
     let service = service();
     let mut state = service.state.lock();
 
+    if state.unavailable {
+        // The worker could not be started in this process; registering would
+        // grow a list nothing ever prunes.
+        return;
+    }
+
+    if !state.worker_started {
+        // Spawn BEFORE registering, so a failure leaves no orphan entry.
+        // Spawn failure (thread limits, sandboxes) must not take the database
+        // down: log once and leave maintenance off for the process.
+        match std::thread::Builder::new()
+            .name("aletheia-adjacency".to_string())
+            .spawn(worker_loop)
+        {
+            Ok(_) => state.worker_started = true,
+            Err(e) => {
+                state.unavailable = true;
+                eprintln!(
+                    "[adjacency-maintenance] could not start the background compaction worker \
+                     ({e}); adjacency reads will keep taking the merged path. Call \
+                     AletheiaDB::compact_adjacency() explicitly if that matters."
+                );
+                return;
+            }
+        }
+    }
+
+    // The worker parks indefinitely only when it has no registrations, so that
+    // is the only state a wakeup is needed for. Notifying unconditionally would
+    // futex-wake it (and force a full pass over every registration) twice per
+    // `AletheiaDB::new()`.
+    let worker_parked = state.entries.is_empty();
+
     let id = state.next_id;
     state.next_id = state.next_id.wrapping_add(1);
     state.entries.push(Registration {
@@ -279,33 +389,20 @@ pub(crate) fn register(index: &Arc<IncrementalAdjacencyIndex>, config: Adjacency
         consecutive_panics: 0,
     });
 
-    if !state.worker_started {
-        state.worker_started = true;
-        // Spawn failure (thread limits, sandboxes) must not take the database
-        // down: log once and leave maintenance off for this process.
-        if let Err(e) = std::thread::Builder::new()
-            .name("aletheia-adjacency".to_string())
-            .spawn(worker_loop)
-        {
-            state.worker_started = false;
-            eprintln!(
-                "[adjacency-maintenance] could not start the background compaction worker \
-                 ({e}); adjacency reads will keep taking the merged path. Call \
-                 AletheiaDB::compact_adjacency() explicitly if that matters."
-            );
-            return;
-        }
-    }
-
     drop(state);
-    service.wakeup.notify_all();
+    if worker_parked {
+        service.wakeup.notify_all();
+    }
 }
 
 /// Number of live (non-dropped) index registrations.
 ///
+/// Diagnostics and tests only -- not part of the supported API surface.
+///
 /// Exposed for tests and diagnostics: it is the direct evidence that dropping a
 /// database releases its maintenance registration without any explicit
 /// shutdown call.
+#[doc(hidden)]
 pub fn registered_index_count() -> usize {
     let Some(service) = SERVICE.get() else {
         return 0;
@@ -320,7 +417,8 @@ pub fn registered_index_count() -> usize {
 
 /// Whether the shared worker thread is running in this process.
 ///
-/// Exposed for tests and diagnostics.
+/// Diagnostics and tests only -- not part of the supported API surface.
+#[doc(hidden)]
 pub fn worker_is_running() -> bool {
     SERVICE
         .get()
@@ -347,7 +445,13 @@ impl Registration {
     ///
     /// Pure with respect to the index (the two facts it needs are passed in),
     /// so the policy is unit-testable without a worker thread or a real graph.
-    fn evaluate(&mut self, pending: usize, should_compact: bool, now: Instant) -> bool {
+    fn evaluate(
+        &mut self,
+        pending: usize,
+        frozen_edges: usize,
+        should_compact: bool,
+        now: Instant,
+    ) -> bool {
         if pending == 0 {
             self.last_pending = Some(0);
             self.stable_ticks = 0;
@@ -361,8 +465,19 @@ impl Registration {
         self.stable_ticks = if stable { self.stable_ticks + 1 } else { 0 };
         self.last_pending = Some(pending);
 
-        let quiescent = self.stable_ticks >= self.config.quiet_ticks;
+        let quiescent = self.stable_ticks >= self.config.quiet_ticks
+            && self.worth_rebuilding(pending, frozen_edges);
         (quiescent || should_compact) && now >= self.next_eligible
+    }
+
+    /// Whether merging `pending` entries justifies rebuilding a CSR of
+    /// `frozen_edges` entries. See
+    /// [`AdjacencyMaintenanceConfig::quiescent_amortization`].
+    fn worth_rebuilding(&self, pending: usize, frozen_edges: usize) -> bool {
+        match self.config.quiescent_amortization {
+            0 => true,
+            amortization => pending.saturating_mul(amortization as usize) >= frozen_edges,
+        }
     }
 
     /// How long to sleep before re-evaluating this registration.
@@ -405,12 +520,29 @@ fn worker_loop() {
                 let pending = index.delta_edge_count() + index.tombstone_count();
                 sleep_for = sleep_for.min(entry.poll_interval(pending));
 
-                if entry.evaluate(pending, index.should_compact(), now) {
+                if entry.evaluate(
+                    pending,
+                    index.frozen_edge_count(),
+                    index.should_compact(),
+                    now,
+                ) {
                     scheduled.push(Scheduled {
                         id: entry.id,
                         index,
                     });
                 }
+            }
+
+            // Registrations exist but every upgrade failed (all dropped this
+            // instant): don't fall through to MAX_SLEEP, the next tick prunes.
+            if sleep_for == MAX_SLEEP {
+                sleep_for = Duration::from_millis(
+                    state
+                        .entries
+                        .first()
+                        .map(|e| e.config.idle_tick_interval_ms)
+                        .unwrap_or(500),
+                );
             }
 
             (scheduled, sleep_for)
@@ -440,8 +572,18 @@ fn worker_loop() {
         let mut state = service.state.lock();
         if !outcomes.is_empty() {
             let now = Instant::now();
+            // `entries` is append-only between prunes and ids are handed out in
+            // ascending order, and `outcomes` follows the same order, so one
+            // forward pass suffices -- a `find` per outcome would be O(N*K)
+            // while holding the registry lock every database construction
+            // needs.
+            let mut cursor = 0usize;
             for outcome in outcomes {
-                let Some(entry) = state.entries.iter_mut().find(|e| e.id == outcome.id) else {
+                while cursor < state.entries.len() && state.entries[cursor].id < outcome.id {
+                    cursor += 1;
+                }
+                let Some(entry) = state.entries.get_mut(cursor).filter(|e| e.id == outcome.id)
+                else {
                     continue;
                 };
                 entry.stable_ticks = 0;
@@ -489,15 +631,58 @@ mod policy_tests {
         }
     }
 
+    /// Frozen size used where the amortization floor is not what is under test
+    /// (600 pending edges clears the floor for any graph up to 6M edges).
+    const SMALL: usize = 0;
+
     #[test]
     fn quiescence_needs_two_matching_samples() {
         let mut entry = registration(AdjacencyMaintenanceConfig::default());
         let now = Instant::now();
 
         // First observation of pending work: nothing to compare against yet.
-        assert!(!entry.evaluate(600, false, now));
+        assert!(!entry.evaluate(600, SMALL, false, now));
         // Unchanged across a tick => no write landed => compact.
-        assert!(entry.evaluate(600, false, now));
+        assert!(entry.evaluate(600, SMALL, false, now));
+    }
+
+    #[test]
+    fn a_trickle_into_a_huge_graph_does_not_buy_a_full_rebuild() {
+        let mut entry = registration(AdjacencyMaintenanceConfig::default());
+        let now = Instant::now();
+        // One edge written into a 6M-edge graph, quiescent for many ticks:
+        // rebuilding 6M edges to merge one is not worth it.
+        for _ in 0..10 {
+            assert!(!entry.evaluate(1, 6_000_000, false, now));
+        }
+        // ... but once enough has accumulated to amortize the rebuild, it runs.
+        assert!(!entry.evaluate(600, 6_000_000, false, now));
+        assert!(entry.evaluate(600, 6_000_000, false, now));
+    }
+
+    #[test]
+    fn the_amortization_floor_never_blocks_a_small_graph() {
+        // Issue #3810's own case: a 600-edge graph, far below every size
+        // threshold, must still reach the frozen fast path.
+        let mut entry = registration(AdjacencyMaintenanceConfig::default());
+        let now = Instant::now();
+        assert!(!entry.evaluate(600, 0, false, now));
+        assert!(entry.evaluate(600, 0, false, now));
+
+        // And a single edge added to an already-compacted small graph.
+        let mut entry = registration(AdjacencyMaintenanceConfig::default());
+        let now = Instant::now();
+        assert!(!entry.evaluate(1, 600, false, now));
+        assert!(entry.evaluate(1, 600, false, now));
+    }
+
+    #[test]
+    fn amortization_can_be_switched_off() {
+        let mut entry =
+            registration(AdjacencyMaintenanceConfig::default().with_quiescent_amortization(0));
+        let now = Instant::now();
+        assert!(!entry.evaluate(1, 6_000_000, false, now));
+        assert!(entry.evaluate(1, 6_000_000, false, now));
     }
 
     #[test]
@@ -506,7 +691,7 @@ mod policy_tests {
         let now = Instant::now();
         for pending in [10, 25, 60, 200, 900] {
             assert!(
-                !entry.evaluate(pending, false, now),
+                !entry.evaluate(pending, SMALL, false, now),
                 "a growing delta means writes are still landing"
             );
         }
@@ -517,15 +702,15 @@ mod policy_tests {
         let mut entry = registration(AdjacencyMaintenanceConfig::default());
         let now = Instant::now();
         // Never stable, but `should_compact()` says the delta is oversized.
-        assert!(entry.evaluate(10_000, true, now));
+        assert!(entry.evaluate(10_000, 6_000_000, true, now));
     }
 
     #[test]
     fn nothing_pending_means_nothing_to_do() {
         let mut entry = registration(AdjacencyMaintenanceConfig::default());
         let now = Instant::now();
-        assert!(!entry.evaluate(0, false, now));
-        assert!(!entry.evaluate(0, true, now));
+        assert!(!entry.evaluate(0, SMALL, false, now));
+        assert!(!entry.evaluate(0, SMALL, true, now));
         assert_eq!(entry.stable_ticks, 0);
     }
 
@@ -535,10 +720,10 @@ mod policy_tests {
         let now = Instant::now();
         entry.next_eligible = now + Duration::from_secs(5);
 
-        assert!(!entry.evaluate(600, true, now), "still cooling down");
+        assert!(!entry.evaluate(600, SMALL, true, now), "still cooling down");
         // Quiescence bookkeeping still advances, so it fires as soon as the
         // cooldown expires rather than needing two fresh samples.
-        assert!(entry.evaluate(600, true, now + Duration::from_secs(6)));
+        assert!(entry.evaluate(600, SMALL, true, now + Duration::from_secs(6)));
     }
 
     #[test]
@@ -585,13 +770,36 @@ mod policy_tests {
         assert_eq!(cfg.tick_interval_ms, 1);
         assert!(cfg.idle_tick_interval_ms >= cfg.tick_interval_ms);
         assert_eq!(cfg.duty_cycle_percent, 1);
+        assert_eq!(cfg.quiet_ticks, 1, "zero would compact mid-write-burst");
     }
 
     #[test]
     fn disabled_config_never_registers() {
-        let before = registered_index_count();
+        // Asserted on the index's own weak count, not the process-global
+        // registry: hundreds of other tests in this binary construct databases
+        // concurrently, so the global count is not a stable baseline.
         let index = Arc::new(IncrementalAdjacencyIndex::new());
+        assert_eq!(Arc::weak_count(&index), 0);
         register(&index, AdjacencyMaintenanceConfig::disabled());
-        assert_eq!(registered_index_count(), before);
+        assert_eq!(
+            Arc::weak_count(&index),
+            0,
+            "a disabled config must not take a registration"
+        );
+    }
+
+    #[test]
+    fn an_enabled_config_registers_and_deregisters_with_the_index() {
+        let index = Arc::new(IncrementalAdjacencyIndex::new());
+        register(&index, AdjacencyMaintenanceConfig::default());
+        // Under Miri / wasm registration is a deliberate no-op.
+        if cfg!(any(target_arch = "wasm32", miri)) {
+            assert_eq!(Arc::weak_count(&index), 0);
+            return;
+        }
+        assert_eq!(Arc::weak_count(&index), 1);
+        // Dropping the index leaves only a dangling Weak, which the worker
+        // prunes: no shutdown call, no join, no leak of the index itself.
+        assert_eq!(Arc::strong_count(&index), 1);
     }
 }
