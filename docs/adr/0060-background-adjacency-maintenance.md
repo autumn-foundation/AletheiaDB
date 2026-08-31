@@ -134,6 +134,17 @@ Taking the delta reference first also pins that shard against retirement for the
 lifetime of the guard, which is what keeps the window flag meaningful for
 long-lived guards (e.g. `get_outgoing_edges_iter`).
 
+Tombstones are retired last, and only once nothing can still be reading the
+*retired* CSR. A tombstone is what hides a deleted edge that the old CSR still
+contains — the new one simply does not contain it — so dropping the tombstone
+while a reader still holds the old CSR would resurrect that edge in its result
+(guards consult the tombstone map lazily, while iterating). `ArcSwap::swap` has
+already converted every in-flight reader of the old CSR into a strong reference
+and no new reader can reach it, so exclusive ownership is a sound "nobody is
+looking at it" test. If a reader holds it longer than we are willing to wait,
+the tombstones simply stay for the next compaction: they are already excluded
+from the published CSR, so deferring costs only a later return to the fast path.
+
 `compact()` is additionally serialized with itself, and with
 `import_frozen_csr`, by a mutex taken only by compaction — never on the read or
 insert path.

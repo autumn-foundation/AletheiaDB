@@ -51,7 +51,12 @@
 //!    write burst does not, because the very next insert re-disables it.
 //! 3. **Size thresholds**: [`IncrementalAdjacencyIndex::should_compact`] still
 //!    applies, bounding delta growth under a write burst that never goes quiet.
-//! 4. **Rate limit**: after a compaction an index is ineligible until
+//! 4. **Amortization floor**: a quiescent index is compacted only when
+//!    `pending >= frozen_edges / quiescent_amortization`, so merging a single
+//!    edge never buys a full rebuild of a multi-million-edge CSR. The floor is
+//!    vacuous for the small graphs Issue #3810 is about (`frozen` is still 0 on
+//!    the first compaction).
+//! 5. **Rate limit**: after a compaction an index is ineligible until
 //!    `max(min_compaction_interval, cost * (100 - duty_cycle_percent) /
 //!    duty_cycle_percent)` has elapsed, where `cost` is how long that compaction
 //!    actually took. This is a self-tuning duty-cycle budget: compaction may
@@ -66,6 +71,23 @@
 //! below the 10,000-edge absolute threshold could never trigger compaction on
 //! size alone. Quiescence is size-independent, so a 600-edge graph reaches the
 //! frozen fast path just as a 6,000,000-edge one does.
+//!
+//! # Caveats
+//!
+//! - **`fork()`**: the worker and its registry are process-global, so a forked
+//!   child inherits the registrations but not the thread -- maintenance simply
+//!   stops there (and a fork taken while the registry lock was held would
+//!   deadlock the child's first database construction). Embedders that fork
+//!   after constructing a database should disable maintenance in the child, or
+//!   fork first.
+//! - **Long-held adjacency guards**: retiring merged delta entries takes the
+//!   same shard locks a live `MergedAdjacencyGuard` holds, so an iterator held
+//!   across arbitrary code delays this worker -- for every database in the
+//!   process, since there is only one. Guards are meant to be short-lived.
+//! - **Write-only databases** pay the compaction budget for a read fast path
+//!   nobody uses. A read-demand signal was considered and rejected for v1: the
+//!   cheap forms still touch the read path, which this module deliberately
+//!   keeps free of policy.
 //!
 //! # Not enabled everywhere
 //!
