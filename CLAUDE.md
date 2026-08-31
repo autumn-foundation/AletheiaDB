@@ -346,6 +346,10 @@ let config = AletheiaDBConfig::builder()
     .build();
 ```
 
+`ALETHEIADB_ADJACENCY_MAINTENANCE=off` disables it for a whole process -- the
+opt-out for `AletheiaDB::new()`/`open()`, which take no config, and the switch a
+profiler flips to compare the two read paths in one binary.
+
 **See [docs/adr/0060-background-adjacency-maintenance.md](docs/adr/0060-background-adjacency-maintenance.md).**
 
 ### MCP Server (Claude Integration)

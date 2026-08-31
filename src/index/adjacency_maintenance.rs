@@ -348,13 +348,37 @@ fn service() -> &'static Service {
     })
 }
 
+/// Environment kill switch for background maintenance.
+///
+/// `ALETHEIADB_ADJACENCY_MAINTENANCE=off` (also `0`, `false`, `no`, `disabled`)
+/// turns the worker off for the whole process, whatever the config says. This
+/// is the opt-out for callers that never build an [`AletheiaDBConfig`] --
+/// `AletheiaDB::new()` and `AletheiaDB::open()` take no maintenance policy --
+/// and the switch a benchmark or profiler flips to compare the frozen and
+/// merged read paths in one binary.
+pub const MAINTENANCE_ENV_VAR: &str = "ALETHEIADB_ADJACENCY_MAINTENANCE";
+
+/// Read once per process: an env var is process-scoped, and re-reading it on
+/// every database construction would be a syscall-free but still pointless cost
+/// on a path that can run thousands of times.
+fn disabled_by_env() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| match std::env::var(MAINTENANCE_ENV_VAR) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "off" | "0" | "false" | "no" | "disabled"
+        ),
+        Err(_) => false,
+    })
+}
+
 /// Register an adjacency index for background maintenance.
 ///
 /// Holds only a [`Weak`] reference: when the owning database is dropped, the
 /// registration becomes inert and is pruned on the next tick. Calling this with
 /// a disabled config, on `wasm32`, or under Miri is a no-op.
 pub(crate) fn register(index: &Arc<IncrementalAdjacencyIndex>, config: AdjacencyMaintenanceConfig) {
-    if !config.enabled {
+    if !config.enabled || disabled_by_env() {
         return;
     }
     // No threads on wasm32; no reason to interpret a poller under Miri.
@@ -793,6 +817,25 @@ mod policy_tests {
         assert!(cfg.idle_tick_interval_ms >= cfg.tick_interval_ms);
         assert_eq!(cfg.duty_cycle_percent, 1);
         assert_eq!(cfg.quiet_ticks, 1, "zero would compact mid-write-burst");
+    }
+
+    #[test]
+    fn the_env_kill_switch_recognises_off_values() {
+        // `disabled_by_env` caches its answer per process, so the parsing is
+        // tested directly rather than by mutating the environment (which would
+        // race every other test in this binary).
+        fn is_off(value: &str) -> bool {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "off" | "0" | "false" | "no" | "disabled"
+            )
+        }
+        for value in ["off", "OFF", " off ", "0", "false", "No", "disabled"] {
+            assert!(is_off(value), "{value} should disable maintenance");
+        }
+        for value in ["on", "1", "true", "", "yes"] {
+            assert!(!is_off(value), "{value} should not disable maintenance");
+        }
     }
 
     #[test]
