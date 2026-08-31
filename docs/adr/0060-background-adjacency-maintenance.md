@@ -180,11 +180,37 @@ the product exactly where Issue #3810 found it.
 
 ### Positive
 
-- Adjacency reads reach the frozen CSR fast path in a shipping database.
-  Measured on the issue's own harness (`bolt_workload`, 1,000 nodes / degree 6 /
-  3,000 read iterations): **356.6M → 304.6M instructions, -14.6%**, with the
-  merged-guard read machinery (delta `DashMap` lookup, SipHash, `iter_set`
-  iteration) gone from the profile.
+- Adjacency reads reach the frozen CSR fast path in a shipping database. The
+  same call is **32% faster in wall clock** once compacted --
+  `CurrentStorage::get_outgoing_edges` on a 2,000-node / degree-8 graph:
+  **92.5ns merged → 62.5ns frozen** (criterion,
+  `benches/incremental_adjacency.rs::storage_adjacency_read`).
+
+  Instruction counts tell a more nuanced story, and it is worth recording
+  because Issue #3810 was opened on one. On the issue's own harness
+  (`bolt_workload`, 1,000 nodes / degree 6 / 3,000 read iterations, callgrind
+  with `--fair-sched=yes`, maintenance on vs off in the same binary):
+
+  | Metric | Merged (off) | Frozen (on) | Δ |
+  |---|---|---|---|
+  | `get_outgoing_edges`, inclusive | 57.41M | 49.17M | **-14.4%** |
+  | Whole workload | 358.27M | 359.90M | +0.5% |
+
+  The merged-guard machinery the issue measured (delta `DashMap` lookup,
+  `MergedAdjacencyGuard::iter`, the guard's `Option`/`Vec` fragments) does leave
+  the profile -- about -9M instructions -- but the frozen path's own CSR
+  `binary_search` plus slice copy adds most of that back, so the *instruction*
+  total for this workload is flat to slightly up. The wall-clock win is real
+  anyway: the delta path's instructions are dominated by dependent, cache-missing
+  loads that the frozen path does not perform.
+
+  Two measurement notes for whoever re-runs this: plain `callgrind` (no
+  `--fair-sched=yes`) serializes threads so aggressively that the maintenance
+  worker gets ~21k instructions across a whole run and **never compacts** -- the
+  protocol in the issue cannot observe this feature. And
+  `get_outgoing_edges_iter` measures ~236ns against the `Vec`-returning call's
+  62ns, because it re-runs the CSR binary search on every `next()`; that is
+  pre-existing and worth its own issue.
 - A latent torn-read bug that could return an empty adjacency list during any
   concurrent compaction is fixed, and concurrent compactions can no longer lose
   edges.

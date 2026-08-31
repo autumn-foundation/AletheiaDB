@@ -26,9 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once writes go quiet, so adjacency reads finally reach the ADR-0026
   frozen-CSR fast path: before this, `CurrentStorage::new()` started no
   compactor at all and **100%** of `get_outgoing_edges`/`get_incoming_edges`
-  calls permanently took the merged (delta) path. Measured on the issue's own
-  harness (`examples/bolt_workload.rs`, 1,000 nodes / degree 6 / 3,000 read
-  iterations): **356.6M -> 304.6M instructions, -14.6%**.
+  calls permanently took the merged (delta) path. The same call is **32% faster**
+  once compacted (92.5ns -> 62.5ns for `get_outgoing_edges` on a 2,000-node,
+  degree-8 graph); on the issue's own callgrind harness the adjacency read costs
+  **14% fewer instructions** (57.4M -> 49.2M inclusive) while the whole-workload
+  instruction total is flat (+0.5%) -- see ADR-0060 for why the two metrics
+  disagree.
   - New public API: `AletheiaDB::adjacency_stats()` (per-layer occupancy;
     `is_fully_compacted()` means "reads are on the fast path") and
     `AletheiaDB::compact_adjacency()` (force it now).
