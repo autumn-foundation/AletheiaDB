@@ -19,10 +19,12 @@
 #![cfg(not(miri))]
 
 use aletheiadb::AletheiaDBConfig;
+use aletheiadb::config::WalConfigBuilder;
 use aletheiadb::index::adjacency_maintenance::{self, AdjacencyMaintenanceConfig};
 use aletheiadb::prelude::*;
 use serial_test::serial;
 use std::time::{Duration, Instant};
+use tempfile::TempDir;
 
 /// Poll `cond` until it holds or `timeout` elapses. Returns whether it held.
 ///
@@ -70,6 +72,28 @@ fn build_graph(db: &AletheiaDB, nodes: usize, out_degree: usize) -> Vec<NodeId> 
         }
     }
     ids
+}
+
+/// Build a database with an explicit maintenance policy, isolated on disk.
+///
+/// `AletheiaDBConfig::default()` points the WAL at the fixed *relative* path
+/// `aletheiadb/wal`, so two databases built from it in one working directory
+/// share a WAL and corrupt each other's segments (`Unknown WAL operation
+/// type`). `AletheiaDB::new()` avoids that with a tempdir; anything going
+/// through `with_unified_config` has to arrange it. The returned guard keeps
+/// the directory alive for the database's lifetime.
+fn db_with_maintenance(maintenance: AdjacencyMaintenanceConfig) -> (TempDir, AletheiaDB) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = AletheiaDBConfig::builder()
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(dir.path().join("wal"))
+                .build(),
+        )
+        .adjacency(maintenance)
+        .build();
+    let db = AletheiaDB::with_unified_config(config).expect("create db");
+    (dir, db)
 }
 
 /// AC1/AC2/AC4: a database built through the public API compacts on its own
@@ -219,10 +243,7 @@ fn adjacency_reads_are_unchanged_by_background_compaction() {
 #[test]
 #[serial]
 fn maintenance_can_be_disabled_via_config() {
-    let config = AletheiaDBConfig::builder()
-        .adjacency(AdjacencyMaintenanceConfig::disabled())
-        .build();
-    let db = AletheiaDB::with_unified_config(config).expect("create db");
+    let (_dir, db) = db_with_maintenance(AdjacencyMaintenanceConfig::disabled());
     build_graph(&db, 20, 2);
 
     // Give a would-be worker far longer than its tick interval to act.
@@ -257,15 +278,12 @@ fn maintenance_does_not_spawn_a_thread_per_database() {
 
     const DBS: usize = 20;
 
-    fn make(maintenance: AdjacencyMaintenanceConfig) -> Vec<AletheiaDB> {
+    fn make(maintenance: AdjacencyMaintenanceConfig) -> Vec<(TempDir, AletheiaDB)> {
         (0..DBS)
             .map(|_| {
-                let config = AletheiaDBConfig::builder()
-                    .adjacency(maintenance.clone())
-                    .build();
-                let db = AletheiaDB::with_unified_config(config).expect("create db");
+                let (dir, db) = db_with_maintenance(maintenance.clone());
                 build_graph(&db, 5, 1);
-                db
+                (dir, db)
             })
             .collect()
     }
