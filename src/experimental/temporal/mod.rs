@@ -35,3 +35,4 @@ pub mod sherlock;
 pub mod temporal_diff;
 /// Temporal narrative generator: natural-language history logs from version diffs.
 pub mod temporal_narrative;
+pub mod timelapse;
