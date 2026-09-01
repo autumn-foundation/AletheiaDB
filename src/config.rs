@@ -1066,6 +1066,13 @@ pub struct AletheiaDBConfig {
     /// unset), so a database's behavior is unchanged unless an operator opts
     /// in. See [`ReplicationConfig`] for what each field wires up.
     pub replication: ReplicationConfig,
+    /// Background adjacency-index maintenance (Issue #3810). **Enabled by
+    /// default**: a shared, process-wide worker compacts the delta buffer into
+    /// the frozen CSR once writes go quiet, which is the only way reads reach
+    /// the ADR-0026 frozen fast path. Disable with
+    /// [`AdjacencyMaintenanceConfig::disabled`] to keep compaction strictly
+    /// explicit (`AletheiaDB::compact_adjacency`).
+    pub adjacency: crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig,
 }
 
 /// Builder for unified database configuration.
@@ -1106,6 +1113,15 @@ impl AletheiaDBConfigBuilder {
     /// Set persistence configuration.
     pub fn persistence(mut self, persistence_config: PersistenceConfig) -> Self {
         self.config.persistence = persistence_config;
+        self
+    }
+
+    /// Set the background adjacency-maintenance policy (Issue #3810).
+    pub fn adjacency(
+        mut self,
+        adjacency_config: crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig,
+    ) -> Self {
+        self.config.adjacency = adjacency_config;
         self
     }
 
@@ -1597,6 +1613,50 @@ mod tests {
         assert!(toml_string.contains("max_versions_per_entity"));
         assert!(toml_string.contains("max_k"));
         assert!(toml_string.contains("anchor_interval"));
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn test_toml_adjacency_section_round_trips() {
+        use crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig;
+
+        // Background adjacency maintenance (Issue #3810) must be tunable from
+        // an on-disk config, and -- because it is ON by default -- an existing
+        // config with no `[adjacency]` section must keep the default policy.
+        let toml_str = r#"
+[adjacency]
+enabled = false
+tick_interval_ms = 25
+quiet_ticks = 3
+duty_cycle_percent = 50
+quiescent_amortization = 0
+        "#;
+
+        let config = AletheiaDBConfig::from_toml_str(toml_str).unwrap();
+        assert!(!config.adjacency.enabled);
+        assert_eq!(config.adjacency.tick_interval_ms, 25);
+        assert_eq!(config.adjacency.quiet_ticks, 3);
+        assert_eq!(config.adjacency.duty_cycle_percent, 50);
+        assert_eq!(config.adjacency.quiescent_amortization, 0);
+        // Unspecified keys keep their defaults.
+        assert_eq!(
+            config.adjacency.min_compaction_interval_ms,
+            AdjacencyMaintenanceConfig::default().min_compaction_interval_ms
+        );
+
+        let rendered = config.to_toml_string().unwrap();
+        assert!(
+            rendered.contains("[adjacency]"),
+            "rendered TOML: {rendered}"
+        );
+        let reparsed = AletheiaDBConfig::from_toml_str(&rendered).unwrap();
+        assert_eq!(reparsed.adjacency, config.adjacency);
+
+        // Omitting the section leaves maintenance enabled: without it the
+        // frozen-CSR read fast path is unreachable (Issue #3810).
+        let bare = AletheiaDBConfig::from_toml_str("[wal]\nnum_stripes = 4\n").unwrap();
+        assert_eq!(bare.adjacency, AdjacencyMaintenanceConfig::default());
+        assert!(bare.adjacency.enabled);
     }
 
     #[test]

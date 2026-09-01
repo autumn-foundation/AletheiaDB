@@ -8,12 +8,13 @@ use aletheiadb::core::graph::Edge;
 use aletheiadb::core::id::{EdgeId, NodeId, VersionId};
 use aletheiadb::core::interning::GLOBAL_INTERNER;
 use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::index::adjacency_maintenance::AdjacencyMaintenanceConfig;
 use aletheiadb::index::current::CurrentIndexes;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
 fn bench_iter_edges(c: &mut Criterion) {
-    let indexes = CurrentIndexes::new();
+    let indexes = CurrentIndexes::with_maintenance_config(AdjacencyMaintenanceConfig::disabled());
     let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
     let props = PropertyMapBuilder::new().build();
     let version = VersionId::new(1).unwrap();

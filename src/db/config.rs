@@ -1078,7 +1078,12 @@ impl AletheiaDB {
             };
 
             let mut db = AletheiaDB {
-                current: Arc::new(CurrentStorage::new()),
+                // Issue #3810: enroll this database's adjacency indexes in the
+                // shared background maintenance worker, so reads reach the
+                // ADR-0026 frozen-CSR fast path once writes go quiet.
+                current: Arc::new(CurrentStorage::with_adjacency_maintenance(
+                    config.adjacency.clone(),
+                )),
                 role: crate::db::replication_role::new_role_cell(),
                 historical: Arc::new(RwLock::new(HistoricalStorage::from_unified_config(
                     config.historical,
@@ -1799,6 +1804,12 @@ impl AletheiaDB {
     ///
     /// This maintains backward compatibility with the old API.
     /// For new code, prefer using [`with_unified_config`](Self::with_unified_config).
+    ///
+    /// Background adjacency maintenance (Issue #3810) uses the default policy
+    /// here, since this signature carries no place to configure it; use
+    /// [`with_unified_config`](Self::with_unified_config) with
+    /// [`AdjacencyMaintenanceConfig::disabled`](crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig::disabled)
+    /// to opt out.
     ///
     /// # Errors
     ///

@@ -21,6 +21,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Background adjacency maintenance (Issue #3810, ADR-0060). A single
+  **process-wide** worker thread compacts every database's adjacency indexes
+  once writes go quiet, so adjacency reads finally reach the ADR-0026
+  frozen-CSR fast path: before this, `CurrentStorage::new()` started no
+  compactor at all and **100%** of `get_outgoing_edges`/`get_incoming_edges`
+  calls permanently took the merged (delta) path. The same call is **32% faster**
+  once compacted (92.5ns -> 62.5ns for `get_outgoing_edges` on a 2,000-node,
+  degree-8 graph); on the issue's own callgrind harness the adjacency read costs
+  **14% fewer instructions** (57.4M -> 49.2M inclusive) while the whole-workload
+  instruction total is flat (+0.5%) -- see ADR-0060 for why the two metrics
+  disagree.
+  - New public API: `AletheiaDB::adjacency_stats()` (per-layer occupancy;
+    `is_fully_compacted()` means "reads are on the fast path") and
+    `AletheiaDB::compact_adjacency()` (force it now).
+  - New config section `[adjacency]` / `AletheiaDBConfig::adjacency`
+    (`AdjacencyMaintenanceConfig`): enabled by default, tick/quiet-tick,
+    minimum interval, duty-cycle budget, and a quiescence amortization floor.
+    `AdjacencyMaintenanceConfig::disabled()` restores the previous behavior
+    (correct reads via the merged path; compaction only when asked).
+  - No-op on `wasm32` and under Miri.
 - WAL stall diagnosability (Issue #3798). Two additive config fields:
   `ConcurrentWalSystemConfig::max_append_block_ms` /
   `ConcurrentWalConfig::max_append_block_ms` (default 30_000; `0` = unbounded)
@@ -49,6 +69,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resulting policy is stored **per coordinator** (captured at construction), so
   the flag and the re-entrancy tests coexist — each test pins the behavior it
   asserts on its own instance instead of inheriting the job's environment.
+
+### Fixed
+
+- Adjacency compaction could tear a concurrent read (Issue #3810). It retired
+  the delta entries **before** publishing the CSR that absorbed them, so a
+  reader landing in that window got an adjacency list missing those edges — an
+  **empty** one on a freshly built graph. Compaction now publishes first and
+  retires selectively, de-duplicating the entries the two layers briefly share.
+  Dormant until now because nothing ever ran compaction concurrently with
+  reads; routine once the background worker exists. Also fixed in the same
+  area: two concurrent compactions could lose edges (compaction is now
+  serialized with itself and with `import_frozen_csr`); a compaction that
+  panicked mid-publish left permanent duplicates behind; persisted CSR
+  export/import could duplicate or drop an edge in one direction when the two
+  adjacency indexes were compacted at different instants; and a persisted CSR
+  entry whose edge was missing from the persisted edge list was materialized as
+  a phantom edge to node 0 instead of being dropped.
 
 ### Changed
 

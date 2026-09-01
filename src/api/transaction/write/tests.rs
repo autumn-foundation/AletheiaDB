@@ -84,9 +84,23 @@ mod tombstone_tests {
 mod general_tests {
     use super::*;
     use crate::core::property::PropertyMapBuilder;
+    use crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig;
 
     fn create_test_write_tx() -> (WriteTransaction, TempDir) {
-        let current = Arc::new(CurrentStorage::new());
+        create_test_write_tx_with(CurrentStorage::new())
+    }
+
+    /// Variant for tests that assert on which adjacency *layer* an edge landed
+    /// in: background maintenance (Issue #3810) would otherwise be free to
+    /// compact the delta away between the commit and the assertion.
+    fn create_test_write_tx_unmanaged() -> (WriteTransaction, TempDir) {
+        create_test_write_tx_with(CurrentStorage::with_adjacency_maintenance(
+            AdjacencyMaintenanceConfig::disabled(),
+        ))
+    }
+
+    fn create_test_write_tx_with(storage: CurrentStorage) -> (WriteTransaction, TempDir) {
+        let current = Arc::new(storage);
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let temporal_indexes = Arc::new(TemporalIndexes::new());
 
@@ -1089,7 +1103,10 @@ mod general_tests {
 
     #[test]
     fn test_edge_commit_does_not_force_adjacency_compaction() {
-        let (mut tx, _temp_dir) = create_test_write_tx();
+        // Background maintenance disabled: this test asserts the edge is still
+        // in the *delta* layer after commit, which a background compaction is
+        // entitled to change moments later (Issue #3810).
+        let (mut tx, _temp_dir) = create_test_write_tx_unmanaged();
         let current = Arc::clone(&tx.current);
 
         let props = PropertyMapBuilder::new().build();

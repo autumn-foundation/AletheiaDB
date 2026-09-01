@@ -83,6 +83,16 @@ Current implementation notes: `wal` is a `ConcurrentWalSystem`, `temporal_indexe
 
 If code must acquire both adjacency indexes, acquire `outgoing` before `incoming`. Neither adjacency index may call back into `historical`, `wal`, or `current_timestamp` while held.
 
+Two primitives sit **below** the adjacency indexes in this order (Issue #3810):
+each `IncrementalAdjacencyIndex`'s `compaction_lock` (taken only by compaction,
+CSR import, and the consistent CSR-pair export -- never on a read or insert
+path), and the process-global adjacency-maintenance registry mutex (taken by
+`register()` and by the maintenance worker's tick, and never while holding any
+other AletheiaDB lock). A thread must not take an adjacency *shard* guard (a
+`MergedAdjacencyGuard` / `OutgoingEdgesIter`) and then take that index's
+`compaction_lock` on the same thread: compaction's retire pass needs the same
+shard.
+
 ## Testing Requirements
 
 **See [TESTING.md](TESTING.md) for detailed testing instructions.**
@@ -292,6 +302,55 @@ let db = AletheiaDB::with_unified_config(config)?;
 - Latency metrics with percentiles (p50, p95, p99)
 
 **See [docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md) for complete guide.**
+
+### Background Adjacency Maintenance (Issue #3810)
+
+Adjacency reads (`get_outgoing_edges`, `get_incoming_edges`, traversal) have a
+frozen-CSR fast path (~8-14ns) that is only available while the delta buffer and
+tombstone set are **globally empty** -- a state only compaction produces.
+ADR-0026 shipped a `CompactionScheduler` that no shipping constructor ever
+started, so 100% of adjacency reads permanently took the merged (delta) path.
+
+A single **process-wide** worker now services every database's two adjacency
+indexes through `Weak` references (**not** two threads per database, and no
+shutdown obligation -- dropping a database deregisters it). It compacts an index
+when writes go **quiescent** (pending count unchanged across `quiet_ticks`),
+which is what actually unlocks the fast path and is size-independent -- closing
+ADR-0026's threshold bootstrap gap, where `should_compact()`'s ratio branch is
+dead on a fresh index (`frozen == 0`) and a graph under 10,000 edges could never
+trigger compaction. `should_compact()`'s size thresholds still bound delta growth
+under a burst that never goes quiet, and a **duty-cycle limiter** (default 10% of
+one core per index, measured from the last compaction's own cost) keeps a
+read/write-interleaved workload off the O(E log E) rebuild cliff. All policy runs
+on the worker: neither the read nor the write hot path gains an instruction of it.
+
+Compaction now **publishes the rebuilt CSR before retiring** the delta entries it
+absorbed (selectively, so a mid-compaction write is not dropped), and is
+serialized with itself. The old order left a window in which an edge was in
+neither layer -- a concurrent reader got an adjacency list *missing* those edges,
+or an **empty** one on a freshly built graph. The new order's window has an edge
+in *both* layers, which readers de-duplicate. Read order is a correctness
+contract (counters→frozen on the fast path; delta→frozen→publish-window on the
+merged path) and is documented at each reader.
+
+```rust
+use aletheiadb::{AletheiaDB, AletheiaDBConfig, AdjacencyMaintenanceConfig};
+
+let db = AletheiaDB::new()?;
+db.adjacency_stats().is_fully_compacted();   // true == reads are on the fast path
+db.compact_adjacency();                       // force it now (bulk load, benchmarks)
+
+// Opt out (reads stay correct, they just keep taking the merged path):
+let config = AletheiaDBConfig::builder()
+    .adjacency(AdjacencyMaintenanceConfig::disabled())
+    .build();
+```
+
+`ALETHEIADB_ADJACENCY_MAINTENANCE=off` disables it for a whole process -- the
+opt-out for `AletheiaDB::new()`/`open()`, which take no config, and the switch a
+profiler flips to compare the two read paths in one binary.
+
+**See [docs/adr/0060-background-adjacency-maintenance.md](docs/adr/0060-background-adjacency-maintenance.md).**
 
 ### MCP Server (Claude Integration)
 

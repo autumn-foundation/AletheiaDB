@@ -1828,7 +1828,12 @@ fn test_traversal_targets_and_sources() {
 
 #[test]
 fn test_iterators_with_delta_and_tombstones() {
-    let storage = CurrentStorage::new();
+    // Background maintenance disabled (Issue #3810): this test asserts on the
+    // exact frozen/delta/tombstone split, which a background compaction is
+    // entitled to change between the setup and the assertions.
+    let storage = CurrentStorage::with_adjacency_maintenance(
+        crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig::disabled(),
+    );
 
     let n0 = storage.create_node("Person", Default::default()).unwrap();
     let n1 = storage.create_node("Person", Default::default()).unwrap();

@@ -179,7 +179,8 @@ pub use db::{
     WorkflowError, WorkflowJournal, WorkflowJournalExt, WorkflowRun, WorkflowStatus,
 };
 pub use index::{
-    AdjacencyIndex, CurrentIndexes, PropertyIndexInfo, TemporalIndexes,
+    AdjacencyIndex, AdjacencyIndexStats, AdjacencyLayerStats, AdjacencyMaintenanceConfig,
+    CurrentIndexes, PropertyIndexInfo, TemporalIndexes,
     vector::{DistanceMetric, HnswConfig, TemporalVectorConfig},
 };
 pub use storage::CurrentStorage;

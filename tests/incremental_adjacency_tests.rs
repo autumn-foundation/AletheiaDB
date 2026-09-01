@@ -6,6 +6,7 @@
 use aletheiadb::core::id::{EdgeId, NodeId};
 use aletheiadb::core::interning::GLOBAL_INTERNER;
 use aletheiadb::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
+use aletheiadb::index::adjacency_maintenance::AdjacencyMaintenanceConfig;
 use aletheiadb::index::incremental_adjacency::{
     CompactionScheduler, IncrementalAdjacencyIndex, IncrementalConfig,
 };
@@ -1360,7 +1361,11 @@ mod phase7_persistence_integration {
     // Step 7.1: Test delta reconstruction after import
     #[test]
     fn test_delta_reconstruction_after_import() {
-        let indexes = CurrentIndexes::new();
+        // Background maintenance disabled (Issue #3810): this test asserts on
+        // the exact frozen/delta split on both the exporting and the importing
+        // index, which a background compaction is entitled to change.
+        let indexes =
+            CurrentIndexes::with_maintenance_config(AdjacencyMaintenanceConfig::disabled());
         let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
         // Insert 10 edges
@@ -1397,7 +1402,8 @@ mod phase7_persistence_integration {
         let (in_nodes, in_offsets, in_edges) = indexes.export_incoming_csr();
 
         // Create new indexes and import
-        let new_indexes = CurrentIndexes::new();
+        let new_indexes =
+            CurrentIndexes::with_maintenance_config(AdjacencyMaintenanceConfig::disabled());
 
         // Copy edges to new indexes (simulating persistence loading)
         // In real persistence, edges would be loaded from disk
@@ -1465,7 +1471,8 @@ mod phase7_persistence_integration {
         let (out_nodes, out_offsets, out_edges) = indexes.export_outgoing_csr();
         let (in_nodes, in_offsets, in_edges) = indexes.export_incoming_csr();
 
-        let new_indexes = CurrentIndexes::new();
+        let new_indexes =
+            CurrentIndexes::with_maintenance_config(AdjacencyMaintenanceConfig::disabled());
         // Copy all edges using public API (simulating persistence loading)
         let max_edge_id = 100; // Large enough to cover all tests
         for i in 0..max_edge_id {
@@ -1502,7 +1509,11 @@ mod phase7_persistence_integration {
     // Step 7.5: Test delta reconstruction with multiple nodes
     #[test]
     fn test_delta_reconstruction_multiple_nodes() {
-        let indexes = CurrentIndexes::new();
+        // Background maintenance disabled (Issue #3810): this test asserts on
+        // the exact frozen/delta split on both the exporting and the importing
+        // index, which a background compaction is entitled to change.
+        let indexes =
+            CurrentIndexes::with_maintenance_config(AdjacencyMaintenanceConfig::disabled());
         let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
         // Insert edges for nodes 0, 1, 2
@@ -1544,7 +1555,8 @@ mod phase7_persistence_integration {
         let (out_nodes, out_offsets, out_edges) = indexes.export_outgoing_csr();
         let (in_nodes, in_offsets, in_edges) = indexes.export_incoming_csr();
 
-        let new_indexes = CurrentIndexes::new();
+        let new_indexes =
+            CurrentIndexes::with_maintenance_config(AdjacencyMaintenanceConfig::disabled());
         // Copy all edges using public API (simulating persistence loading)
         let max_edge_id = 100; // Large enough to cover all tests
         for i in 0..max_edge_id {
@@ -1610,7 +1622,8 @@ mod phase7_persistence_integration {
         let (out_nodes, out_offsets, out_edges) = indexes.export_outgoing_csr();
         let (in_nodes, in_offsets, in_edges) = indexes.export_incoming_csr();
 
-        let new_indexes = CurrentIndexes::new();
+        let new_indexes =
+            CurrentIndexes::with_maintenance_config(AdjacencyMaintenanceConfig::disabled());
         // Copy all edges using public API (simulating persistence loading)
         let max_edge_id = 100; // Large enough to cover all tests
         for i in 0..max_edge_id {

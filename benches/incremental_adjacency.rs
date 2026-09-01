@@ -471,6 +471,75 @@ fn setup_index_with_edges(num_edges: usize) -> IncrementalAdjacencyIndex {
     IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen))
 }
 
+/// End-to-end adjacency read through the public storage API (Issue #3810).
+///
+/// The `bench_frozen_view` group above hoists `frozen_view()` out of the timed
+/// loop, so it never measures the layer-state check that every real read pays
+/// -- which is exactly where #3810 changed the code (two counter loads, now
+/// acquire-ordered, plus the publish-window load on the merged path). This
+/// group measures `CurrentStorage::get_outgoing_edges` as callers actually
+/// reach it, in the two states a shipping database can be in:
+///
+/// - `compacted`: what background maintenance now produces, i.e. the frozen
+///   CSR fast path;
+/// - `uncompacted`: what every database was permanently stuck in before
+///   #3810, i.e. the merged (delta) path.
+fn bench_storage_adjacency_read(c: &mut Criterion) {
+    use aletheiadb::index::adjacency_maintenance::AdjacencyMaintenanceConfig;
+    use aletheiadb::storage::current::CurrentStorage;
+
+    const NODES: usize = 2_000;
+    const OUT_DEGREE: usize = 8;
+
+    // Maintenance off: the two states below must stay exactly as constructed
+    // for the whole measurement.
+    let build = || {
+        let storage =
+            CurrentStorage::with_adjacency_maintenance(AdjacencyMaintenanceConfig::disabled());
+        let ids: Vec<_> = (0..NODES)
+            .map(|_| {
+                storage
+                    .create_node("Person", Default::default())
+                    .expect("create node")
+            })
+            .collect();
+        for i in 0..NODES {
+            for j in 0..OUT_DEGREE {
+                storage
+                    .create_edge(
+                        ids[i],
+                        ids[(i + j + 1) % NODES],
+                        "KNOWS",
+                        Default::default(),
+                    )
+                    .expect("create edge");
+            }
+        }
+        (storage, ids)
+    };
+
+    let mut group = c.benchmark_group("storage_adjacency_read");
+
+    let (uncompacted, ids) = build();
+    let probe = ids[NODES / 2];
+    group.bench_function("get_outgoing_edges/uncompacted", |b| {
+        b.iter(|| black_box(uncompacted.get_outgoing_edges(black_box(probe))))
+    });
+    drop(uncompacted);
+
+    let (compacted, ids) = build();
+    compacted.compact_adjacency();
+    let probe = ids[NODES / 2];
+    group.bench_function("get_outgoing_edges/compacted", |b| {
+        b.iter(|| black_box(compacted.get_outgoing_edges(black_box(probe))))
+    });
+    group.bench_function("get_outgoing_edges_iter/compacted", |b| {
+        b.iter(|| black_box(compacted.get_outgoing_edges_iter(black_box(probe)).count()))
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_insert_latency,
@@ -480,5 +549,6 @@ criterion_group!(
     bench_compaction_throughput,
     bench_concurrent_read_write,
     bench_comparison_current_csr,
+    bench_storage_adjacency_read,
 );
 criterion_main!(benches);

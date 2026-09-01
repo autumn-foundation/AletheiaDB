@@ -10,7 +10,8 @@ use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::temporal::Timestamp;
-use crate::index::current::CurrentIndexes;
+use crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig;
+use crate::index::current::{AdjacencyIndexStats, CurrentIndexes, ExportedCsrPair};
 use crate::index::vector::hnsw::{HnswConfig, HnswIndex};
 use crate::index::vector::temporal::{TemporalVectorConfig, TemporalVectorIndex};
 use crate::index::vector::{TemporalSearchResults, VectorIndex};
@@ -84,9 +85,21 @@ pub struct CurrentStorage {
 
 impl CurrentStorage {
     /// Create a new empty current storage.
+    ///
+    /// Its adjacency indexes are enrolled in the shared background maintenance
+    /// worker (Issue #3810) with the default policy, so reads reach the
+    /// frozen-CSR fast path once writes go quiet. Use
+    /// [`with_adjacency_maintenance`](Self::with_adjacency_maintenance) to
+    /// choose a different policy (or none).
     pub fn new() -> Self {
+        Self::with_adjacency_maintenance(AdjacencyMaintenanceConfig::default())
+    }
+
+    /// Create a new empty current storage with an explicit background
+    /// adjacency-maintenance policy (Issue #3810).
+    pub fn with_adjacency_maintenance(maintenance: AdjacencyMaintenanceConfig) -> Self {
         CurrentStorage {
-            indexes: CurrentIndexes::new(),
+            indexes: CurrentIndexes::with_maintenance_config(maintenance),
             node_id_gen: IdGenerator::new(),
             edge_id_gen: IdGenerator::new(),
             version_id_gen: IdGenerator::new(),
@@ -949,7 +962,8 @@ impl CurrentStorage {
     ///
     /// - After bulk inserts (to move many edges from delta to frozen)
     /// - To reduce delta size before persistence
-    /// - Usually not needed if background compaction is enabled
+    /// - Rarely needed since Issue #3810: background maintenance compacts on
+    ///   its own once writes go quiet (unless it is disabled by config)
     ///
     /// # Performance
     ///
@@ -957,6 +971,14 @@ impl CurrentStorage {
     /// Typically much faster than the old O(E log E) rebuild where E is total edges.
     pub fn compact_adjacency(&self) {
         self.indexes.compact_adjacency();
+    }
+
+    /// Layer occupancy of both adjacency indexes (Issue #3810).
+    ///
+    /// `is_fully_compacted()` is true exactly when adjacency reads take the
+    /// frozen-CSR fast path.
+    pub fn adjacency_stats(&self) -> AdjacencyIndexStats {
+        self.indexes.adjacency_stats()
     }
 
     /// Get the current number of delta edges (test-only).
@@ -1171,6 +1193,13 @@ impl CurrentStorage {
     /// Export incoming CSR adjacency data for persistence.
     pub fn export_incoming_csr(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
         self.indexes.export_incoming_csr()
+    }
+
+    /// Export both directions' frozen CSRs as one compaction-consistent pair
+    /// (Issue #3810). See
+    /// [`CurrentIndexes::export_csr_pair`](crate::index::CurrentIndexes::export_csr_pair).
+    pub fn export_csr_pair(&self) -> ExportedCsrPair {
+        self.indexes.export_csr_pair()
     }
 
     /// Import CSR adjacency data from persistence.
