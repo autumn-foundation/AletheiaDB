@@ -541,6 +541,11 @@ path = "tests/lost_write_persist_race.rs"
 required-features = ["testing"]
 
 # Examples with required features
+# Bolt profiling workload for the Cypher string-in execution path.
+[[example]]
+name = "bolt_cypher_workload"
+required-features = ["cypher"]
+
 # Embedding examples require their respective feature flags
 [[example]]
 name = "embedding_openai"
