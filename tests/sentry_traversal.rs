@@ -131,4 +131,86 @@ mod tests {
         assert_eq!(rows[0].entity.node_id(), Some(b));
         assert_eq!(rows[1].entity.node_id(), Some(b));
     }
+
+    /// Regression test for Issue #3794: the path arena must materialize the
+    /// exact same paths the old per-enqueue `Vec<EntityId>` clone produced.
+    ///
+    /// Graph: A -> B -> D -> E, A -> C -> D (diamond). Node-distinct BFS from
+    /// A at depth 3 must emit B, C, D, E with full alternating
+    /// [Node, Edge, Node, ...] paths, D reached via B (shortest first), and E
+    /// via the same B-side chain.
+    #[test]
+    fn test_traversal_path_arena_materializes_exact_paths() {
+        use aletheiadb::query::executor::EntityId;
+
+        let current = Arc::new(CurrentStorage::new());
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+
+        let mk = |name: &str| {
+            current
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", name).build(),
+                )
+                .unwrap()
+        };
+        let (a, b, c, d, e) = (mk("A"), mk("B"), mk("C"), mk("D"), mk("E"));
+        let link = |s, t| {
+            current
+                .create_edge(s, t, "KNOWS", PropertyMapBuilder::new().build())
+                .unwrap()
+        };
+        let e_ab = link(a, b);
+        let e_ac = link(a, c);
+        let e_bd = link(b, d);
+        let _e_cd = link(c, d);
+        let e_de = link(d, e);
+
+        let executor = QueryExecutor::new(current, historical);
+        let plan = PhysicalPlan {
+            root: PhysicalOp::IndexedTraversal {
+                input: Box::new(PhysicalOp::NodeLookup { node_ids: vec![a] }),
+                direction: aletheiadb::query::ir::Direction::Outgoing,
+                label: None,
+                min_depth: 1,
+                depth: 3,
+                temporal_context: None,
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            // `ProvenanceFilterIterator` strips `row.path` when provenance is
+            // excluded; this test asserts the exact materialized paths, so
+            // provenance must be on for the paths to survive `execute`.
+            include_provenance: true,
+        };
+
+        let results = executor.execute(plan).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+        assert_eq!(rows.len(), 4, "expected B, C, D, E");
+
+        let path_of = |row: &aletheiadb::query::executor::QueryRow| {
+            row.path.clone().expect("traversal rows carry a path")
+        };
+        let n = EntityId::Node;
+        let edge = EntityId::Edge;
+
+        assert_eq!(rows[0].entity.node_id(), Some(b));
+        assert_eq!(path_of(&rows[0]), vec![n(a), edge(e_ab), n(b)]);
+        assert_eq!(rows[1].entity.node_id(), Some(c));
+        assert_eq!(path_of(&rows[1]), vec![n(a), edge(e_ac), n(c)]);
+        // D is node-distinct: reached once, via B (enqueued first).
+        assert_eq!(rows[2].entity.node_id(), Some(d));
+        assert_eq!(
+            path_of(&rows[2]),
+            vec![n(a), edge(e_ab), n(b), edge(e_bd), n(d)]
+        );
+        // E's path extends the D row's chain -- the arena must not alias or
+        // truncate shared prefixes.
+        assert_eq!(rows[3].entity.node_id(), Some(e));
+        assert_eq!(
+            path_of(&rows[3]),
+            vec![n(a), edge(e_ab), n(b), edge(e_bd), n(d), edge(e_de), n(e)]
+        );
+    }
 }

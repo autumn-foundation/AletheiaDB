@@ -1483,6 +1483,28 @@ impl ResultIterator for TemporalNodeRangeScanIterator {
 ///
 /// Output: [C (from A), C (from B)]  // C appears twice
 /// ```
+///
+/// One step of a traversal path stored in [`TraversalIterator`]'s path arena
+/// (Issue #3794).
+///
+/// A frontier entry's path is the chain from its head step back through
+/// `parent` links to the start node. This replaces the previous
+/// per-enqueue `Vec<EntityId>` clone of the whole accumulated path (an
+/// O(depth) copy per traversed edge) with two amortized-O(1) pushes; the
+/// full path is reconstructed only for rows that are actually emitted.
+#[derive(Clone)]
+struct PathLink {
+    parent: Option<usize>,
+    entity: EntityId,
+}
+
+/// A BFS frontier entry: the node to visit, the head of its path chain in
+/// the arena, and its depth.
+struct FrontierEntry {
+    node: NodeId,
+    path_head: usize,
+    depth: usize,
+}
 pub struct TraversalIterator {
     input: Box<dyn ResultIterator>,
     direction: Direction,
@@ -1517,7 +1539,14 @@ pub struct TraversalIterator {
     /// [`ResolvedScope::All`] (or no attached scope) is a no-op boundary.
     resolved_scope: ResolvedScope,
     // BFS state - reset for each input node (see doc comment above)
-    frontier: VecDeque<(NodeId, Vec<EntityId>, usize)>,
+    frontier: VecDeque<FrontierEntry>,
+    /// Path arena (Issue #3794): BFS paths are built here as parent-linked
+    /// steps instead of one eagerly-materialized `Vec<EntityId>` per
+    /// frontier entry. Enqueueing an edge pushes two steps (amortized O(1),
+    /// no per-edge allocation); the full path is reconstructed only for
+    /// rows that are actually emitted. Cleared per input node alongside
+    /// `visited`.
+    path_arena: Vec<PathLink>,
     visited: HashSet<NodeId>,
     input_exhausted: bool,
 }
@@ -1553,6 +1582,7 @@ impl TraversalIterator {
             scope: None,
             resolved_scope: ResolvedScope::All,
             frontier: VecDeque::new(),
+            path_arena: Vec::new(),
             visited: HashSet::new(),
             input_exhausted: false,
         }
@@ -1675,6 +1705,34 @@ impl TraversalIterator {
             }
             None => true, // No temporal context, use current state
         }
+    }
+
+    /// Push one step onto the path arena, returning its index (Issue #3794).
+    ///
+    /// Amortized O(1): the arena grows geometrically, so enqueueing an edge
+    /// costs two pushes instead of cloning the whole accumulated path.
+    fn push_path_step(&mut self, parent: Option<usize>, entity: EntityId) -> usize {
+        let idx = self.path_arena.len();
+        self.path_arena.push(PathLink { parent, entity });
+        idx
+    }
+
+    /// Reconstruct the full path for an emitted row by walking the arena
+    /// chain from `head` back to the start node (Issue #3794).
+    ///
+    /// Only rows that are actually yielded pay this O(depth) walk; frontier
+    /// entries that exist purely for further expansion never materialize.
+    fn materialize_path(&self, head: usize) -> Vec<EntityId> {
+        // A path is [Node(start), (Edge, Node) * depth]: pre-size exactly.
+        let mut path = Vec::with_capacity(2 * self.depth + 1);
+        let mut next = Some(head);
+        while let Some(idx) = next {
+            let step = &self.path_arena[idx];
+            path.push(step.entity.clone());
+            next = step.parent;
+        }
+        path.reverse();
+        path
     }
 
     fn get_neighbors(&self, node_id: NodeId) -> Vec<(NodeId, crate::core::EdgeId)> {
@@ -1816,7 +1874,12 @@ impl ResultIterator for TraversalIterator {
     fn next(&mut self) -> Option<Result<QueryRow>> {
         loop {
             // Process current frontier
-            if let Some((node_id, path, current_depth)) = self.frontier.pop_front() {
+            if let Some(entry) = self.frontier.pop_front() {
+                let FrontierEntry {
+                    node: node_id,
+                    path_head,
+                    depth: current_depth,
+                } = entry;
                 // Expansion and yielding are INDEPENDENT so a range like `*1..3`
                 // both emits intermediate-depth nodes AND keeps exploring to the
                 // maximum depth. First expand (if we have not reached the max
@@ -1852,14 +1915,18 @@ impl ResultIterator for TraversalIterator {
                         // depth-1 frontier never re-expands and cannot loop.
                         let enqueue = self.visited.insert(target) || self.bind_edge;
                         if enqueue {
-                            // ⚡ Bolt Optimization: Pre-allocate capacity for new path to avoid reallocations.
-                            // We are adding exactly 2 elements (edge and node) to the current path length.
-                            let mut new_path = Vec::with_capacity(path.len() + 2);
-                            new_path.extend_from_slice(&path);
-                            new_path.push(EntityId::Edge(edge_id));
-                            new_path.push(EntityId::Node(target));
-                            self.frontier
-                                .push_back((target, new_path, current_depth + 1));
+                            // Issue #3794: push two arena steps instead of
+                            // cloning the whole path into a fresh Vec per
+                            // enqueued edge (O(depth) copy per edge).
+                            let edge_step =
+                                self.push_path_step(Some(path_head), EntityId::Edge(edge_id));
+                            let node_step =
+                                self.push_path_step(Some(edge_step), EntityId::Node(target));
+                            self.frontier.push_back(FrontierEntry {
+                                node: target,
+                                path_head: node_step,
+                                depth: current_depth + 1,
+                            });
                         }
                     }
                 }
@@ -1883,6 +1950,9 @@ impl ResultIterator for TraversalIterator {
                         Ok(None) => continue,
                         Err(e) => return Some(Err(e)),
                     };
+                    // Issue #3794: the path is reconstructed from the arena
+                    // only for rows that are actually emitted.
+                    let path = self.materialize_path(path_head);
                     let mut row = QueryRow::with_path(EntityResult::Node(node), path);
                     // Edge-property WHERE / ORDER BY (Issue #3622): attach the
                     // immediately-traversed edge (the last edge in the path),
@@ -1910,9 +1980,14 @@ impl ResultIterator for TraversalIterator {
                 Some(Ok(row)) => {
                     if let Some(node_id) = row.entity.node_id() {
                         self.visited.clear();
+                        self.path_arena.clear();
                         self.visited.insert(node_id);
-                        self.frontier
-                            .push_back((node_id, vec![EntityId::Node(node_id)], 0));
+                        let head = self.push_path_step(None, EntityId::Node(node_id));
+                        self.frontier.push_back(FrontierEntry {
+                            node: node_id,
+                            path_head: head,
+                            depth: 0,
+                        });
                     }
                 }
                 Some(Err(e)) => return Some(Err(e)),
