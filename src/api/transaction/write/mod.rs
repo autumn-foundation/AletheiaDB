@@ -22,14 +22,14 @@
 //! shorten it. Narrowing the commit-clock scope so a blocking append no longer
 //! holds it is the actual cure and is tracked as **Issue #3804**.
 //!
-//! # Frames are appended before the epoch is registered
+//! # Frames are appended and the epoch registered as one membership step
 //!
-//! `log_operations_to_wal` runs before `ConcurrentWalSystem::commit`, so a
-//! GroupCommit flush cycle can drain this transaction's frames into an epoch
-//! it never registers into. On the success path that is harmless; a *failing*
-//! flush inside that window is currently misattributed. The full statement of
-//! the gap, and why the flush coordinator's LSN watermark cannot be used to
-//! detect it, lives on `ConcurrentWalSystem::commit`.
+//! `log_operations_to_wal` appends the transaction's frames AND registers the
+//! group-commit epoch inside one atomic step (the membership lock, Issue
+//! #3805), so a GroupCommit flush cycle can no longer drain this transaction's
+//! frames into an epoch it never registers into. The full statement of the
+//! (now closed) race, and why the flush coordinator's LSN watermark cannot be
+//! used to detect it, lives on `ConcurrentWalSystem::commit`.
 
 use super::{
     ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager, WriteBuffer,
@@ -806,8 +806,17 @@ impl WriteTransaction {
         // Log operations to WAL (lock-free striped append!). Runs AFTER the guards
         // above (so a rejected transaction leaves no durable frame) and BEFORE
         // applying changes (for durability). Returns the base (lowest) LSN
-        // allocated for this commit, if any.
-        let base_lsn = wal::log_operations_to_wal(self, commit_timestamp, &closing_version_ids)?;
+        // allocated for this commit, if any, and the group-commit epoch to wait
+        // on.
+        //
+        // Issue #3805: the append and the group-commit registration happen as
+        // one atomic membership step inside `log_operations_to_wal` (via
+        // `append_batch_and_commit`) — there is no longer a separate
+        // `wal.commit()` call here, because the append→register window between
+        // them is what let a flush cycle drain this frame into an earlier
+        // epoch and then fail it without the transaction ever learning.
+        let (base_lsn, wait_epoch) =
+            wal::log_operations_to_wal(self, commit_timestamp, &closing_version_ids)?;
 
         // Register the commit's base LSN as in-flight BEFORE the durability fsync,
         // so a write that becomes durable is always registered. The guard survives
@@ -819,11 +828,12 @@ impl WriteTransaction {
         #[cfg(feature = "observability")]
         let wal_logged = std::time::Instant::now();
 
-        // Commit with configured durability mode.
-        // For Sync: drains and flushes immediately.
-        // For Async: returns immediately.
-        // For GroupCommit: registers and returns epoch.
-        let wait_epoch = self.wal.commit()?;
+        // Durability mode recap (the commit step already ran inside
+        // `log_operations_to_wal` as part of the atomic membership step):
+        // - Sync: drained and flushed immediately (already durable).
+        // - Async: returned immediately (background thread handles it).
+        // - GroupCommit: registered; `wait_epoch` is waited on after apply,
+        //   outside the `current_timestamp` lock.
 
         #[cfg(feature = "observability")]
         let wal_commit_completed = std::time::Instant::now();

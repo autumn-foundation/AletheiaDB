@@ -522,6 +522,64 @@ impl CompletionNotifier {
             Err(err.clone().unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
+
+    /// Wait for completion with a timeout (Issue #3802).
+    ///
+    /// The unbounded `wait()` parks forever if the draining/flushing side
+    /// dies — a silent stall. This variant bounds the wait for deadlock
+    /// detection (not an SLA), aligned with the group-commit `wait_for_flush`
+    /// timeout stance.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` if the entry was durably flushed
+    /// - `Err(error)` if the flush failed, or if the timeout expired
+    ///
+    /// On timeout, the error carries the elapsed time and discloses that
+    /// durability status is UNKNOWN: the entry was appended, so the background
+    /// flusher may still make it durable even though this waiter gave up
+    /// (see Issue #3799). The caller should include the LSN in its own error
+    /// context, as this notifier does not know it.
+    pub fn wait_timeout(&self, timeout: std::time::Duration) -> Result<(), String> {
+        let start = std::time::Instant::now();
+        let guard = self.wait_mutex.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Check if already complete
+        let state = self.state.load(Ordering::Acquire);
+        if state == CompletionState::Complete as u64 {
+            return Ok(());
+        }
+        if state == CompletionState::Error as u64 {
+            let err = self.error.lock().unwrap_or_else(|e| e.into_inner());
+            return Err(err.clone().unwrap_or_else(|| "Unknown error".to_string()));
+        }
+
+        // Wait for notification, with a deadline.
+        let (_guard, wait_result) = self
+            .condvar
+            .wait_timeout_while(guard, timeout, |_| {
+                self.state.load(Ordering::Acquire) == CompletionState::Pending as u64
+            })
+            .unwrap_or_else(|e| e.into_inner());
+
+        if wait_result.timed_out() {
+            let elapsed = start.elapsed();
+            return Err(format!(
+                "Completion wait timed out after {elapsed:?}; durability status UNKNOWN: \
+                 the entry was appended and the background flusher may still make it \
+                 durable (see Issue #3799)"
+            ));
+        }
+
+        // Check final state
+        let state = self.state.load(Ordering::Acquire);
+        if state == CompletionState::Complete as u64 {
+            Ok(())
+        } else {
+            let err = self.error.lock().unwrap_or_else(|e| e.into_inner());
+            Err(err.clone().unwrap_or_else(|| "Unknown error".to_string()))
+        }
+    }
 }
 
 impl Default for CompletionNotifier {
@@ -547,6 +605,15 @@ impl CompletionHandle {
     /// - `Err(error)` if the flush failed
     pub fn wait(self) -> Result<(), String> {
         self.0.wait()
+    }
+
+    /// Wait for the entry to be durably flushed, with a timeout (Issue #3802).
+    ///
+    /// See [`CompletionNotifier::wait_timeout`] for the timeout semantics and
+    /// the durability-unknown disclosure. The caller should include the LSN
+    /// in its error context via `map_err`, as the handle does not carry it.
+    pub fn wait_timeout(self, timeout: std::time::Duration) -> Result<(), String> {
+        self.0.wait_timeout(timeout)
     }
 
     /// Check if completion has been signaled (non-blocking).
