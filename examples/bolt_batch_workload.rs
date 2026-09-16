@@ -34,8 +34,8 @@
 //! Env vars: `BOLT_BATCHES` (default 200), `BOLT_NODES_PER_BATCH` (default
 //! 40), `BOLT_EDGES_PER_NODE` (default 2).
 
-use aletheiadb::mcp::{AletheiaMcpServer, ApplyBatchRequest};
 use aletheiadb::AletheiaDB;
+use aletheiadb::mcp::{AletheiaMcpServer, ApplyBatchRequest};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -49,7 +49,11 @@ fn env_usize(key: &str, default: usize) -> usize {
 /// Build one self-contained batch: `nodes_per_batch` `create_node` ops (each
 /// with 5 properties, aliased "n0".."n{k}") plus `edges_per_node` `create_edge`
 /// ops per node linking it to later nodes purely by alias.
-fn build_batch(batch_index: usize, nodes_per_batch: usize, edges_per_node: usize) -> Vec<serde_json::Value> {
+fn build_batch(
+    batch_index: usize,
+    nodes_per_batch: usize,
+    edges_per_node: usize,
+) -> Vec<serde_json::Value> {
     let mut ops = Vec::with_capacity(nodes_per_batch + nodes_per_batch * edges_per_node);
 
     for i in 0..nodes_per_batch {
