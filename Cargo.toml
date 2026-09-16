@@ -126,7 +126,7 @@ tracing-subscriber = { version = "0.3", optional = true, features = ["registry",
 
 # MCP server support (optional)
 # Note: rmcp re-exports schemars, so we don't need a separate dependency
-rmcp = { version = "1.7", features = ["server", "transport-io"], optional = true }
+rmcp = { version = "2.0", features = ["server", "transport-io"], optional = true }
 base64 = { version = "0.22", optional = true }
 
 # HTTP server support (optional) — built on autumn-web (Axum-based).
