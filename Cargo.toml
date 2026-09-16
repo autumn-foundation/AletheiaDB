@@ -546,6 +546,11 @@ required-features = ["testing"]
 name = "bolt_cypher_workload"
 required-features = ["cypher"]
 
+# Bolt profiling workload for the MCP apply_batch write path.
+[[example]]
+name = "bolt_batch_workload"
+required-features = ["mcp-server"]
+
 # Embedding examples require their respective feature flags
 [[example]]
 name = "embedding_openai"

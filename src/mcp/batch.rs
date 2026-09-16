@@ -474,7 +474,7 @@ impl AletheiaMcpServer {
 
         // Phase 1: static pre-validation. No database access; a rejected
         // batch never opens a transaction and never burns entity IDs.
-        let planned = match self.prevalidate_batch(&req.operations) {
+        let planned = match self.prevalidate_batch(req.operations) {
             Ok(p) => p,
             Err(result) => return *result,
         };
@@ -524,7 +524,7 @@ impl AletheiaMcpServer {
     /// result_large_err).
     fn prevalidate_batch(
         &self,
-        raw_ops: &[serde_json::Value],
+        raw_ops: Vec<serde_json::Value>,
     ) -> Result<Vec<PlannedOp>, Box<CallToolResult>> {
         // Batch cap first (Issue #3226 convention: echo the limit).
         let limit = self.max_batch_operations;
@@ -551,9 +551,12 @@ impl AletheiaMcpServer {
 
         // Parse each op individually so a malformed element is rejected with
         // its precise index (a wholesale Vec deserialization would lose it).
-        let mut ops = Vec::with_capacity(raw_ops.len());
-        for (index, raw) in raw_ops.iter().enumerate() {
-            match serde_json::from_value::<BatchOperation>(raw.clone()) {
+        // `raw_ops` is owned and only ever consumed here, so each element is
+        // moved into `from_value` directly instead of being cloned first.
+        let op_count = raw_ops.len();
+        let mut ops = Vec::with_capacity(op_count);
+        for (index, raw) in raw_ops.into_iter().enumerate() {
+            match serde_json::from_value::<BatchOperation>(raw) {
                 Ok(op) => ops.push(op),
                 Err(e) => {
                     return Err(self.batch_invalid(
