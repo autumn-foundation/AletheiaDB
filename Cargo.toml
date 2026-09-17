@@ -551,6 +551,12 @@ required-features = ["cypher"]
 name = "bolt_batch_workload"
 required-features = ["mcp-server"]
 
+# Bolt profiling workload quantifying the dispatch_read_tool_limited
+# thread-spawn wrapper overhead on a cheap read (Issue #3368 residue).
+[[example]]
+name = "bolt_mcp_read_overhead_workload"
+required-features = ["mcp-server"]
+
 # Embedding examples require their respective feature flags
 [[example]]
 name = "embedding_openai"
