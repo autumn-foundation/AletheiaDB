@@ -557,6 +557,12 @@ required-features = ["mcp-server"]
 name = "bolt_mcp_read_overhead_workload"
 required-features = ["mcp-server"]
 
+# Bolt profiling workload for the token-budget response shaper's rung-4
+# array-truncation binary search (Issue #3353).
+[[example]]
+name = "bolt_budget_truncation_workload"
+required-features = ["mcp-server"]
+
 # Embedding examples require their respective feature flags
 [[example]]
 name = "embedding_openai"
