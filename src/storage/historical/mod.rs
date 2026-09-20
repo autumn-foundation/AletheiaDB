@@ -1464,9 +1464,14 @@ impl HistoricalStorage {
     /// * `Err(TemporalError::MissingAnchor)` - An ancestor in the chain was removed
     /// * `Err(TemporalError::CorruptedVersionChain)` - Invalid chain structure
     fn reconstruct_node_properties_iterative(&self, version_id: VersionId) -> Result<PropertyMap> {
-        // Collect version IDs backwards from target to anchor
+        // Collect versions backwards from target to anchor. Each fetched
+        // `Arc<NodeVersion>` is cached here (not just its id) so the
+        // forward-apply pass below reuses it directly instead of re-fetching
+        // -- and re-cloning the full NodeVersion, PropertyDelta hashmaps
+        // included, out of hot storage -- every version in the chain a
+        // second time.
         // Pre-allocate with anchor_interval capacity to avoid reallocations
-        let mut version_ids: Vec<VersionId> =
+        let mut versions: Vec<Arc<NodeVersion>> =
             Vec::with_capacity(self.config.anchor_interval as usize);
         let mut current_id = version_id;
         let mut chain_length = 0;
@@ -1495,11 +1500,10 @@ impl HistoricalStorage {
             let version = match self.get_node_version_any_tier(current_id) {
                 Ok(v) => v,
                 Err(crate::core::error::Error::Storage(StorageError::VersionNotFound(_)))
-                    if !version_ids.is_empty() =>
+                    if !versions.is_empty() =>
                 {
-                    let entity_id = version_ids
+                    let entity_id = versions
                         .first()
-                        .and_then(|&vid| self.get_node_version_any_tier(vid).ok())
                         .map(|v| v.node_id.to_string())
                         .unwrap_or_else(|| format!("version {}", version_id));
                     return Err(TemporalError::MissingAnchor { entity_id }.into());
@@ -1509,9 +1513,10 @@ impl HistoricalStorage {
 
             let is_anchor = version.is_anchor();
             let prev_id = version.prev_version;
+            let node_id = version.node_id;
 
-            // Store version ID (we'll process these in reverse)
-            version_ids.push(current_id);
+            // Store the fetched version (we'll process these in reverse)
+            versions.push(version);
 
             // If we found an anchor, we're done collecting
             if is_anchor {
@@ -1520,25 +1525,23 @@ impl HistoricalStorage {
 
             // Get previous version for delta chain traversal
             current_id = prev_id.ok_or_else(|| TemporalError::CorruptedVersionChain {
-                entity_id: version.node_id.to_string(),
+                entity_id: node_id.to_string(),
                 reason: "Delta version has no previous version".to_string(),
             })?;
 
             chain_length += 1;
         }
 
-        // Now reconstruct properties by applying deltas in forward order
-        // The last element in version_ids is the anchor (base state)
-        let anchor_id =
-            version_ids
+        // Now reconstruct properties by applying deltas in forward order.
+        // The last element in `versions` is the anchor (base state) --
+        // already fetched above, no need to fetch it again.
+        let anchor_version =
+            versions
                 .last()
-                .copied()
                 .ok_or_else(|| TemporalError::CorruptedVersionChain {
                     entity_id: format!("version {}", version_id),
                     reason: "Empty version chain during reconstruction".to_string(),
                 })?;
-
-        let anchor_version = self.get_node_version_any_tier(anchor_id)?;
 
         let mut properties = match &anchor_version.data {
             VersionData::Anchor { properties, .. } => properties.clone(),
@@ -1554,9 +1557,7 @@ impl HistoricalStorage {
 
         // Apply deltas in forward order (reverse of collection order)
         // Skip the last element (anchor) since we already have its properties
-        for &vid in version_ids.iter().rev().skip(1) {
-            let version = self.get_node_version_any_tier(vid)?;
-
+        for version in versions.iter().rev().skip(1) {
             match &version.data {
                 VersionData::Delta { delta } => {
                     properties = delta.apply(&properties);
@@ -1580,9 +1581,12 @@ impl HistoricalStorage {
     /// Mirrors the node reconstruction algorithm for consistency. See
     /// `reconstruct_node_properties_iterative` for algorithm details.
     fn reconstruct_edge_properties_iterative(&self, version_id: VersionId) -> Result<PropertyMap> {
-        // Collect version IDs backwards from target to anchor
+        // Collect versions backwards from target to anchor, caching each
+        // fetched `Arc<EdgeVersion>` so the forward-apply pass below reuses
+        // it instead of re-fetching (and re-cloning) every version in the
+        // chain a second time. See `reconstruct_node_properties_iterative`.
         // Pre-allocate with anchor_interval capacity to avoid reallocations
-        let mut version_ids: Vec<VersionId> =
+        let mut versions: Vec<Arc<EdgeVersion>> =
             Vec::with_capacity(self.config.anchor_interval as usize);
         let mut current_id = version_id;
         let mut chain_length = 0;
@@ -1609,11 +1613,10 @@ impl HistoricalStorage {
             let version = match self.get_edge_version_any_tier(current_id) {
                 Ok(v) => v,
                 Err(crate::core::error::Error::Storage(StorageError::VersionNotFound(_)))
-                    if !version_ids.is_empty() =>
+                    if !versions.is_empty() =>
                 {
-                    let entity_id = version_ids
+                    let entity_id = versions
                         .first()
-                        .and_then(|&vid| self.get_edge_version_any_tier(vid).ok())
                         .map(|v| v.edge_id.to_string())
                         .unwrap_or_else(|| format!("version {}", version_id));
                     return Err(TemporalError::MissingAnchor { entity_id }.into());
@@ -1623,9 +1626,10 @@ impl HistoricalStorage {
 
             let is_anchor = version.is_anchor();
             let prev_id = version.prev_version;
+            let edge_id = version.edge_id;
 
-            // Store version ID (we'll process these in reverse)
-            version_ids.push(current_id);
+            // Store the fetched version (we'll process these in reverse)
+            versions.push(version);
 
             // If we found an anchor, we're done collecting
             if is_anchor {
@@ -1634,25 +1638,23 @@ impl HistoricalStorage {
 
             // Get previous version for delta chain traversal
             current_id = prev_id.ok_or_else(|| TemporalError::CorruptedVersionChain {
-                entity_id: version.edge_id.to_string(),
+                entity_id: edge_id.to_string(),
                 reason: "Delta version has no previous version".to_string(),
             })?;
 
             chain_length += 1;
         }
 
-        // Now reconstruct properties by applying deltas in forward order
-        // The last element in version_ids is the anchor (base state)
-        let anchor_id =
-            version_ids
+        // Now reconstruct properties by applying deltas in forward order.
+        // The last element in `versions` is the anchor (base state) --
+        // already fetched above, no need to fetch it again.
+        let anchor_version =
+            versions
                 .last()
-                .copied()
                 .ok_or_else(|| TemporalError::CorruptedVersionChain {
                     entity_id: format!("version {}", version_id),
                     reason: "Empty version chain during reconstruction".to_string(),
                 })?;
-
-        let anchor_version = self.get_edge_version_any_tier(anchor_id)?;
 
         let mut properties = match &anchor_version.data {
             VersionData::Anchor { properties, .. } => properties.clone(),
@@ -1668,9 +1670,7 @@ impl HistoricalStorage {
 
         // Apply deltas in forward order (reverse of collection order)
         // Skip the last element (anchor) since we already have its properties
-        for &vid in version_ids.iter().rev().skip(1) {
-            let version = self.get_edge_version_any_tier(vid)?;
-
+        for version in versions.iter().rev().skip(1) {
             match &version.data {
                 VersionData::Delta { delta } => {
                     properties = delta.apply(&properties);
