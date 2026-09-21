@@ -364,16 +364,29 @@ impl AdjacencyIndex {
     pub fn get_adjacency(&self, node: NodeId) -> &[AdjacencyEntry] {
         // Binary search to find the node's index in node_ids
         match self.node_ids.binary_search(&node) {
-            Ok(idx) => {
-                let start = self.offsets[idx];
-                let end = self.offsets[idx + 1];
-                &self.edges[start..end]
-            }
+            Ok(idx) => self.adjacency_slice_at(idx),
             Err(_) => {
                 // Node not found (no outgoing edges)
                 &[]
             }
         }
+    }
+
+    /// Resolve `node`'s index into `node_ids` (O(log N) binary search), for a
+    /// caller that will look up the same node's slice repeatedly and wants to
+    /// cache the index instead of repeating the search (Issue #3813).
+    #[inline]
+    pub(crate) fn find_node_index(&self, node: NodeId) -> Option<usize> {
+        self.node_ids.binary_search(&node).ok()
+    }
+
+    /// O(1) slice lookup for an index already resolved by
+    /// [`find_node_index`](Self::find_node_index).
+    #[inline]
+    pub(crate) fn adjacency_slice_at(&self, idx: usize) -> &[AdjacencyEntry] {
+        let start = self.offsets[idx];
+        let end = self.offsets[idx + 1];
+        &self.edges[start..end]
     }
 
     /// Get outgoing edges for a node with a specific label.
