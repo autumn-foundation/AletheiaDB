@@ -524,10 +524,18 @@ impl PropertyDelta {
                 BuildHasherDefault::<IdentityHasher>::default(),
             );
 
-        // Copy all base properties except removed ones (single lookup per property)
-        // This is optimal when changes << base (typical case: ~1-10% change rate)
+        // Copy base properties except removed ones and ones about to be
+        // unconditionally overwritten below (single lookup per property).
+        // Skipping a `changed` key here avoids inserting a value the
+        // `changed` loop immediately replaces -- previously every changed
+        // key paid for an Arc clone plus two `HashMap` inserts (and a drop
+        // of the discarded first value) instead of one. `vector_deltas`
+        // entries are NOT skipped here: `VectorDelta::Sparse` is fail-open
+        // (its loop below leaves the base value in place when the base
+        // property is missing or not a vector), so this map's base value
+        // must stay available as that fallback.
         for (key, value) in base.iter() {
-            if !self.removed.contains(key) {
+            if !self.removed.contains(key) && !self.changed.contains_key(key) {
                 // Arc clone - O(1) refcount increment, shares underlying data
                 result.insert(*key, value.clone());
             }
