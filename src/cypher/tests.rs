@@ -3667,9 +3667,23 @@ fn sorted_names(rows: &[crate::query::executor::QueryRow]) -> Vec<String> {
 
 /// Count of distinct node ids across a row set -- used to assert a range scan
 /// emits no duplicate rows independent of whether a version carries a `name`.
-fn distinct_node_count(rows: &[crate::query::executor::QueryRow]) -> usize {
+/// Distinct `(node, name)` states among `rows`. A node legitimately appears
+/// once per distinct believed state across a range (ADR-0061: an update keeps
+/// the superseded value believed over its own valid prefix); a duplicate row is
+/// the SAME state twice.
+fn distinct_node_state_count(rows: &[crate::query::executor::QueryRow]) -> usize {
     rows.iter()
-        .filter_map(|r| r.entity.as_node().map(|n| n.id))
+        .filter_map(|r| {
+            r.entity.as_node().map(|n| {
+                (
+                    n.id,
+                    n.properties
+                        .get("name")
+                        .and_then(|p| p.as_str())
+                        .map(str::to_owned),
+                )
+            })
+        })
         .collect::<std::collections::BTreeSet<_>>()
         .len()
 }
@@ -3684,9 +3698,10 @@ fn time_now() -> crate::core::Timestamp {
 
 /// Oracle ground truth for a `BETWEEN`-style range query: the sorted, unique
 /// `name` values obtained by taking `find_nodes_at_time(label, v, tt)` for each
-/// sampled valid instant `v` and unioning the results (deduplicated by node).
-/// This is the "union over valid instants of AS OF (v, tt)" the range operator
-/// must equal.
+/// sampled valid instant `v` and unioning the results (deduplicated by
+/// `(node, name)` state: one node may hold different believed values over
+/// different valid sub-ranges, ADR-0061). This is the "union over valid
+/// instants of AS OF (v, tt)" the range operator must equal.
 fn oracle_union_names_at(
     db: &AletheiaDB,
     label: &str,
@@ -3694,15 +3709,15 @@ fn oracle_union_names_at(
     tt: crate::core::Timestamp,
 ) -> Vec<String> {
     use std::collections::BTreeMap;
-    let mut by_node: BTreeMap<crate::core::NodeId, String> = BTreeMap::new();
+    let mut states: BTreeMap<(crate::core::NodeId, String), ()> = BTreeMap::new();
     for &v in valid_instants {
         for node in db.find_nodes_at_time(label, v, tt).unwrap().nodes {
             if let Some(name) = node.properties.get("name").and_then(|p| p.as_str()) {
-                by_node.insert(node.id, name.to_string());
+                states.insert((node.id, name.to_string()), ());
             }
         }
     }
-    let mut names: Vec<String> = by_node.into_values().collect();
+    let mut names: Vec<String> = states.into_keys().map(|(_, name)| name).collect();
     names.sort();
     names
 }
@@ -3861,11 +3876,13 @@ fn test_e2e_for_system_time_as_of_honored_by_label_scan() {
 /// equals the union, over sampled valid instants in the range, of
 /// `AS OF (v, now)`, and excludes transaction-time-superseded beliefs.
 ///
-/// Here `A@[v1,v2)` is superseded (both its valid AND transaction intervals are
-/// closed by the forward update to `B@[v2,MAX)`), so at tx=now only `B` is
-/// believed. BETWEEN therefore returns `["B"]`, NOT `["A","B"]`: a stale,
-/// no-longer-believed value must never leak. This is cross-checked against the
-/// oracle union over sampled instants.
+/// A forward update to `B` at `v2` keeps `A` believed over `[v1, v2)` (ADR-0061:
+/// the update carries the superseded valid-time prefix forward), so as of now
+/// BETWEEN returns both `A` and `B` -- each a distinct believed state over its
+/// own sub-range, not a duplicate. A *correction* (an update at the same
+/// `valid_from`) genuinely supersedes the old value at every valid instant, and
+/// that stale, no-longer-believed value must never leak. Both are
+/// cross-checked against the oracle union over sampled instants.
 #[test]
 fn test_e2e_between_is_as_of_now_snapshot_excludes_superseded() {
     let db = AletheiaDB::new().unwrap();
@@ -3894,10 +3911,41 @@ fn test_e2e_between_is_as_of_now_snapshot_excludes_superseded() {
     );
     assert_eq!(
         names,
-        vec!["B".to_string()],
-        "the tx-superseded value 'A' must be excluded; only the believed 'B' remains"
+        vec!["A".to_string(), "B".to_string()],
+        "A is still believed over [v1, v2) and B over [v2, ..)"
     );
-    // No duplicate rows.
+    // No duplicate rows: one row per distinct believed state.
+    assert_eq!(
+        rows.len(),
+        distinct_node_state_count(&rows),
+        "BETWEEN must not emit duplicate rows"
+    );
+
+    // A correction at the same valid_from supersedes 'C' everywhere: it must
+    // not leak into the range result.
+    let w1 = temporal_anchor(&db);
+    let fixed = db
+        .create_node_with_valid_time("Fixed", person("C"), Some(w1))
+        .unwrap();
+    db.update_node_with_valid_time(fixed, person("D"), Some(w1))
+        .unwrap();
+    let wend = temporal_anchor(&db);
+    let q = format!(
+        "MATCH (n:Fixed) BETWEEN '{}' AND '{}' RETURN n",
+        anchor_micros(w1),
+        anchor_micros(wend)
+    );
+    let rows = collect_rows(db.execute_cypher(&q).unwrap());
+    let names = sorted_names(&rows);
+    assert_eq!(
+        names,
+        oracle_union_names_at(&db, "Fixed", &[w1, wend], time_now())
+    );
+    assert_eq!(
+        names,
+        vec!["D".to_string()],
+        "the corrected value 'C' is superseded at every valid instant and must be excluded"
+    );
     assert_eq!(rows.len(), 1, "BETWEEN must not emit duplicate rows");
 }
 
@@ -3993,9 +4041,10 @@ fn test_e2e_between_excludes_out_of_range_versions() {
     );
 }
 
-/// #552 correctness: the Paris -> London -> retract topology. `BETWEEN` must NOT
-/// return the transaction-time-superseded "Paris" and must NOT emit duplicate
-/// rows; it equals the oracle union over sampled instants.
+/// #552 correctness: the Paris -> London -> retract topology. As of now Paris is
+/// still believed over `[t_create, t_update)` (ADR-0061) and London over
+/// `[t_update, t_retract)`, so `BETWEEN` returns both, never duplicates a
+/// state, and equals the oracle union over sampled instants.
 #[test]
 fn test_e2e_between_excludes_superseded_and_no_duplicates() {
     let db = AletheiaDB::new().unwrap();
@@ -4028,16 +4077,16 @@ fn test_e2e_between_excludes_superseded_and_no_duplicates() {
         names, oracle,
         "BETWEEN must equal the oracle union of AS OF over the range"
     );
-    assert!(
-        !names.contains(&"Paris".to_string()),
-        "the tx-superseded 'Paris' must be excluded, got {names:?}"
+    assert_eq!(
+        names,
+        vec!["London".to_string(), "Paris".to_string()],
+        "Paris is believed over [t_create, t_update), London until the retraction"
     );
-    // No duplicate rows: at most one row per node (name-independent, so a
-    // tombstone/retraction version without a `name` still counts).
+    // No duplicate rows: at most one row per distinct (node, state).
     assert_eq!(
         rows.len(),
-        distinct_node_count(&rows),
-        "BETWEEN must not emit duplicate rows per node"
+        distinct_node_state_count(&rows),
+        "BETWEEN must not emit duplicate rows per node state"
     );
 }
 

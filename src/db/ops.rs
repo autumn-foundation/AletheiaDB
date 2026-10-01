@@ -1763,14 +1763,11 @@ mod tests {
             );
         }
 
-        // NOTE: Updating/deleting closes the *transaction time* of the previous
-        // version at commit (standard MVCC on the transaction-time axis), so a
-        // valid-time probe strictly between the old and new `valid_from` is not
-        // reachable via `get_node_at_valid_time(id, probe)` (which always queries
-        // as of the *current* transaction time). This is pre-existing, unmodified
-        // `WriteOps` behavior -- verified the same way the transaction-level tests
-        // in `api::transaction::write::tests` do: by reading the recorded
-        // `valid_from` back from historical storage directly.
+        // NOTE: An update closes the *transaction time* of the superseded
+        // version and appends a structural carry-forward recording it over
+        // `[old_valid_from, new_valid_from)` (ADR-0061), so a valid-time probe
+        // strictly between the old and new `valid_from` resolves to the old
+        // state via `get_node_at_valid_time` (asserted below).
         #[test]
         fn update_node_with_valid_time_backdated_round_trip() {
             let (_tmp, db) = create_test_db().unwrap();
@@ -1797,6 +1794,14 @@ mod tests {
             let version = historical.get_node_version(version_id).unwrap();
             assert_eq!(version.temporal.valid_time().start(), t_update);
             drop(historical);
+
+            // The prior state is still the current belief before t_update.
+            let between = HybridTimestamp::new(now - 90 * 60_000_000, 0).unwrap();
+            let old_state = db.get_node_at_valid_time(id, between).unwrap();
+            assert_eq!(
+                old_state.properties.get("city"),
+                Some(&PropertyValue::from("Paris"))
+            );
 
             // Updated properties are visible from their own valid_from onward.
             let new_state = db.get_node_at_valid_time(id, t_update).unwrap();
@@ -1844,6 +1849,13 @@ mod tests {
             let version = historical.get_edge_version(version_id).unwrap();
             assert_eq!(version.temporal.valid_time().start(), t_update);
             drop(historical);
+
+            let between = HybridTimestamp::new(now - 90 * 60_000_000, 0).unwrap();
+            let old_state = db.get_edge_at_valid_time(edge_id, between).unwrap();
+            assert_eq!(
+                old_state.properties.get("strength"),
+                Some(&PropertyValue::from(1i64))
+            );
 
             let new_state = db.get_edge_at_valid_time(edge_id, t_update).unwrap();
             assert_eq!(
@@ -2127,6 +2139,14 @@ mod tests {
                 3,
                 "create + update + retraction = 3 versions, zero loss"
             );
+
+            // The update's structural carry-forward (omitted from history)
+            // keeps v1 as current belief over [t_create, t_update) (ADR-0061).
+            let slices = db.get_node_valid_time_slices(id).unwrap();
+            assert_eq!(slices.len(), 2);
+            assert!(slices[0].version_id.is_structural());
+            assert_eq!(slices[0].temporal.valid_time().start(), t_create);
+            assert_eq!(slices[0].temporal.valid_time().end(), t_update);
 
             // v1: [t_create, open). #3504: the update supersedes v1 on the
             // transaction-time dimension only; v1's valid interval stays

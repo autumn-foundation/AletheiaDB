@@ -476,6 +476,7 @@ impl IncrementalAdjacencyIndex {
                 publish_window: false,
                 fast_path: true, // Skip per-edge tombstone checks
                 tombstones_empty: true,
+                frozen_idx: std::cell::OnceCell::new(),
             };
         }
 
@@ -499,6 +500,7 @@ impl IncrementalAdjacencyIndex {
             // that case instead of probing a provably-empty map on every
             // edge of every traversal.
             tombstones_empty,
+            frozen_idx: std::cell::OnceCell::new(),
         }
     }
 
@@ -905,6 +907,16 @@ pub struct MergedAdjacencyGuard<'a> {
     /// the per-edge tombstone lookup even when the merged (non-frozen-view)
     /// path is taken because delta has pending edges.
     tombstones_empty: bool,
+    /// Caches `frozen.find_node_index(node)` (Issue #3813): every accessor
+    /// below that needs the frozen slice re-derives it from `self.node`, and
+    /// a caller that drives this guard through `OutgoingEdgesIter`/
+    /// `IncomingEdgesIter::next()` calls one of those accessors once per
+    /// yielded edge. Without this cache, each of those calls repeats the
+    /// O(log V) binary search over the CSR's `node_ids` that resolving the
+    /// node's row costs, turning an O(log V + degree) iteration into
+    /// O(degree * log V). The guard is immutable to callers, so this is
+    /// populated lazily via interior mutability on first access.
+    frozen_idx: std::cell::OnceCell<Option<usize>>,
 }
 
 /// RAII holder for compaction's publish window.
@@ -1027,6 +1039,22 @@ where
 }
 
 impl<'a> MergedAdjacencyGuard<'a> {
+    /// Get the frozen adjacency slice for this node, resolving the CSR row
+    /// index at most once per guard (Issue #3813) instead of repeating the
+    /// O(log V) binary search on every call. Every other accessor that needs
+    /// the frozen slice routes through this rather than calling
+    /// `self.frozen.get_adjacency(self.node)` directly.
+    #[inline]
+    fn frozen_slice_cached(&self) -> &[AdjacencyEntry] {
+        match *self
+            .frozen_idx
+            .get_or_init(|| self.frozen.find_node_index(self.node))
+        {
+            Some(idx) => self.frozen.adjacency_slice_at(idx),
+            None => &[],
+        }
+    }
+
     /// Iterate over all adjacency entries (frozen + delta, excluding tombstones).
     ///
     /// **Fast Path**: whenever tombstones are globally empty and no compaction
@@ -1038,7 +1066,7 @@ impl<'a> MergedAdjacencyGuard<'a> {
     /// made once per call, outside the per-edge loop.
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &AdjacencyEntry> + '_ {
-        let frozen_slice = self.frozen.get_adjacency(self.node);
+        let frozen_slice = self.frozen_slice_cached();
         let delta_slice = self.delta_slice();
 
         // The publish window only ever duplicates entries that are in BOTH
@@ -1102,7 +1130,7 @@ impl<'a> MergedAdjacencyGuard<'a> {
     /// window is retiring).
     #[inline]
     pub fn capacity_hint(&self) -> usize {
-        let frozen_len = self.frozen.get_adjacency(self.node).len();
+        let frozen_len = self.frozen_slice_cached().len();
         let delta_len = self.delta.as_ref().map(|d| d.len()).unwrap_or(0);
         frozen_len + delta_len
     }
@@ -1113,7 +1141,7 @@ impl<'a> MergedAdjacencyGuard<'a> {
     #[inline]
     pub fn fast_len(&self) -> Option<usize> {
         if self.fast_path {
-            Some(self.frozen.get_adjacency(self.node).len())
+            Some(self.frozen_slice_cached().len())
         } else {
             None
         }
@@ -1127,7 +1155,7 @@ impl<'a> MergedAdjacencyGuard<'a> {
     #[inline]
     pub fn as_slice(&self) -> Option<&[AdjacencyEntry]> {
         if self.delta.is_none() && self.tombstones.is_empty() {
-            Some(self.frozen.get_adjacency(self.node))
+            Some(self.frozen_slice_cached())
         } else {
             None
         }
@@ -1142,7 +1170,7 @@ impl<'a> MergedAdjacencyGuard<'a> {
     /// instead of [`iter`](Self::iter) MUST apply this to the delta half.
     #[inline]
     pub fn delta_entry_is_duplicate(&self, entry: &AdjacencyEntry) -> bool {
-        self.publish_window && frozen_slice_contains(self.frozen.get_adjacency(self.node), entry)
+        self.publish_window && frozen_slice_contains(self.frozen_slice_cached(), entry)
     }
 
     /// Get the frozen adjacency slice for this node (O(log V), binary search over CSR node_ids).
@@ -1156,7 +1184,7 @@ impl<'a> MergedAdjacencyGuard<'a> {
     /// [`delta_entry_is_duplicate`](Self::delta_entry_is_duplicate).
     #[inline]
     pub fn frozen_slice(&self) -> &[AdjacencyEntry] {
-        self.frozen.get_adjacency(self.node)
+        self.frozen_slice_cached()
     }
 
     /// Get the delta adjacency slice for this node (O(1)).

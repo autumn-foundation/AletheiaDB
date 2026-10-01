@@ -41,6 +41,7 @@ use std::collections::{HashSet, VecDeque};
 
 use dashmap::DashMap;
 
+use crate::core::hasher::IdHashBuilder;
 use crate::core::id::{EntityId, VersionId};
 use crate::core::temporal::Timestamp;
 
@@ -241,9 +242,15 @@ impl LineageClosure {
 #[derive(Debug, Default)]
 pub struct LineageStore {
     /// derived version -> its lineage record (one per version; write-once).
-    upstream: DashMap<VersionId, LineageRecord>,
+    ///
+    /// `VersionId` is an already-unique, sequentially-allocated internal id
+    /// (never derived from untrusted input), so this is keyed via
+    /// [`IdHashBuilder`] to avoid SipHash overhead on every lookup — the same
+    /// pattern already used for `NodeId`/`EdgeId`-keyed maps elsewhere (see
+    /// its docs).
+    upstream: DashMap<VersionId, LineageRecord, IdHashBuilder>,
     /// source version -> derived versions that declared it as a source.
-    downstream: DashMap<VersionId, Vec<VersionId>>,
+    downstream: DashMap<VersionId, Vec<VersionId>, IdHashBuilder>,
     /// Serializes the check-then-act critical section of [`Self::record`] so
     /// the `contains_key` write-once check, the cycle scan, and the paired
     /// `upstream`/`downstream` inserts are one atomic step. Without it, two
@@ -297,7 +304,8 @@ impl LineageStore {
         // Deduplicate sources, preserving declaration order, and reject
         // self-derivation. This is pure (touches no shared state) so it runs
         // outside the write lock.
-        let mut seen = HashSet::new();
+        let mut seen: HashSet<VersionId, IdHashBuilder> =
+            HashSet::with_hasher(IdHashBuilder::default());
         let mut deduped: Vec<LineageRef> = Vec::with_capacity(sources.len());
         for source in sources {
             if source.version == derived.version {
@@ -366,9 +374,10 @@ impl LineageStore {
     /// detection.
     fn upstream_path_to(&self, start: VersionId, target: VersionId) -> Option<Vec<VersionId>> {
         // BFS with parent tracking so we can reconstruct the path.
-        let mut visited = HashSet::new();
-        let mut parents: std::collections::HashMap<VersionId, VersionId> =
-            std::collections::HashMap::new();
+        let mut visited: HashSet<VersionId, IdHashBuilder> =
+            HashSet::with_hasher(IdHashBuilder::default());
+        let mut parents: std::collections::HashMap<VersionId, VersionId, IdHashBuilder> =
+            std::collections::HashMap::with_hasher(IdHashBuilder::default());
         let mut queue = VecDeque::new();
         visited.insert(start);
         queue.push_back(start);
@@ -424,7 +433,8 @@ impl LineageStore {
         direction: Direction,
     ) -> LineageClosure {
         let mut entries = Vec::new();
-        let mut visited = HashSet::new();
+        let mut visited: HashSet<VersionId, IdHashBuilder> =
+            HashSet::with_hasher(IdHashBuilder::default());
         visited.insert(root.version);
         let mut has_more = false;
 
@@ -489,7 +499,7 @@ impl LineageStore {
         frontier: &[LineageRef],
         direction: Direction,
         as_of: Option<Timestamp>,
-        visited: &HashSet<VersionId>,
+        visited: &HashSet<VersionId, IdHashBuilder>,
     ) -> bool {
         frontier.iter().any(|node| {
             let neighbours = match direction {

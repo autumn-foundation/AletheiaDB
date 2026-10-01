@@ -38,10 +38,12 @@ use std::time::Duration;
 use tracing;
 
 mod hooks;
+mod slices;
 mod snapshot_policy;
 
 use hooks::{AnchorHookContext, HookMetrics};
 pub use hooks::{HookMetricsSnapshot, PreAnchorHook};
+pub(crate) use slices::UpdatePlan;
 pub use snapshot_policy::SnapshotPolicy;
 use snapshot_policy::SnapshotPolicyRegistry;
 
@@ -160,6 +162,24 @@ pub struct HistoricalStorage {
     node_version_counts: FastHashMap<NodeId, usize>,
     /// Cached version counts per edge (for O(1) capacity checks).
     edge_version_counts: FastHashMap<EdgeId, usize>,
+    /// Still-recorded valid-time *slices* of each node that are NOT its head.
+    ///
+    /// A slice is a non-empty-valid-interval version whose transaction time is
+    /// still open: the database's current belief about the node over that
+    /// valid range. An update that supersedes a version at a later valid time
+    /// appends a carry-forward slice for the uncovered prefix, so a live node's
+    /// current belief is the head plus these slices, which together partition
+    /// valid time (see `slices.rs`). Indexed so that delete and backfill find
+    /// every slice in O(slices) without walking a chain that may run through
+    /// the cold tier. Rebuilt by [`rebuild_version_chains`](Self::rebuild_version_chains).
+    node_open_slices: FastHashMap<NodeId, Vec<VersionId>>,
+    /// Edge counterpart of [`node_open_slices`](Self::node_open_slices).
+    edge_open_slices: FastHashMap<EdgeId, Vec<VersionId>>,
+    /// Hot structural (ADR-0061) versions per node, so the per-entity version
+    /// cap counts only logical versions (writes).
+    node_structural_counts: FastHashMap<NodeId, usize>,
+    /// Edge counterpart of [`node_structural_counts`](Self::node_structural_counts).
+    edge_structural_counts: FastHashMap<EdgeId, usize>,
     /// Versions since last anchor per node (for O(1) anchor interval checks).
     /// Avoids walking the version chain on every add operation.
     node_versions_since_anchor: FastHashMap<NodeId, usize>,
@@ -378,6 +398,10 @@ impl HistoricalStorage {
             edge_versions_since_anchor: FastHashMap::default(),
             cached_node_anchor_count: 0,
             cached_node_delta_count: 0,
+            node_open_slices: FastHashMap::default(),
+            edge_open_slices: FastHashMap::default(),
+            node_structural_counts: FastHashMap::default(),
+            edge_structural_counts: FastHashMap::default(),
             cached_edge_anchor_count: 0,
             cached_edge_delta_count: 0,
             node_property_cache: Arc::new(Cache::new(cache_size)),
@@ -831,9 +855,15 @@ impl HistoricalStorage {
         properties: PropertyMap,
         provenance: Option<Arc<Provenance>>,
     ) -> Result<()> {
-        // Check capacity limit using cached count (O(1) operation, DoS protection)
-        let version_count = self.node_version_counts.get(&node_id).copied().unwrap_or(0);
-        if version_count >= self.retention_policy.max_versions_per_entity {
+        // Check capacity limit using cached count (O(1) operation, DoS protection).
+        // The cap bounds LOGICAL versions (writes): structural versions
+        // (ADR-0061) are exempt — each write appends at most two of them, so
+        // memory stays bounded by a constant factor of the cap, and an update
+        // must not halve the entity's write headroom.
+        let version_count = self.node_logical_version_count(node_id);
+        if !version_id.is_structural()
+            && version_count >= self.retention_policy.max_versions_per_entity
+        {
             return Err(StorageError::CapacityExceeded {
                 resource: format!("node {} versions", node_id),
                 current: version_count,
@@ -953,6 +983,13 @@ impl HistoricalStorage {
             }
         }
 
+        // The superseded head stops being the head; if it is still a recorded
+        // valid-time slice (a same-transaction predecessor of a structural
+        // carry-forward), track it as an open slice.
+        if let Some(prev_id) = prev_version_id {
+            self.track_node_slice_if_open(node_id, prev_id);
+        }
+
         // Check if anchor before storing (for notifications and caching)
         let is_anchor = version.is_anchor();
 
@@ -960,6 +997,9 @@ impl HistoricalStorage {
         self.node_versions.insert(version_id, version);
         self.node_version_heads.insert(node_id, version_id);
         *self.node_version_counts.entry(node_id).or_insert(0) += 1;
+        if version_id.is_structural() {
+            *self.node_structural_counts.entry(node_id).or_insert(0) += 1;
+        }
 
         // Issue #212: Update cached stats counters for O(1) stats() retrieval
         if is_anchor {
@@ -1159,9 +1199,15 @@ impl HistoricalStorage {
         is_tombstone: bool,
         provenance: Option<Arc<Provenance>>,
     ) -> Result<()> {
-        // Check capacity limit using cached count (O(1) operation, DoS protection)
-        let version_count = self.edge_version_counts.get(&edge_id).copied().unwrap_or(0);
-        if version_count >= self.retention_policy.max_versions_per_entity {
+        // Check capacity limit using cached count (O(1) operation, DoS protection).
+        // The cap bounds LOGICAL versions (writes): structural versions
+        // (ADR-0061) are exempt — each write appends at most two of them, so
+        // memory stays bounded by a constant factor of the cap, and an update
+        // must not halve the entity's write headroom.
+        let version_count = self.edge_logical_version_count(edge_id);
+        if !version_id.is_structural()
+            && version_count >= self.retention_policy.max_versions_per_entity
+        {
             return Err(StorageError::CapacityExceeded {
                 resource: format!("edge {} versions", edge_id),
                 current: version_count,
@@ -1301,14 +1347,21 @@ impl HistoricalStorage {
             if let Some(ref adj_index) = self.temporal_adjacency_index {
                 let new_temporal = *prev.temporal();
                 if old_temporal.transaction_time().end() != new_temporal.transaction_time().end() {
-                    adj_index.close_edge_transaction_time(
+                    adj_index.close_edge_transaction_time_of(
                         edge_id,
                         source,
                         target,
+                        old_temporal.valid_time().start(),
+                        old_temporal.transaction_time().start(),
                         new_temporal.transaction_time().end(),
                     );
                 }
             }
+        }
+
+        // See the node path: keep a still-recorded superseded head tracked.
+        if let Some(prev_id) = prev_version_id {
+            self.track_edge_slice_if_open(edge_id, prev_id);
         }
 
         // Check if anchor before storing (for notifications and caching)
@@ -1318,6 +1371,9 @@ impl HistoricalStorage {
         self.edge_versions.insert(version_id, version);
         self.edge_version_heads.insert(edge_id, version_id);
         *self.edge_version_counts.entry(edge_id).or_insert(0) += 1;
+        if version_id.is_structural() {
+            *self.edge_structural_counts.entry(edge_id).or_insert(0) += 1;
+        }
 
         // Issue #212: Update cached stats counters for O(1) stats() retrieval
         if is_anchor {
@@ -1464,9 +1520,14 @@ impl HistoricalStorage {
     /// * `Err(TemporalError::MissingAnchor)` - An ancestor in the chain was removed
     /// * `Err(TemporalError::CorruptedVersionChain)` - Invalid chain structure
     fn reconstruct_node_properties_iterative(&self, version_id: VersionId) -> Result<PropertyMap> {
-        // Collect version IDs backwards from target to anchor
+        // Collect versions backwards from target to anchor. Each fetched
+        // `Arc<NodeVersion>` is cached here (not just its id) so the
+        // forward-apply pass below reuses it directly instead of re-fetching
+        // -- and re-cloning the full NodeVersion, PropertyDelta hashmaps
+        // included, out of hot storage -- every version in the chain a
+        // second time.
         // Pre-allocate with anchor_interval capacity to avoid reallocations
-        let mut version_ids: Vec<VersionId> =
+        let mut versions: Vec<Arc<NodeVersion>> =
             Vec::with_capacity(self.config.anchor_interval as usize);
         let mut current_id = version_id;
         let mut chain_length = 0;
@@ -1495,11 +1556,10 @@ impl HistoricalStorage {
             let version = match self.get_node_version_any_tier(current_id) {
                 Ok(v) => v,
                 Err(crate::core::error::Error::Storage(StorageError::VersionNotFound(_)))
-                    if !version_ids.is_empty() =>
+                    if !versions.is_empty() =>
                 {
-                    let entity_id = version_ids
+                    let entity_id = versions
                         .first()
-                        .and_then(|&vid| self.get_node_version_any_tier(vid).ok())
                         .map(|v| v.node_id.to_string())
                         .unwrap_or_else(|| format!("version {}", version_id));
                     return Err(TemporalError::MissingAnchor { entity_id }.into());
@@ -1509,9 +1569,10 @@ impl HistoricalStorage {
 
             let is_anchor = version.is_anchor();
             let prev_id = version.prev_version;
+            let node_id = version.node_id;
 
-            // Store version ID (we'll process these in reverse)
-            version_ids.push(current_id);
+            // Store the fetched version (we'll process these in reverse)
+            versions.push(version);
 
             // If we found an anchor, we're done collecting
             if is_anchor {
@@ -1520,25 +1581,23 @@ impl HistoricalStorage {
 
             // Get previous version for delta chain traversal
             current_id = prev_id.ok_or_else(|| TemporalError::CorruptedVersionChain {
-                entity_id: version.node_id.to_string(),
+                entity_id: node_id.to_string(),
                 reason: "Delta version has no previous version".to_string(),
             })?;
 
             chain_length += 1;
         }
 
-        // Now reconstruct properties by applying deltas in forward order
-        // The last element in version_ids is the anchor (base state)
-        let anchor_id =
-            version_ids
+        // Now reconstruct properties by applying deltas in forward order.
+        // The last element in `versions` is the anchor (base state) --
+        // already fetched above, no need to fetch it again.
+        let anchor_version =
+            versions
                 .last()
-                .copied()
                 .ok_or_else(|| TemporalError::CorruptedVersionChain {
                     entity_id: format!("version {}", version_id),
                     reason: "Empty version chain during reconstruction".to_string(),
                 })?;
-
-        let anchor_version = self.get_node_version_any_tier(anchor_id)?;
 
         let mut properties = match &anchor_version.data {
             VersionData::Anchor { properties, .. } => properties.clone(),
@@ -1554,9 +1613,7 @@ impl HistoricalStorage {
 
         // Apply deltas in forward order (reverse of collection order)
         // Skip the last element (anchor) since we already have its properties
-        for &vid in version_ids.iter().rev().skip(1) {
-            let version = self.get_node_version_any_tier(vid)?;
-
+        for version in versions.iter().rev().skip(1) {
             match &version.data {
                 VersionData::Delta { delta } => {
                     properties = delta.apply(&properties);
@@ -1580,9 +1637,12 @@ impl HistoricalStorage {
     /// Mirrors the node reconstruction algorithm for consistency. See
     /// `reconstruct_node_properties_iterative` for algorithm details.
     fn reconstruct_edge_properties_iterative(&self, version_id: VersionId) -> Result<PropertyMap> {
-        // Collect version IDs backwards from target to anchor
+        // Collect versions backwards from target to anchor, caching each
+        // fetched `Arc<EdgeVersion>` so the forward-apply pass below reuses
+        // it instead of re-fetching (and re-cloning) every version in the
+        // chain a second time. See `reconstruct_node_properties_iterative`.
         // Pre-allocate with anchor_interval capacity to avoid reallocations
-        let mut version_ids: Vec<VersionId> =
+        let mut versions: Vec<Arc<EdgeVersion>> =
             Vec::with_capacity(self.config.anchor_interval as usize);
         let mut current_id = version_id;
         let mut chain_length = 0;
@@ -1609,11 +1669,10 @@ impl HistoricalStorage {
             let version = match self.get_edge_version_any_tier(current_id) {
                 Ok(v) => v,
                 Err(crate::core::error::Error::Storage(StorageError::VersionNotFound(_)))
-                    if !version_ids.is_empty() =>
+                    if !versions.is_empty() =>
                 {
-                    let entity_id = version_ids
+                    let entity_id = versions
                         .first()
-                        .and_then(|&vid| self.get_edge_version_any_tier(vid).ok())
                         .map(|v| v.edge_id.to_string())
                         .unwrap_or_else(|| format!("version {}", version_id));
                     return Err(TemporalError::MissingAnchor { entity_id }.into());
@@ -1623,9 +1682,10 @@ impl HistoricalStorage {
 
             let is_anchor = version.is_anchor();
             let prev_id = version.prev_version;
+            let edge_id = version.edge_id;
 
-            // Store version ID (we'll process these in reverse)
-            version_ids.push(current_id);
+            // Store the fetched version (we'll process these in reverse)
+            versions.push(version);
 
             // If we found an anchor, we're done collecting
             if is_anchor {
@@ -1634,25 +1694,23 @@ impl HistoricalStorage {
 
             // Get previous version for delta chain traversal
             current_id = prev_id.ok_or_else(|| TemporalError::CorruptedVersionChain {
-                entity_id: version.edge_id.to_string(),
+                entity_id: edge_id.to_string(),
                 reason: "Delta version has no previous version".to_string(),
             })?;
 
             chain_length += 1;
         }
 
-        // Now reconstruct properties by applying deltas in forward order
-        // The last element in version_ids is the anchor (base state)
-        let anchor_id =
-            version_ids
+        // Now reconstruct properties by applying deltas in forward order.
+        // The last element in `versions` is the anchor (base state) --
+        // already fetched above, no need to fetch it again.
+        let anchor_version =
+            versions
                 .last()
-                .copied()
                 .ok_or_else(|| TemporalError::CorruptedVersionChain {
                     entity_id: format!("version {}", version_id),
                     reason: "Empty version chain during reconstruction".to_string(),
                 })?;
-
-        let anchor_version = self.get_edge_version_any_tier(anchor_id)?;
 
         let mut properties = match &anchor_version.data {
             VersionData::Anchor { properties, .. } => properties.clone(),
@@ -1668,9 +1726,7 @@ impl HistoricalStorage {
 
         // Apply deltas in forward order (reverse of collection order)
         // Skip the last element (anchor) since we already have its properties
-        for &vid in version_ids.iter().rev().skip(1) {
-            let version = self.get_edge_version_any_tier(vid)?;
-
+        for version in versions.iter().rev().skip(1) {
             match &version.data {
                 VersionData::Delta { delta } => {
                     properties = delta.apply(&properties);
@@ -2565,6 +2621,11 @@ impl HistoricalStorage {
                     if let Some(count) = self.node_version_counts.get_mut(&version.node_id) {
                         *count = count.saturating_sub(1);
                     }
+                    if version.id.is_structural()
+                        && let Some(count) = self.node_structural_counts.get_mut(&version.node_id)
+                    {
+                        *count = count.saturating_sub(1);
+                    }
                     // Issue #212: Update cached stats counters when migrating to cold storage
                     if version.is_anchor() {
                         self.cached_node_anchor_count =
@@ -2615,6 +2676,12 @@ impl HistoricalStorage {
                     && let Some(count) = self.edge_version_counts.get_mut(&version.edge_id)
                 {
                     *count = count.saturating_sub(1);
+                    if version.id.is_structural()
+                        && let Some(structural) =
+                            self.edge_structural_counts.get_mut(&version.edge_id)
+                    {
+                        *structural = structural.saturating_sub(1);
+                    }
                     // Issue #212: Update cached stats counters when migrating to cold storage
                     if version.is_anchor() {
                         self.cached_edge_anchor_count =
@@ -2674,6 +2741,9 @@ impl HistoricalStorage {
             indexes.update_node_transaction_time_end(node_id, version_id, end_timestamp);
         }
 
+        // A tx-closed version is no longer part of the current belief.
+        self.untrack_node_slice(node_id, version_id);
+
         Ok(())
     }
 
@@ -2696,6 +2766,12 @@ impl HistoricalStorage {
         let source = version.source;
         let target = version.target;
 
+        // Capture the version's coordinates so the temporal adjacency index
+        // closes exactly this version's entry, not merely the edge's latest one
+        // (an edge may carry several still-recorded valid-time slices).
+        let valid_from = version.temporal.valid_time().start();
+        let tx_from = version.temporal.transaction_time().start();
+
         // Use TemporalVersion trait method
         version.close_transaction_time(end_timestamp)?;
 
@@ -2706,8 +2782,18 @@ impl HistoricalStorage {
 
         // Update temporal adjacency index to reflect the closed transaction time
         if let Some(ref adj_index) = self.temporal_adjacency_index {
-            adj_index.close_edge_transaction_time(edge_id, source, target, end_timestamp);
+            adj_index.close_edge_transaction_time_of(
+                edge_id,
+                source,
+                target,
+                valid_from,
+                tx_from,
+                end_timestamp,
+            );
         }
+
+        // A tx-closed version is no longer part of the current belief.
+        self.untrack_edge_slice(edge_id, version_id);
 
         Ok(())
     }
@@ -3092,6 +3178,11 @@ impl HistoricalStorage {
     /// Get the complete version history of a node.
     ///
     /// Returns all versions in chronological order (oldest first).
+    ///
+    /// One entry per write: structural versions (ADR-0061 carry-forwards and
+    /// re-assertions) are omitted. Use
+    /// [`get_node_valid_time_slices`](Self::get_node_valid_time_slices) for the
+    /// current valid-time partition.
     pub fn get_node_history(&self, node_id: NodeId) -> Result<EntityHistory> {
         #[cfg(feature = "observability")]
         let _span =
@@ -3113,6 +3204,13 @@ impl HistoricalStorage {
 
         // Reverse to get oldest-first order
         version_ids.reverse();
+
+        // History lists WRITES: structural versions (an update's carry-forward
+        // of the superseded valid-time prefix, a backfill's head re-assertion)
+        // restate facts already listed and are omitted (ADR-0061). The current
+        // valid-time partition, structural slices included, is served by
+        // `get_*_valid_time_slices`.
+        version_ids.retain(|vid| !vid.is_structural());
 
         // Build VersionInfo for each version
         let mut versions = Vec::with_capacity(version_ids.len());
@@ -3160,6 +3258,10 @@ impl HistoricalStorage {
 
         // Reverse to get oldest-first order
         version_ids.reverse();
+
+        // Logical version numbers count writes, matching `get_node_history`
+        // (structural versions are omitted, ADR-0061).
+        version_ids.retain(|vid| !vid.is_structural());
 
         // Convert 1-indexed version number to 0-indexed array index
         let index = version_number
@@ -3242,6 +3344,11 @@ impl HistoricalStorage {
     /// Get the complete version history of an edge.
     ///
     /// Returns all versions in chronological order (oldest first).
+    ///
+    /// One entry per write: structural versions (ADR-0061 carry-forwards and
+    /// re-assertions) are omitted. Use
+    /// [`get_edge_valid_time_slices`](Self::get_edge_valid_time_slices) for the
+    /// current valid-time partition.
     pub fn get_edge_history(&self, edge_id: EdgeId) -> Result<EntityHistory> {
         #[cfg(feature = "observability")]
         let _span =
@@ -3263,6 +3370,13 @@ impl HistoricalStorage {
 
         // Reverse to get oldest-first order
         version_ids.reverse();
+
+        // History lists WRITES: structural versions (an update's carry-forward
+        // of the superseded valid-time prefix, a backfill's head re-assertion)
+        // restate facts already listed and are omitted (ADR-0061). The current
+        // valid-time partition, structural slices included, is served by
+        // `get_*_valid_time_slices`.
+        version_ids.retain(|vid| !vid.is_structural());
 
         // Build VersionInfo for each version
         let mut versions = Vec::with_capacity(version_ids.len());
@@ -3787,6 +3901,9 @@ impl HistoricalStorage {
 
         // Update version count
         *self.node_version_counts.entry(node_id).or_insert(0) += 1;
+        if version_id.is_structural() {
+            *self.node_structural_counts.entry(node_id).or_insert(0) += 1;
+        }
 
         // Issue #212: Update cached stats counters during persistence restore
         if is_anchor {
@@ -3820,6 +3937,9 @@ impl HistoricalStorage {
 
         // Update version count
         *self.edge_version_counts.entry(edge_id).or_insert(0) += 1;
+        if version_id.is_structural() {
+            *self.edge_structural_counts.entry(edge_id).or_insert(0) += 1;
+        }
 
         // Issue #212: Update cached stats counters during persistence restore
         if is_anchor {
@@ -3887,8 +4007,26 @@ impl HistoricalStorage {
                 )
             });
 
-            // Link prev/next
+            // An entity restored from a current-format (Issue #3387) file
+            // carries exact persisted chain links and tx-time closures; only a
+            // legacy file (every link `None`) needs the heuristic rebuild. The
+            // distinction matters for structural carry-forward versions: they
+            // are still-recorded slices that are NOT the latest version and
+            // share a transaction time with their successor, so the heuristic
+            // (sort by tx time, close every non-latest open interval, head =
+            // last) would mis-order, mis-close, and mis-head them. Legacy files
+            // predate structural versions.
+            let has_persisted_links = version_ids.iter().any(|vid| {
+                self.node_versions
+                    .get(vid)
+                    .is_some_and(|v| v.prev_version.is_some() || v.next_version.is_some())
+            });
+
+            // Link prev/next (legacy files only; persisted links are exact)
             for i in 0..version_ids.len() {
+                if has_persisted_links {
+                    break;
+                }
                 let vid = version_ids[i];
 
                 // Link to previous version (earlier in time)
@@ -3921,7 +4059,12 @@ impl HistoricalStorage {
             // Persistence only stores tx_start; after loading every version has
             // tx_end = TIMESTAMP_MAX.  Reconstruct: version[i].tx_end = version[i+1].tx_start.
             // Guard: skip if next_tx_start <= this version's tx_start to avoid zero-width [T,T) intervals.
-            for i in 0..version_ids.len().saturating_sub(1) {
+            let heuristic_len = if has_persisted_links {
+                0
+            } else {
+                version_ids.len()
+            };
+            for i in 0..heuristic_len.saturating_sub(1) {
                 let next_tx_start = self
                     .node_versions
                     .get(&version_ids[i + 1])
@@ -3938,7 +4081,26 @@ impl HistoricalStorage {
             }
 
             // Set head to the latest version (last in sorted order)
-            if let Some(&latest_vid) = version_ids.last() {
+            if let Some(&last_sorted) = version_ids.last() {
+                // With persisted links, the head is the end of the chain:
+                // follow `next_version` from the tx-latest version (a
+                // structural version can sort after its same-transaction
+                // successor by id).
+                let mut latest_vid = last_sorted;
+                if has_persisted_links {
+                    for _ in 0..version_ids.len() {
+                        match self
+                            .node_versions
+                            .get(&latest_vid)
+                            .and_then(|v| v.next_version)
+                        {
+                            Some(next) if self.node_versions.contains_key(&next) => {
+                                latest_vid = next
+                            }
+                            _ => break,
+                        }
+                    }
+                }
                 self.node_version_heads.insert(node_id, latest_vid);
 
                 // Issue #208: Rebuild counter cache for anchor interval checks
@@ -3992,8 +4154,26 @@ impl HistoricalStorage {
                 )
             });
 
-            // Link prev/next
+            // An entity restored from a current-format (Issue #3387) file
+            // carries exact persisted chain links and tx-time closures; only a
+            // legacy file (every link `None`) needs the heuristic rebuild. The
+            // distinction matters for structural carry-forward versions: they
+            // are still-recorded slices that are NOT the latest version and
+            // share a transaction time with their successor, so the heuristic
+            // (sort by tx time, close every non-latest open interval, head =
+            // last) would mis-order, mis-close, and mis-head them. Legacy files
+            // predate structural versions.
+            let has_persisted_links = version_ids.iter().any(|vid| {
+                self.edge_versions
+                    .get(vid)
+                    .is_some_and(|v| v.prev_version.is_some() || v.next_version.is_some())
+            });
+
+            // Link prev/next (legacy files only; persisted links are exact)
             for i in 0..version_ids.len() {
+                if has_persisted_links {
+                    break;
+                }
                 let vid = version_ids[i];
 
                 // Link to previous version (earlier in time)
@@ -4024,7 +4204,12 @@ impl HistoricalStorage {
 
             // Fix transaction-time end for non-latest edge versions (mirror node logic).
             // Guard: skip if next_tx_start <= this version's tx_start to avoid zero-width [T,T) intervals.
-            for i in 0..version_ids.len().saturating_sub(1) {
+            let heuristic_len = if has_persisted_links {
+                0
+            } else {
+                version_ids.len()
+            };
+            for i in 0..heuristic_len.saturating_sub(1) {
                 let next_tx_start = self
                     .edge_versions
                     .get(&version_ids[i + 1])
@@ -4041,7 +4226,26 @@ impl HistoricalStorage {
             }
 
             // Set head to the latest version (last in sorted order)
-            if let Some(&latest_vid) = version_ids.last() {
+            if let Some(&last_sorted) = version_ids.last() {
+                // With persisted links, the head is the end of the chain:
+                // follow `next_version` from the tx-latest version (a
+                // structural version can sort after its same-transaction
+                // successor by id).
+                let mut latest_vid = last_sorted;
+                if has_persisted_links {
+                    for _ in 0..version_ids.len() {
+                        match self
+                            .edge_versions
+                            .get(&latest_vid)
+                            .and_then(|v| v.next_version)
+                        {
+                            Some(next) if self.edge_versions.contains_key(&next) => {
+                                latest_vid = next
+                            }
+                            _ => break,
+                        }
+                    }
+                }
                 self.edge_version_heads.insert(edge_id, latest_vid);
 
                 // Issue #208: Rebuild counter cache for anchor interval checks
@@ -4067,6 +4271,9 @@ impl HistoricalStorage {
                 self.edge_versions_since_anchor.insert(edge_id, count);
             }
         }
+
+        // Heads are final: re-derive the still-recorded non-head slices.
+        self.rebuild_open_slices();
     }
 
     /// Repopulate temporal indexes from existing version data.
