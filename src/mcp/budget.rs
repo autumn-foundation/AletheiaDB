@@ -225,12 +225,45 @@ fn parse_positive_u64(value: Option<&Value>, field: &str) -> Result<Option<u64>,
     }
 }
 
+/// A [`std::io::Write`] sink that only counts bytes written, never allocating
+/// or retaining them -- lets `measured_bytes`/`measured_bytes_map` learn a
+/// serialized length without materializing the formatted string, which
+/// matters because they run inside the rung-4 binary search (Issue #3353 F4)
+/// where the shaped candidate can be large and the search calls them
+/// `O(log n)` times.
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Serialize exactly as [`AletheiaMcpServer::success_json`] does, so the byte
 /// measurement here is the byte length actually emitted on the wire.
 fn measured_bytes(value: &Value) -> usize {
-    serde_json::to_string_pretty(value)
-        .unwrap_or_else(|_| value.to_string())
-        .len()
+    let mut counter = ByteCounter(0);
+    match serde_json::to_writer_pretty(&mut counter, value) {
+        Ok(()) => counter.0,
+        Err(_) => value.to_string().len(),
+    }
+}
+
+/// Same measurement as [`measured_bytes`], but serializes a `Map` directly.
+/// `serde_json::Map`'s `Serialize` impl produces the identical bytes
+/// `Value::Object(map)` would, so this avoids the `Value::Object(map.clone())`
+/// wrapper (and the clone it would require) purely to reuse `measured_bytes`.
+fn measured_bytes_map(map: &Map<String, Value>) -> usize {
+    let mut counter = ByteCounter(0);
+    match serde_json::to_writer_pretty(&mut counter, map) {
+        Ok(()) => counter.0,
+        Err(_) => Value::Object(map.clone()).to_string().len(),
+    }
 }
 
 /// Byte cap enforcement for a payload that is not a shapeable read-tool object
@@ -781,12 +814,20 @@ fn truncate_arrays_to_fit(
 }
 
 /// Measure the assembled candidate (object + budget block) with `field`
-/// tentatively truncated to `prefix_len`, without persisting the mutation to
-/// `map`. Used inside the rung-4 search so the *finalized* response size —
-/// including the budget and disclosure metadata appended afterward — is what is
-/// bounded by `cap` (Issue #3353 F4).
+/// tentatively truncated to `prefix_len`, without permanently mutating `map`.
+/// Used inside the rung-4 search so the *finalized* response size — including
+/// the budget and disclosure metadata appended afterward — is what is bounded
+/// by `cap` (Issue #3353 F4).
+///
+/// Called `O(log n)` times per truncated field by the binary search in
+/// [`truncate_arrays_to_fit`]. Rather than `map.clone()`-ing the whole
+/// (possibly large) response object per probe, this mutates `map` in place —
+/// moving `field`'s dropped suffix aside instead of cloning it, and
+/// snapshotting only the handful of small scalar siblings
+/// (`rewrite_pagination_siblings` touches) — then reverts every change before
+/// returning, so `map` is bit-for-bit unchanged from the caller's perspective.
 fn assembled_len(
-    map: &Map<String, Value>,
+    map: &mut Map<String, Value>,
     budget: &BudgetRequest,
     cap: u64,
     base_sections: &[Value],
@@ -794,20 +835,33 @@ fn assembled_len(
     field: &str,
     prefix_len: usize,
 ) -> usize {
-    let original_len = map
-        .get(field)
-        .and_then(Value::as_array)
-        .map(|a| a.len())
-        .unwrap_or(prefix_len);
-    let omitted = original_len.saturating_sub(prefix_len);
+    // Move (never clone) the elements beyond `prefix_len` out of `field`'s
+    // array; `None` means "nothing to truncate" (field absent/non-array, or
+    // `prefix_len` already covers it), matching the prior `unwrap_or(prefix_len)`
+    // (omitted == 0) fallback.
+    let suffix = match map.get_mut(field) {
+        Some(Value::Array(items)) if prefix_len < items.len() => Some(items.split_off(prefix_len)),
+        _ => None,
+    };
+    let omitted = suffix.as_ref().map_or(0, Vec::len);
 
-    let mut trial = map.clone();
-    set_array_prefix(&mut trial, field, prefix_len);
+    // Snapshot the small scalar siblings `rewrite_pagination_siblings` may
+    // overwrite (it only ever updates a key already present, never inserts a
+    // new one when passed an empty tool name), so they can be restored
+    // byte-for-byte after measuring.
+    let count_key = match field {
+        "nodes" | "edges" | "results" => Some("count"),
+        "rows" => Some("row_count"),
+        _ => None,
+    };
+    let saved_count = count_key.and_then(|k| map.get(k).cloned());
+    let saved_truncated = map.get("truncated").cloned();
+    let saved_has_more = map.get("has_more").cloned();
 
     let mut sections: Vec<Value> = base_sections.to_vec();
     sections.extend(prior_disclosures.iter().cloned());
     if omitted > 0 {
-        rewrite_pagination_siblings(&mut trial, field, prefix_len, 0, "");
+        rewrite_pagination_siblings(map, field, prefix_len, 0, "");
         // A representative disclosure of maximal-ish size (concrete handle plus
         // counts) so the reserved headroom matches the finalized block.
         sections.push(json!({
@@ -824,11 +878,34 @@ fn assembled_len(
             },
         }));
     }
-    trial.insert(
+    map.insert(
         "budget".to_string(),
         budget_block(Rung::CountsAndHandles, budget, cap, sections),
     );
-    measured_bytes(&Value::Object(trial))
+
+    let bytes = measured_bytes_map(map);
+
+    // Revert every mutation above, in reverse: `map` must be exactly as the
+    // caller left it once this probe returns.
+    map.remove("budget");
+    if omitted > 0 {
+        if let (Some(k), Some(v)) = (count_key, saved_count) {
+            map.insert(k.to_string(), v);
+        }
+        if let Some(v) = saved_truncated {
+            map.insert("truncated".to_string(), v);
+        }
+        if let Some(v) = saved_has_more {
+            map.insert("has_more".to_string(), v);
+        }
+    }
+    if let Some(suffix) = suffix
+        && let Some(Value::Array(items)) = map.get_mut(field)
+    {
+        items.extend(suffix);
+    }
+
+    bytes
 }
 
 /// Build the rung-4 truncation fetch handle. Paginated tools (those that accept
