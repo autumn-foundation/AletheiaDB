@@ -101,6 +101,12 @@ echo "$get_resp" | grep -q '"Alice"' || fail "get_node did not return Alice"
 echo "OK: queried node back"
 
 # AS OF takes microseconds since epoch; "now" must contain the node just made.
+# `date +%s` has whole-second resolution, so taken in the same second as the
+# create it truncates to a moment *before* the node existed and the AS OF read
+# is (correctly) empty. Wait out the current second so the truncated value is
+# strictly after the create. (`date +%s%6N` would avoid the wait but is
+# GNU-only; this script also runs on macOS.)
+sleep 1
 NOW_US=$(( $(date +%s) * 1000000 ))
 asof_resp="$(api POST /query "{\"operation\":\"execute_query\",\"query\":\"AS OF '$NOW_US' MATCH (n:Person) RETURN n\"}")"
 echo "as-of: $asof_resp"
