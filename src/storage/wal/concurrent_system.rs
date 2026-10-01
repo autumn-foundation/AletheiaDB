@@ -1861,9 +1861,10 @@ impl ConcurrentWalSystem {
     /// and performs a final flush of all pending entries.
     pub fn shutdown(&mut self) {
         // Gracefully shutdown the WAL.
-        // This stops accepting new writes, closes the ring buffers (unblocking
-        // any parked appenders via the `Closed` path), waits for active
-        // batches with a bounded deadline (Issue #3801), and then closes.
+        // This stops accepting new writes, lets in-flight batches finish while
+        // they make progress, closes the ring buffers (unblocking any parked
+        // appenders via the `Closed` path), and waits for the rest with a
+        // bounded deadline (Issue #3801).
         match self.wal.shutdown_graceful() {
             super::concurrent::ShutdownOutcome::Completed => {}
             super::concurrent::ShutdownOutcome::TimedOut { active_batches } => {

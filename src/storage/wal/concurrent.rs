@@ -171,11 +171,11 @@ thread_local! {
 
 /// Outcome of a graceful shutdown attempt (Issue #3801).
 ///
-/// `shutdown_graceful` no longer spins indefinitely: it closes the ring
-/// buffers first (so a writer parked in a blocking append exits via the
-/// `Closed` path instead of deadlocking the shutdown), then waits for
-/// in-flight appenders with a bounded deadline derived from
-/// `max_append_block_ms`.
+/// `shutdown_graceful` no longer spins indefinitely: it lets in-flight
+/// appenders finish while they make progress, closes the ring buffers once
+/// they stop (so a writer parked in a blocking append exits via the `Closed`
+/// path instead of deadlocking the shutdown), then waits for the rest with a
+/// bounded deadline derived from `max_append_block_ms`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownOutcome {
     /// All in-flight appenders drained within the deadline; buffers closed.
@@ -914,37 +914,63 @@ impl ConcurrentWal {
 
     /// Gracefully shutdown the WAL.
     ///
-    /// This signals that shutdown is requested (preventing new batches),
-    /// closes the ring buffers FIRST (so a writer parked in a blocking append
-    /// exits via the `Closed` path instead of deadlocking this waiter — Issue
-    /// #3801), then waits for in-flight appenders with a bounded deadline.
+    /// This signals that shutdown is requested (preventing new batches), then
+    /// lets in-flight batches that are still making progress finish before
+    /// closing the ring buffers, so a batch being drained by a healthy flusher
+    /// is never cut mid-way into a partial prefix.
     ///
-    /// The deadline is `max_append_block_ms` (minimum 1 second): a blocked
-    /// appender gives up after that long on its own, or exits promptly via
-    /// `Closed` once the buffers are closed. An unbounded configuration
-    /// (`max_append_block_ms == 0`) still gets a deadline — the close is what
-    /// unblocks it, not the timeout.
+    /// The drain wait is progress-aware: it ends once no appender has placed
+    /// an entry for a short grace window (`max_append_block_ms`, capped at 1
+    /// second; 1 second when unbounded). A writer wedged on a buffer nobody
+    /// drains therefore cannot stall shutdown: once the window elapses the
+    /// buffers are closed and it exits via the `Closed` path (Issue #3801).
+    /// The post-close wait has a bounded deadline (`max_append_block_ms`,
+    /// minimum 1 second).
     pub fn shutdown_graceful(&self) -> ShutdownOutcome {
+        use std::time::{Duration, Instant};
+
         // 1. Signal shutdown (prevents new batches).
         self.shutdown_requested.store(true, Ordering::SeqCst);
 
-        // 2. Close buffers BEFORE waiting (Issue #3801). A writer parked in a
-        //    blocking append waits for buffer space or close; closing first
-        //    lets it exit via the existing `Closed` path. Waiting first
-        //    deadlocks when `max_append_block_ms == 0` (unbounded): the
-        //    spinner waits for the appender, the appender waits for space or
-        //    close, and close never comes.
+        // 2. Let in-flight batches drain while they make progress. Closing
+        //    first would refuse the rest of a batch the flusher is actively
+        //    draining, leaving a partial prefix behind; closing only after an
+        //    unbounded wait deadlocks on a wedged appender when
+        //    `max_append_block_ms == 0` (the spinner waits for the appender,
+        //    the appender waits for space or close, and close never comes).
+        //    A no-progress window gets both right.
+        let block_ms = self.config.max_append_block_ms;
+        let grace = Duration::from_millis(if block_ms == 0 {
+            1_000
+        } else {
+            block_ms.min(1_000)
+        });
+        let mut last_appends = self.total_appends.load(Ordering::Relaxed);
+        let mut last_progress = Instant::now();
+        while self.active_batches.load(Ordering::SeqCst) > 0 {
+            let appends = self.total_appends.load(Ordering::Relaxed);
+            if appends != last_appends {
+                last_appends = appends;
+                last_progress = Instant::now();
+            } else if last_progress.elapsed() >= grace {
+                break;
+            }
+            std::thread::yield_now();
+        }
+
+        // 3. Close buffers: unblocks any appender still parked in a blocking
+        //    append via the existing `Closed` path.
         self.close();
 
-        // 3. Wait for active batches with a bounded deadline.
-        let bound_ms = self.config.max_append_block_ms.max(1_000);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(bound_ms);
+        // 4. Wait for remaining active batches with a bounded deadline.
+        let bound_ms = block_ms.max(1_000);
+        let deadline = Instant::now() + Duration::from_millis(bound_ms);
         loop {
             let active = self.active_batches.load(Ordering::SeqCst);
             if active == 0 {
                 return ShutdownOutcome::Completed;
             }
-            if std::time::Instant::now() >= deadline {
+            if Instant::now() >= deadline {
                 return ShutdownOutcome::TimedOut {
                     active_batches: active,
                 };
@@ -1949,5 +1975,59 @@ mod sentry_tests {
                 .expect("appender thread alive"),
             "the wedged appender should have been unblocked by the close"
         );
+    }
+
+    /// Issue #3801 follow-up: closing the buffers must not cut a batch that a
+    /// healthy drainer is still making room for.
+    ///
+    /// A 4-entry batch on a 2-slot buffer only completes as the drainer frees
+    /// slots. Shutdown is requested while the batch is still mid-flight; the
+    /// progress-aware drain must let it finish rather than close the buffers
+    /// under it and leave a partial prefix behind.
+    #[test]
+    fn test_shutdown_graceful_lets_progressing_batch_finish() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::Duration;
+
+        let dir = tempdir().unwrap();
+        let wal = wedged_wal(dir.path(), 2, 0);
+
+        let running = Arc::new(AtomicBool::new(true));
+        let drained = Arc::new(std::sync::Mutex::new(0usize));
+        let drainer = {
+            let wal = Arc::clone(&wal);
+            let running = Arc::clone(&running);
+            let drained = Arc::clone(&drained);
+            thread::spawn(move || {
+                while running.load(Ordering::SeqCst) {
+                    *drained.lock().unwrap() += wal.drain_all().len();
+                    // Slow drainer: the batch needs several rounds to finish.
+                    thread::sleep(Duration::from_millis(100));
+                }
+                *drained.lock().unwrap() += wal.drain_all().len();
+            })
+        };
+
+        let writer = {
+            let wal = Arc::clone(&wal);
+            thread::spawn(move || wal.append_batch((0..4).map(|_| test_operation()).collect()))
+        };
+
+        // Wait until the batch is in flight but cannot yet have finished.
+        while wal.total_appends() == 0 {
+            thread::yield_now();
+        }
+        let outcome = wal.shutdown_graceful();
+
+        running.store(false, Ordering::SeqCst);
+        drainer.join().unwrap();
+        let result = writer.join().unwrap();
+
+        assert_eq!(outcome, ShutdownOutcome::Completed);
+        assert!(
+            result.is_ok(),
+            "a batch the drainer was making room for must not be cut by shutdown: {result:?}"
+        );
+        assert_eq!(*drained.lock().unwrap(), 4, "expected the full batch");
     }
 }
