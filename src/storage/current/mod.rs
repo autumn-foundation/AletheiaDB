@@ -19,6 +19,7 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use parking_lot::RwLock;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 mod apply_gate;
 mod iterators;
@@ -59,6 +60,10 @@ pub struct CurrentStorage {
     /// Multi-property vector indexes (Issue #389)
     /// Maps property name -> VectorIndexEntry
     vector_indexes: DashMap<String, VectorIndexEntry>,
+    /// Set (never cleared -- indexes are only ever added) once `vector_indexes`
+    /// holds at least one entry. Lets the node write path skip the O(shards)
+    /// `DashMap` iteration when no vector index exists, the common case.
+    has_vector_indexes: AtomicBool,
     /// Multi-property temporal vector indexes (Issue #389 fix)
     /// Maps property name -> TemporalVectorIndexEntry
     temporal_vector_indexes: DashMap<String, TemporalVectorIndexEntry>,
@@ -104,6 +109,7 @@ impl CurrentStorage {
             edge_id_gen: IdGenerator::new(),
             version_id_gen: IdGenerator::new(),
             vector_indexes: DashMap::new(),
+            has_vector_indexes: AtomicBool::new(false),
             temporal_vector_indexes: DashMap::new(),
             filter_stats: DashMap::new(),
             snapshot_lock: RwLock::new(()),
@@ -292,6 +298,7 @@ impl CurrentStorage {
                 vacant.insert(entry);
             }
         }
+        self.has_vector_indexes.store(true, Ordering::Release);
 
         Ok(())
     }
@@ -375,6 +382,7 @@ impl CurrentStorage {
                 config: config.clone(),
             },
         );
+        self.has_vector_indexes.store(true, Ordering::Release);
     }
 
     /// Rebuild a vector index from the vector properties of current nodes.
@@ -480,6 +488,9 @@ impl CurrentStorage {
     /// Returns Ok(true) if any vector was indexed, Ok(false) if none applicable,
     /// Err on failure (will have already done partial work).
     fn try_index_vector(&self, node_id: NodeId, properties: &PropertyMap) -> Result<bool> {
+        if !self.has_vector_indexes.load(Ordering::Acquire) {
+            return Ok(false);
+        }
         let mut indexed_any = false;
 
         // Index in all multi-property indexes
@@ -499,6 +510,9 @@ impl CurrentStorage {
     ///
     /// Returns Ok(true) if removed from any index, Ok(false) if not applicable.
     fn try_remove_from_index(&self, node_id: NodeId) -> Result<bool> {
+        if !self.has_vector_indexes.load(Ordering::Acquire) {
+            return Ok(false);
+        }
         let mut removed_any = false;
 
         // Remove from all multi-property indexes
@@ -523,6 +537,9 @@ impl CurrentStorage {
         new_props: &PropertyMap,
         old_props: &PropertyMap,
     ) -> Result<()> {
+        if !self.has_vector_indexes.load(Ordering::Acquire) {
+            return Ok(());
+        }
         // Update all multi-property indexes
         for entry in self.vector_indexes.iter() {
             let prop_name = entry.key();
@@ -1477,8 +1494,6 @@ impl CurrentStorage {
     ///
     /// This is used for testing to verify that adaptive learning is working correctly.
     pub(crate) fn get_filter_stats(&self, label: &str) -> Option<(u64, u64, u64)> {
-        use std::sync::atomic::Ordering;
-
         self.filter_stats.get(label).map(|entry| {
             let stats = entry.value();
             (
