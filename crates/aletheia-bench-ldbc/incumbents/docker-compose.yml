@@ -1,0 +1,37 @@
+# Incumbent engines for comparative runs (Issue #3373).
+#
+# NOT executed in the sandbox that produced the committed AletheiaDB results.
+# This file documents the intended reproducible setup: `docker compose up -d`
+# on a machine with Docker brings up the engines, then each engine's run.sh
+# loads the shared generated data and times the mapped queries.
+#
+# Versions are pinned so a third party reproduces the same engine builds.
+services:
+  neo4j:
+    image: neo4j:5.23-community
+    environment:
+      NEO4J_AUTH: neo4j/benchbench
+      # Vector index (5.x) available; defaults otherwise (methodology: defaults).
+      NEO4J_dbms_security_procedures_unrestricted: "gds.*,apoc.*"
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - ./neo4j/import:/import
+
+  kuzu:
+    # KuzuDB ships as an embedded library / CLI; this image runs its CLI so the
+    # mapped queries in kuzu/queries.cypher can be timed against the same data.
+    image: kuzudb/kuzu:0.6.1
+    volumes:
+      - ./kuzu:/bench
+      - ./kuzu/import:/import
+
+  xtdb:
+    # XTDB (bi-temporal) for the temporal-extension queries only, where
+    # expressible. Not a property graph — see xtdb/queries.edn.
+    image: juxt/xtdb:1.24.0
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./xtdb:/bench

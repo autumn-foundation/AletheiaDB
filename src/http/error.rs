@@ -4,6 +4,7 @@
 //! `Result<Json<ApiResponse>, AletheiaHttpError>` and get the right status
 //! code + JSON error body for free.
 
+use crate::auth::{AccessClass, Role};
 use crate::http::config::{LimitDimension, LimitOverrideError};
 use axum::Json;
 use axum::http::StatusCode;
@@ -110,8 +111,19 @@ pub enum AletheiaHttpError {
     Unauthorized,
 
     /// The authenticated principal's role does not allow this operation.
-    #[error("{0}")]
-    PermissionDenied(String),
+    ///
+    /// Carries the operation's required [`AccessClass`] and the principal's
+    /// [`Role`] so the error body can surface a structured
+    /// `details: {required_class, principal_role}` block (matching the MCP
+    /// surface, Issue #3234). The `Display` free text is byte-identical to the
+    /// legacy `"role '{role}' does not permit {class} access"` message.
+    #[error("role '{principal_role}' does not permit {required_class} access")]
+    PermissionDenied {
+        /// The access class the operation required.
+        required_class: AccessClass,
+        /// The authenticated principal's role.
+        principal_role: Role,
+    },
 
     /// A per-query resource limit (timeout / rows / bytes) was exceeded
     /// (Issue #3368). Renders `429` (timeout) or `413` (rows/bytes).
@@ -138,19 +150,328 @@ pub enum AletheiaHttpError {
         /// The configured `max_in_flight_queries` cap that was reached.
         cap: usize,
     },
+
+    /// A per-principal changefeed subscription quota was exceeded (Issue #3678).
+    /// Renders `429 RESOURCE_EXHAUSTED`, `retriable: true`, with
+    /// `details {principal, current, limit}` — byte-shape-identical to the MCP
+    /// surface's classification of [`StorageError::PrincipalQuotaExceeded`].
+    #[error(
+        "principal '{principal}' has reached its changefeed subscription quota (current={current}, limit={limit})"
+    )]
+    PrincipalQuotaExceeded {
+        /// The principal id whose quota was exceeded.
+        principal: String,
+        /// The principal's current live-subscription count.
+        current: usize,
+        /// The principal's configured maximum.
+        limit: usize,
+    },
+
+    /// A db-layer error pre-classified into the unified #3234 envelope, so the
+    /// HTTP body carries the same `code`/`retriable`/`details` as the MCP
+    /// surface. Built via [`Self::from_db_error`], which classifies the
+    /// schema-constraint (Issue #3378), uniqueness, and transaction
+    /// conflict/precondition classes; every other db error keeps its prior HTTP
+    /// mapping (a 400 `BadRequest`).
+    #[error("{message}")]
+    Structured {
+        /// The #3234 code string (e.g. `CONSTRAINT_VIOLATION`,
+        /// `FAILED_PRECONDITION`, `CONFLICT`, `UNAVAILABLE`).
+        code: &'static str,
+        /// HTTP status derived from the code (`409` / `412` / `503` / …).
+        status: StatusCode,
+        /// Whether a fresh attempt could usefully succeed. `true` only for the
+        /// transient conflict / clock-skew classes; `false` for the caller-fault
+        /// constraint / precondition classes.
+        retriable: bool,
+        /// Free-text message: the db error's `Display` (preserved verbatim).
+        message: String,
+        /// Structured, machine-readable metadata (shared with the MCP surface).
+        details: Option<Value>,
+    },
 }
 
 impl AletheiaHttpError {
+    /// A `FAILED_PRECONDITION` (412) error for a write-class request rejected
+    /// because the node is a read-only replica (Issue #3355). Non-retriable
+    /// (the identical request against this node can never succeed; the
+    /// caller must redirect to the primary). Carries the same
+    /// `{node_role: "replica", reason: "read_only_replica"}` details as the
+    /// MCP surface's equivalent error, so both surfaces render
+    /// byte-identical bodies.
+    #[must_use]
+    pub(crate) fn read_only_replica() -> Self {
+        Self::Structured {
+            code: "FAILED_PRECONDITION",
+            status: StatusCode::PRECONDITION_FAILED,
+            retriable: false,
+            message: "write rejected: this node is a read-only replica; writes must go to the \
+                      primary"
+                .to_string(),
+            details: Some(json!({
+                "node_role": "replica",
+                "reason": "read_only_replica",
+            })),
+        }
+    }
+
+    /// Classify a db-layer [`Error`](crate::core::error::Error) surfaced from a
+    /// write handler into the HTTP error envelope, using the same #3234 code
+    /// vocabulary as the MCP surface (`src/mcp/error.rs`).
+    ///
+    /// Three classes are pre-classified into [`Self::Structured`] so the
+    /// response carries the same `code`/`retriable`/`details` as the MCP
+    /// surface:
+    ///
+    /// - **Constraint violations** (Issue #3378 + uniqueness): a
+    ///   type/required-key/unique violation is a declared constraint rejecting
+    ///   *this* write → `CONSTRAINT_VIOLATION` (`409`); a non-conforming enable
+    ///   or a pre-existing duplicate is a state problem the caller must fix
+    ///   first → `FAILED_PRECONDITION` (`412`). All non-retriable.
+    /// - **Transaction conflicts / preconditions**: a serialization failure /
+    ///   write conflict / abort is transient → `CONFLICT` (`409`, retriable); a
+    ///   validation failure (e.g. the #3416 concurrent-orphan guard), invalid
+    ///   state, already-committed, or lost CAS is a caller-fault precondition →
+    ///   `FAILED_PRECONDITION` (`412`, non-retriable); clock skew heals on its
+    ///   own → `UNAVAILABLE` (`503`, retriable).
+    ///
+    /// Everything else preserves the prior write-path mapping (`400 BadRequest`
+    /// with the free-text message) — critically, this keeps genuinely bad input
+    /// (a malformed property map wrapped as [`Error::Other`], an invalid id) at
+    /// `400`, so extending the classifier never over-broadens a real
+    /// bad-request into a constraint or internal error.
+    ///
+    /// [`Error::Other`]: crate::core::error::Error::Other
+    #[must_use]
+    pub(crate) fn from_db_error(e: &crate::core::error::Error) -> Self {
+        use crate::core::error::ConstraintError as CE;
+        use crate::core::error::Error as E;
+        use crate::core::error::TransactionError as TE;
+
+        // --- Constraint violations (Issue #3378 schema + uniqueness). ---
+        if let Some(ce) = e.as_constraint() {
+            return match ce {
+                // A declared type/required-key violation rejects *this* write.
+                CE::TypeViolation { .. } | CE::MissingRequiredKey { .. } => Self::Structured {
+                    code: "CONSTRAINT_VIOLATION",
+                    status: StatusCode::CONFLICT,
+                    retriable: false,
+                    message: e.to_string(),
+                    details: ce.structured_details(),
+                },
+                // A uniqueness violation is likewise CONSTRAINT_VIOLATION. Its
+                // `structured_details()` is `None`, so build the machine-readable
+                // metadata here, mirroring the MCP surface's `db_error` call site
+                // (`label`/`property`/`value`/`existing_node_id`).
+                CE::UniqueViolation {
+                    label,
+                    property,
+                    value,
+                    existing_node_id,
+                } => Self::Structured {
+                    code: "CONSTRAINT_VIOLATION",
+                    status: StatusCode::CONFLICT,
+                    retriable: false,
+                    message: e.to_string(),
+                    details: Some(json!({
+                        "label": label,
+                        "property": property,
+                        "value": value,
+                        "existing_node_id": existing_node_id.as_u64(),
+                    })),
+                },
+                // A non-conforming enable or a pre-existing duplicate is a state
+                // problem the caller must fix first.
+                CE::NonConformingOnEnable { .. } | CE::DuplicateOnEnable { .. } => {
+                    Self::Structured {
+                        code: "FAILED_PRECONDITION",
+                        status: StatusCode::PRECONDITION_FAILED,
+                        retriable: false,
+                        message: e.to_string(),
+                        // `None` for DuplicateOnEnable (no shared structured details).
+                        details: ce.structured_details(),
+                    }
+                }
+                // An unsupported key type in the *enable request itself* is a
+                // genuine bad request, not a constraint rejecting a write.
+                CE::UnsupportedKeyType { .. } => Self::BadRequest(e.to_string()),
+            };
+        }
+
+        // --- Transaction conflicts / preconditions (mirrors the MCP
+        // classifier in src/mcp/error.rs::classify_transaction_error). ---
+        if let E::Transaction(te) = e {
+            return match te {
+                // Concurrency conflicts a fresh attempt can win.
+                TE::SerializationFailure { .. } | TE::WriteConflict { .. } | TE::Aborted { .. } => {
+                    Self::Structured {
+                        code: "CONFLICT",
+                        status: StatusCode::CONFLICT,
+                        retriable: true,
+                        message: e.to_string(),
+                        details: None,
+                    }
+                }
+                // Well-formed but forbidden by current state (e.g. the #3416
+                // concurrent-orphan validation guard, a lost compare-and-set,
+                // or a fenced claim rejected for a too-low fence): retrying the
+                // identical call cannot succeed.
+                TE::ValidationFailed { .. }
+                | TE::InvalidState { .. }
+                | TE::AlreadyCommitted { .. }
+                | TE::CasMismatch { .. }
+                | TE::FenceTooLow { .. } => Self::Structured {
+                    code: "FAILED_PRECONDITION",
+                    status: StatusCode::PRECONDITION_FAILED,
+                    retriable: false,
+                    message: e.to_string(),
+                    details: None,
+                },
+                // A clock-adjacent hiccup heals on its own at a later tick.
+                TE::ClockSkew { .. } => Self::Structured {
+                    code: "UNAVAILABLE",
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    retriable: true,
+                    message: e.to_string(),
+                    details: None,
+                },
+                // Genuine internal failures (commit/rollback/poisoned lock).
+                TE::CommitFailed { .. } | TE::RollbackFailed { .. } | TE::LockPoisoned { .. } => {
+                    Self::Internal(e.to_string())
+                }
+                // A write rejected because this node is a read-only replica
+                // (Issue #3355). The `/query` handler's explicit pre-dispatch
+                // check is the primary enforcement point; this arm is a
+                // defensive leak-through mapping so any other path that
+                // classifies via `from_db_error` renders the identical
+                // structured body.
+                TE::ReadOnlyReplica => Self::read_only_replica(),
+            };
+        }
+
+        // --- Storage capacity exhaustion (configurable interner cap). ---
+        // A string-interner capacity breach is well-formed input the system
+        // refuses in its current state; retrying is futile until the operator
+        // raises the cap and restarts → FAILED_PRECONDITION (412, non-retriable),
+        // with the same actionable message + `{resource,current,limit}` details
+        // the MCP surface emits (byte-shape-identical envelope).
+        if let E::Storage(crate::core::error::StorageError::CapacityExceeded {
+            resource,
+            current,
+            limit,
+        }) = e
+        {
+            let message = if resource.contains("interner") {
+                format!(
+                    "String interner at capacity ({current}/{limit}). Raise \
+                     `persistence.max_interned_strings` above {limit} and restart to intern more \
+                     unique strings. No data is lost — the WAL is the source of truth."
+                )
+            } else {
+                e.to_string()
+            };
+            return Self::Structured {
+                code: "FAILED_PRECONDITION",
+                status: StatusCode::PRECONDITION_FAILED,
+                retriable: false,
+                message,
+                details: Some(json!({
+                    "resource": resource,
+                    "current": current,
+                    "limit": limit,
+                })),
+            };
+        }
+
+        // --- Pre-v13 WAL tail refused on open (Issue #3746). ---
+        // A 0.1.x data directory with an unreplayed pre-v13 WAL tail is refused
+        // on open: it is a caller precondition failure (drain/checkpoint the WAL
+        // on the old version before upgrading), not malformed input. Retrying the
+        // same open is futile → FAILED_PRECONDITION (412, non-retriable), mirroring
+        // the MCP surface's classification (byte-shape-identical envelope) instead
+        // of the fallthrough 400 BadRequest below.
+        if let E::Storage(crate::core::error::StorageError::PreV13WalTailRequiresMigration {
+            ..
+        }) = e
+        {
+            return Self::Structured {
+                code: "FAILED_PRECONDITION",
+                status: StatusCode::PRECONDITION_FAILED,
+                retriable: false,
+                message: e.to_string(),
+                details: None,
+            };
+        }
+
+        // --- Tenant lifecycle / quota errors (Issue #3365). ---
+        // Mirrors the MCP `classify_tenant_error` mapping so both surfaces render
+        // a byte-shape-identical envelope: a malformed id is 400 INVALID_ARGUMENT,
+        // an unknown tenant is 404 NOT_FOUND, a duplicate create is 409 CONFLICT,
+        // and a quota breach is 429 RESOURCE_EXHAUSTED (non-retriable — a capacity
+        // limit heals only by freeing data or raising the quota).
+        if let E::Tenant(te) = e {
+            use crate::core::tenant::TenantError as TenE;
+            return match te {
+                TenE::InvalidId { .. } => Self::Structured {
+                    code: "INVALID_ARGUMENT",
+                    status: StatusCode::BAD_REQUEST,
+                    retriable: false,
+                    message: e.to_string(),
+                    details: None,
+                },
+                TenE::NotFound { id } => Self::Structured {
+                    code: "NOT_FOUND",
+                    status: StatusCode::NOT_FOUND,
+                    retriable: false,
+                    message: e.to_string(),
+                    details: Some(json!({ "tenant": id })),
+                },
+                TenE::AlreadyExists { id } => Self::Structured {
+                    code: "CONFLICT",
+                    status: StatusCode::CONFLICT,
+                    retriable: false,
+                    message: e.to_string(),
+                    details: Some(json!({ "tenant": id })),
+                },
+                TenE::QuotaExceeded {
+                    tenant,
+                    dimension,
+                    current,
+                    limit,
+                } => Self::Structured {
+                    code: "RESOURCE_EXHAUSTED",
+                    status: StatusCode::TOO_MANY_REQUESTS,
+                    retriable: false,
+                    message: e.to_string(),
+                    details: Some(json!({
+                        "tenant": tenant,
+                        "dimension": dimension.as_str(),
+                        "current": current,
+                        "limit": limit,
+                    })),
+                },
+            };
+        }
+
+        // Every other db error keeps the prior write-path mapping (400
+        // BadRequest), preserving the contract that genuine bad input stays 400.
+        Self::BadRequest(e.to_string())
+    }
+
     fn status(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) | Self::QueryParse(_) => StatusCode::BAD_REQUEST,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Internal(_) | Self::StateMissing => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::PermissionDenied(_) => StatusCode::FORBIDDEN,
+            Self::PermissionDenied { .. } => StatusCode::FORBIDDEN,
             Self::InvalidLimitOverride(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            // A pre-classified db error carries its own status (409 / 412 / 503).
+            Self::Structured { status, .. } => *status,
             // Transient overload → 503 Service Unavailable (retriable).
             Self::InFlightCapacityExceeded { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            // A per-principal quota breach → 429 Too Many Requests (retriable).
+            Self::PrincipalQuotaExceeded { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::ResourceLimitExceeded(e) => match e.dimension {
                 // Timeout is transient → 429 Too Many Requests.
                 LimitDimension::WallClockTimeout => StatusCode::TOO_MANY_REQUESTS,
@@ -162,38 +483,44 @@ impl AletheiaHttpError {
         }
     }
 
-    /// Stable machine-readable code (additive: present for auth errors since
-    /// Issue #3350 and for resource-limit errors since Issue #3368).
-    fn code(&self) -> Option<&'static str> {
+    /// Whether a caller may usefully retry. `true` only for transient failure
+    /// classes: a read-class wall-clock timeout (carried on the
+    /// [`ResourceLimitExceeded`] itself) and a full in-flight worker pool
+    /// (transient overload). A write-class timeout is not retriable (a
+    /// committed write must not be duplicated), and every caller-fault class
+    /// (bad-request, not-found, auth, override, row/byte caps) is `false`.
+    ///
+    /// Mirrors the MCP surface's explicit per-error classification (Issue
+    /// #3234): the nested error envelope always carries a concrete `retriable`
+    /// boolean.
+    fn retriable(&self) -> bool {
         match self {
-            Self::Unauthorized => Some("UNAUTHENTICATED"),
-            Self::PermissionDenied(_) => Some("PERMISSION_DENIED"),
-            Self::ResourceLimitExceeded(_) => Some("RESOURCE_EXHAUSTED"),
-            Self::InvalidLimitOverride(_) => Some("INVALID_ARGUMENT"),
-            Self::InFlightCapacityExceeded { .. } => Some("UNAVAILABLE"),
-            _ => None,
-        }
-    }
-
-    /// Whether a caller may usefully retry (additive; Issue #3368). The flag is
-    /// carried on the [`ResourceLimitExceeded`] itself: a read-class wall-clock
-    /// timeout is transient (`true`), a write-class timeout is not (a committed
-    /// write must not be duplicated), and row/byte caps are never retriable.
-    /// `None` where the flag does not apply (existing variants keep their
-    /// pre-#3368 body shape).
-    fn retriable(&self) -> Option<bool> {
-        match self {
-            Self::ResourceLimitExceeded(e) => Some(e.retriable),
-            Self::InvalidLimitOverride(_) => Some(false),
+            Self::ResourceLimitExceeded(e) => e.retriable,
             // Transient overload: backing off and retrying can succeed.
-            Self::InFlightCapacityExceeded { .. } => Some(true),
-            _ => None,
+            Self::InFlightCapacityExceeded { .. } => true,
+            // A fairness quota: another of this principal's subscriptions may
+            // drop, so a backed-off retry can succeed (Issue #3678).
+            Self::PrincipalQuotaExceeded { .. } => true,
+            // A pre-classified db error carries its own retriability (true only
+            // for the transient conflict / clock-skew classes).
+            Self::Structured { retriable, .. } => *retriable,
+            _ => false,
         }
     }
 
-    /// Structured, per-code metadata (additive; Issue #3368).
+    /// Structured, per-code metadata (additive; Issue #3368 and, for
+    /// `PermissionDenied`, Issue #3234). Rendered under `error.details`.
     fn details(&self) -> Option<Value> {
         match self {
+            // A role denial names the required class and the principal's role,
+            // mirroring the MCP-surface 403 details (Issue #3234).
+            Self::PermissionDenied {
+                required_class,
+                principal_role,
+            } => Some(json!({
+                "required_class": required_class.to_string(),
+                "principal_role": principal_role.to_string(),
+            })),
             Self::ResourceLimitExceeded(e) => {
                 let mut d = json!({
                     "dimension": e.dimension.as_str(),
@@ -220,56 +547,67 @@ impl AletheiaHttpError {
                 "reason": "in_flight_query_cap",
                 "max_in_flight_queries": cap,
             })),
+            Self::PrincipalQuotaExceeded {
+                principal,
+                current,
+                limit,
+            } => Some(json!({
+                "principal": principal,
+                "current": current,
+                "limit": limit,
+            })),
+            // A pre-classified db error forwards its structured details (shared
+            // with the MCP surface), so the HTTP body is byte-shape-identical.
+            Self::Structured { details, .. } => details.clone(),
             _ => None,
         }
     }
 
     /// Stable machine-readable code for *every* variant, using the Issue #3234
-    /// vocabulary. Used to stamp `aletheiadb.error.code` onto the trace span
-    /// (Issue #3376); the response body still only carries [`code`](Self::code)
-    /// for auth errors so the existing wire shape is unchanged.
+    /// vocabulary. Rendered as `error.code` in the response body (unified with
+    /// the MCP surface) and stamped as `aletheiadb.error.code` onto the trace
+    /// span (Issue #3376).
     #[must_use]
-    // Only consumed by the tracing span-stamping path, which is compiled out
-    // when `observability` is disabled; keep it available without warning.
-    #[cfg_attr(not(feature = "observability"), allow(dead_code))]
     pub(crate) fn code_str(&self) -> &'static str {
         match self {
-            Self::BadRequest(_) | Self::QueryParse(_) => "INVALID_ARGUMENT",
+            Self::BadRequest(_) | Self::QueryParse(_) | Self::InvalidLimitOverride(_) => {
+                "INVALID_ARGUMENT"
+            }
             Self::NotFound(_) => "NOT_FOUND",
             Self::Internal(_) | Self::StateMissing => "INTERNAL",
             Self::Unauthorized => "UNAUTHENTICATED",
-            Self::PermissionDenied(_) => "PERMISSION_DENIED",
+            Self::PermissionDenied { .. } => "PERMISSION_DENIED",
             Self::ResourceLimitExceeded(_) => "RESOURCE_EXHAUSTED",
-            Self::InvalidLimitOverride(_) => "INVALID_ARGUMENT",
+            Self::PrincipalQuotaExceeded { .. } => "RESOURCE_EXHAUSTED",
             Self::InFlightCapacityExceeded { .. } => "UNAVAILABLE",
+            // The #3234 code was fixed when the variant was classified.
+            Self::Structured { code, .. } => code,
         }
     }
 
-    /// Convert to a response, additively including the active trace id
-    /// (Issue #3376) as a `trace_id` body field and `x-trace-id` header when
+    /// Convert to a response with the unified nested error envelope (Issue
+    /// #3234): `{"error": {"code", "message", "retriable", "details"?}}`,
+    /// byte-shape-identical to the MCP surface. The active trace id (Issue
+    /// #3376) is carried additively as a **top-level** `trace_id` sibling of
+    /// `error` (the SDK reads it top-level) and as an `x-trace-id` header when
     /// one is available, so a failing call can be looked up in the trace
     /// backend directly.
     #[must_use]
     pub(crate) fn into_response_with_trace(self, trace_id: Option<String>) -> Response {
         let status = self.status();
-        let mut body = json!({
-            "success": false,
-            "error": self.to_string(),
-        });
-        // Additive fields — only inserted when the variant defines them, so
-        // existing error bodies (bad-request, not-found, internal) are byte
-        // identical to their pre-#3368 shape.
-        if let Some(code) = self.code() {
-            body["code"] = json!(code);
-        }
-        if let Some(retriable) = self.retriable() {
-            body["retriable"] = json!(retriable);
-        }
+        // Build the nested `error` object, mirroring `McpError::to_json`'s
+        // field order: code, message, retriable, then optional details.
+        let mut error_obj = serde_json::Map::new();
+        error_obj.insert("code".to_string(), json!(self.code_str()));
+        error_obj.insert("message".to_string(), json!(self.to_string()));
+        error_obj.insert("retriable".to_string(), json!(self.retriable()));
         if let Some(details) = self.details() {
-            body["details"] = details;
+            error_obj.insert("details".to_string(), details);
         }
-        // Additively carry the active trace id (Issue #3376) as a `trace_id`
-        // body field so a failing call can be correlated in the trace backend.
+        let mut body = json!({ "error": Value::Object(error_obj) });
+        // Additively carry the active trace id (Issue #3376) as a *top-level*
+        // `trace_id` field (sibling of `error`, not nested) so a failing call
+        // can be correlated in the trace backend and the SDK can read it.
         if let (Some(map), Some(tid)) = (body.as_object_mut(), trace_id.as_deref()) {
             map.insert("trace_id".to_string(), json!(tid));
         }
@@ -293,8 +631,10 @@ impl AletheiaHttpError {
         if matches!(
             &self,
             Self::ResourceLimitExceeded(e) if e.dimension == LimitDimension::WallClockTimeout
-        ) || matches!(&self, Self::InFlightCapacityExceeded { .. })
-        {
+        ) || matches!(
+            &self,
+            Self::InFlightCapacityExceeded { .. } | Self::PrincipalQuotaExceeded { .. }
+        ) {
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
                 axum::http::HeaderValue::from_static("1"),
@@ -338,12 +678,20 @@ mod tests {
         ))
         .await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(body["success"], false);
-        assert_eq!(body["code"], "RESOURCE_EXHAUSTED");
-        assert_eq!(body["retriable"], true);
-        assert_eq!(body["details"]["dimension"], "wall_clock_timeout");
-        assert_eq!(body["details"]["limit_ms"], 100);
-        assert!(body["error"].as_str().unwrap().contains("timeout"));
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "RESOURCE_EXHAUSTED");
+        assert_eq!(body["error"]["retriable"], true);
+        assert_eq!(body["error"]["details"]["dimension"], "wall_clock_timeout");
+        assert_eq!(body["error"]["details"]["limit_ms"], 100);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("timeout")
+        );
     }
 
     #[tokio::test]
@@ -358,11 +706,11 @@ mod tests {
         ))
         .await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(body["code"], "RESOURCE_EXHAUSTED");
-        assert_eq!(body["retriable"], false);
-        assert_eq!(body["details"]["dimension"], "result_bytes");
-        assert_eq!(body["details"]["limit"], 1024);
-        assert_eq!(body["details"]["consumed"], 4096);
+        assert_eq!(body["error"]["code"], "RESOURCE_EXHAUSTED");
+        assert_eq!(body["error"]["retriable"], false);
+        assert_eq!(body["error"]["details"]["dimension"], "result_bytes");
+        assert_eq!(body["error"]["details"]["limit"], 1024);
+        assert_eq!(body["error"]["details"]["consumed"], 4096);
     }
 
     #[tokio::test]
@@ -377,8 +725,8 @@ mod tests {
         ))
         .await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(body["details"]["dimension"], "result_rows");
-        assert_eq!(body["details"]["consumed"], 25);
+        assert_eq!(body["error"]["details"]["dimension"], "result_rows");
+        assert_eq!(body["error"]["details"]["consumed"], 25);
     }
 
     /// A write-class wall-clock timeout renders `429` but `retriable: false`
@@ -396,12 +744,12 @@ mod tests {
         ))
         .await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(body["code"], "RESOURCE_EXHAUSTED");
+        assert_eq!(body["error"]["code"], "RESOURCE_EXHAUSTED");
         assert_eq!(
-            body["retriable"], false,
+            body["error"]["retriable"], false,
             "a write timeout must not invite a duplicate retry"
         );
-        assert_eq!(body["details"]["dimension"], "wall_clock_timeout");
+        assert_eq!(body["error"]["details"]["dimension"], "wall_clock_timeout");
     }
 
     #[tokio::test]
@@ -415,11 +763,11 @@ mod tests {
         ))
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(body["code"], "INVALID_ARGUMENT");
-        assert_eq!(body["retriable"], false);
-        assert_eq!(body["details"]["dimension"], "wall_clock_timeout");
-        assert_eq!(body["details"]["requested"], 999);
-        assert_eq!(body["details"]["ceiling"], 100);
+        assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["error"]["retriable"], false);
+        assert_eq!(body["error"]["details"]["dimension"], "wall_clock_timeout");
+        assert_eq!(body["error"]["details"]["requested"], 999);
+        assert_eq!(body["error"]["details"]["ceiling"], 100);
     }
 
     /// The in-flight-capacity guard renders `503 UNAVAILABLE`, `retriable:
@@ -439,33 +787,477 @@ mod tests {
         );
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body["success"], false);
-        assert_eq!(body["code"], "UNAVAILABLE");
-        assert_eq!(body["retriable"], true);
-        assert_eq!(body["details"]["reason"], "in_flight_query_cap");
-        assert_eq!(body["details"]["max_in_flight_queries"], 64);
-        assert!(body["error"].as_str().unwrap().contains("cap of 64"));
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "UNAVAILABLE");
+        assert_eq!(body["error"]["retriable"], true);
+        assert_eq!(body["error"]["details"]["reason"], "in_flight_query_cap");
+        assert_eq!(body["error"]["details"]["max_in_flight_queries"], 64);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("cap of 64")
+        );
+    }
+
+    /// Issue #3678: a per-principal changefeed quota breach renders `429
+    /// RESOURCE_EXHAUSTED`, `retriable: true`, `Retry-After: 1`, and
+    /// `details {principal, current, limit}` — byte-shape-identical to the MCP
+    /// surface.
+    #[tokio::test]
+    async fn principal_quota_maps_to_429_resource_exhausted_retriable() {
+        let err = AletheiaHttpError::PrincipalQuotaExceeded {
+            principal: "alice".into(),
+            current: 2,
+            limit: 2,
+        };
+        let resp = err.into_response();
+        let status = resp.status();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1"),
+        );
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "RESOURCE_EXHAUSTED");
+        assert_eq!(body["error"]["retriable"], true);
+        assert_eq!(body["error"]["details"]["principal"], "alice");
+        assert_eq!(body["error"]["details"]["current"], 2);
+        assert_eq!(body["error"]["details"]["limit"], 2);
     }
 
     #[tokio::test]
-    async fn existing_variants_keep_minimal_body_shape() {
-        // No `code`/`retriable`/`details` for a plain bad-request (unchanged).
+    async fn bad_request_renders_nested_invalid_argument() {
+        // The nested envelope now always carries code/message/retriable; a
+        // plain bad-request has no `details` and is never retriable.
         let (status, body) = body_json(AletheiaHttpError::BadRequest("nope".into())).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["success"], false);
-        assert_eq!(body["error"], "nope");
-        assert!(body.get("code").is_none());
-        assert!(body.get("retriable").is_none());
-        assert!(body.get("details").is_none());
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["error"]["message"], "nope");
+        assert_eq!(body["error"]["retriable"], false);
+        assert!(body["error"].get("details").is_none());
+    }
+
+    /// Issue #3378: a schema type violation surfaced from a write handler is
+    /// classified into the unified #3234 envelope — `409 CONSTRAINT_VIOLATION`,
+    /// `retriable: false`, and structured `details` byte-shape-identical to the
+    /// MCP surface (`expected_type`/`actual_type`).
+    #[tokio::test]
+    async fn schema_type_violation_renders_nested_constraint_violation_with_details() {
+        use crate::core::error::ConstraintError;
+        let db_err: crate::core::error::Error = ConstraintError::TypeViolation {
+            entity_kind: "node".into(),
+            label: "Person".into(),
+            property: "age".into(),
+            expected_type: "int",
+            actual_type: "string",
+        }
+        .into();
+        let http_err = AletheiaHttpError::from_db_error(&db_err);
+        let (status, body) = body_json(http_err).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "CONSTRAINT_VIOLATION");
+        assert_eq!(body["error"]["retriable"], false);
+        // Message free text is preserved verbatim from the db error.
+        assert_eq!(body["error"]["message"], db_err.to_string());
+        assert_eq!(body["error"]["details"]["entity_kind"], "node");
+        assert_eq!(body["error"]["details"]["label"], "Person");
+        assert_eq!(body["error"]["details"]["property"], "age");
+        assert_eq!(body["error"]["details"]["expected_type"], "int");
+        assert_eq!(body["error"]["details"]["actual_type"], "string");
+    }
+
+    /// Issue #3365: a tenant quota breach renders the unified #3234 envelope on
+    /// the HTTP surface byte-shape-identically to the MCP surface — `429
+    /// RESOURCE_EXHAUSTED`, `retriable: false`, structured `details`.
+    #[tokio::test]
+    async fn tenant_quota_breach_renders_resource_exhausted() {
+        use crate::core::tenant::{QuotaDimension, TenantError};
+        let db_err: crate::core::error::Error = TenantError::QuotaExceeded {
+            tenant: "acme".into(),
+            dimension: QuotaDimension::Nodes,
+            current: 100,
+            limit: 100,
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "RESOURCE_EXHAUSTED");
+        assert_eq!(body["error"]["retriable"], false);
+        assert_eq!(body["error"]["details"]["tenant"], "acme");
+        assert_eq!(body["error"]["details"]["dimension"], "nodes");
+        assert_eq!(body["error"]["details"]["current"], 100);
+        assert_eq!(body["error"]["details"]["limit"], 100);
+    }
+
+    /// Issue #3365: tenant lifecycle errors map to their HTTP statuses/codes.
+    #[tokio::test]
+    async fn tenant_lifecycle_errors_map_to_expected_statuses() {
+        use crate::core::tenant::TenantError;
+        let not_found: crate::core::error::Error =
+            TenantError::NotFound { id: "ghost".into() }.into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&not_found)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "NOT_FOUND");
+
+        let exists: crate::core::error::Error =
+            TenantError::AlreadyExists { id: "dup".into() }.into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&exists)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "CONFLICT");
+
+        let invalid: crate::core::error::Error = TenantError::InvalidId {
+            id: "bad/id".into(),
+            reason: "x".into(),
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&invalid)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
+    }
+
+    /// Parity guard: the HTTP `error.details` payload is exactly the shared
+    /// core [`ConstraintError::structured_details`] output — the same single
+    /// source of truth the MCP `from_db_error` mapping uses — so the two
+    /// surfaces can never drift. Also covers the `missing_keys`-is-an-array
+    /// contract and the `FAILED_PRECONDITION` (412) rung.
+    #[tokio::test]
+    async fn schema_constraint_http_details_match_shared_core_source() {
+        use crate::core::error::ConstraintError;
+
+        // MissingRequiredKey → CONSTRAINT_VIOLATION (409), details.missing_keys array.
+        let missing: crate::core::error::Error = ConstraintError::MissingRequiredKey {
+            entity_kind: "edge".into(),
+            label: "KNOWS".into(),
+            missing_keys: vec!["since".into()],
+        }
+        .into();
+        let expected = missing.as_constraint().unwrap().structured_details();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&missing)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "CONSTRAINT_VIOLATION");
+        assert!(body["error"]["details"]["missing_keys"].is_array());
+        assert_eq!(Some(&body["error"]["details"]), expected.as_ref());
+
+        // NonConformingOnEnable → FAILED_PRECONDITION (412), bounded report.
+        let non_conforming: crate::core::error::Error = ConstraintError::NonConformingOnEnable {
+            entity_kind: "node".into(),
+            label: "Person".into(),
+            violations: vec![],
+            total_non_conforming: 3,
+            sample_ids: vec![1, 2, 3],
+        }
+        .into();
+        let expected = non_conforming.as_constraint().unwrap().structured_details();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&non_conforming)).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(body["error"]["retriable"], false);
+        assert_eq!(body["error"]["details"]["total_non_conforming"], 3);
+        assert_eq!(Some(&body["error"]["details"]), expected.as_ref());
+    }
+
+    /// A non-constraint db error keeps the prior write-path mapping unchanged:
+    /// a `400 BadRequest` with no `details` (no behavior change outside the
+    /// schema-constraint cases).
+    #[tokio::test]
+    async fn from_db_error_preserves_bad_request_for_non_constraint_errors() {
+        let db_err = crate::core::error::Error::other("boom");
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["error"]["retriable"], false);
+        assert!(body["error"].get("details").is_none());
+    }
+
+    /// Issue #3629/#3234: a uniqueness violation surfaced from a legacy
+    /// JSON-RPC write is classified into the unified envelope — `409
+    /// CONSTRAINT_VIOLATION`, `retriable: false`, and machine-readable
+    /// `details` (`label`/`property`/`value`/`existing_node_id`) mirroring the
+    /// MCP surface — instead of the pre-#3629 blanket `400 INVALID_ARGUMENT`.
+    #[tokio::test]
+    async fn unique_violation_renders_nested_constraint_violation_with_existing_id() {
+        use crate::core::error::ConstraintError;
+        use crate::core::id::NodeId;
+        let db_err: crate::core::error::Error = ConstraintError::UniqueViolation {
+            label: "Person".into(),
+            property: "email".into(),
+            value: "a@b.com".into(),
+            existing_node_id: NodeId::new(7).unwrap(),
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.get("success").is_none());
+        assert_eq!(body["error"]["code"], "CONSTRAINT_VIOLATION");
+        assert_eq!(body["error"]["retriable"], false);
+        assert_eq!(body["error"]["message"], db_err.to_string());
+        assert_eq!(body["error"]["details"]["label"], "Person");
+        assert_eq!(body["error"]["details"]["property"], "email");
+        assert_eq!(body["error"]["details"]["value"], "a@b.com");
+        assert_eq!(body["error"]["details"]["existing_node_id"], 7);
+    }
+
+    /// A pre-existing duplicate blocking a constraint enable is a state problem
+    /// the caller must fix first → `412 FAILED_PRECONDITION`, non-retriable.
+    #[tokio::test]
+    async fn duplicate_on_enable_renders_412_failed_precondition() {
+        use crate::core::error::ConstraintError;
+        use crate::core::id::NodeId;
+        let db_err: crate::core::error::Error = ConstraintError::DuplicateOnEnable {
+            label: "Person".into(),
+            property: "email".into(),
+            value: "a@b.com".into(),
+            node_ids: vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()],
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(body["error"]["retriable"], false);
+        // No shared structured details for this uniqueness variant.
+        assert!(body["error"].get("details").is_none());
+    }
+
+    /// An unsupported key type in the *enable request itself* is genuine bad
+    /// input and stays `400 INVALID_ARGUMENT` (not reclassified as a
+    /// constraint) — guards against the classifier over-broadening.
+    #[tokio::test]
+    async fn unsupported_key_type_stays_400_invalid_argument() {
+        use crate::core::error::ConstraintError;
+        let db_err: crate::core::error::Error = ConstraintError::UnsupportedKeyType {
+            label: "Person".into(),
+            property: "email".into(),
+            type_name: "vector".into(),
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["error"]["retriable"], false);
+        assert!(body["error"].get("details").is_none());
+    }
+
+    /// A validation failure at commit (e.g. the #3416 concurrent-orphan guard)
+    /// is a caller-fault precondition → `412 FAILED_PRECONDITION`,
+    /// non-retriable (retrying the identical call cannot succeed).
+    #[tokio::test]
+    async fn validation_failed_renders_412_failed_precondition_not_retriable() {
+        use crate::core::error::TransactionError;
+        let db_err: crate::core::error::Error = TransactionError::ValidationFailed {
+            reason: "delete would orphan a concurrently-created edge".into(),
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(body["error"]["retriable"], false);
+        assert_eq!(body["error"]["message"], db_err.to_string());
+    }
+
+    /// A serialization failure / write conflict is transient → `409 CONFLICT`,
+    /// `retriable: true` (a fresh attempt can win the race).
+    #[tokio::test]
+    async fn serialization_failure_renders_409_conflict_retriable() {
+        use crate::core::error::TransactionError;
+        let db_err: crate::core::error::Error = TransactionError::SerializationFailure {
+            entity: "node:5".into(),
+            reason: "concurrent write committed after snapshot".into(),
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "CONFLICT");
+        assert_eq!(
+            body["error"]["retriable"], true,
+            "a serialization conflict is retriable"
+        );
+    }
+
+    /// Clock skew heals on its own → `503 UNAVAILABLE`, `retriable: true`.
+    #[tokio::test]
+    async fn clock_skew_renders_503_unavailable_retriable() {
+        use crate::core::error::TransactionError;
+        let db_err: crate::core::error::Error = TransactionError::ClockSkew {
+            wallclock: 100,
+            previous: 200,
+            drift_us: -100,
+            max_allowed: 50,
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "UNAVAILABLE");
+        assert_eq!(body["error"]["retriable"], true);
+    }
+
+    /// A genuine internal transaction failure (commit failed) stays `500
+    /// INTERNAL`, non-retriable — never reclassified as a caller fault.
+    #[tokio::test]
+    async fn commit_failed_renders_500_internal() {
+        use crate::core::error::TransactionError;
+        let db_err: crate::core::error::Error = TransactionError::CommitFailed {
+            reason: "wal fsync failed".into(),
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["code"], "INTERNAL");
+        assert_eq!(body["error"]["retriable"], false);
+    }
+
+    /// Configurable interner cap: a string-interner `CapacityExceeded` surfaced
+    /// from a write handler renders as `412 FAILED_PRECONDITION`, `retriable:
+    /// false`, structured `details {resource, current, limit}`, and an actionable
+    /// message naming `persistence.max_interned_strings` — byte-shape-identical
+    /// to the MCP surface (mirrors `mcp::error`'s
+    /// `interner_capacity_exceeded_maps_to_actionable_failed_precondition`).
+    #[tokio::test]
+    async fn interner_capacity_exceeded_renders_412_failed_precondition_with_details() {
+        use crate::core::error::StorageError;
+        let db_err: crate::core::error::Error = StorageError::CapacityExceeded {
+            resource: "string interner".into(),
+            current: 200,
+            limit: 200,
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(body["error"]["retriable"], false);
+        assert_eq!(body["error"]["details"]["resource"], "string interner");
+        assert_eq!(body["error"]["details"]["current"], 200);
+        assert_eq!(body["error"]["details"]["limit"], 200);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("persistence.max_interned_strings"),
+            "message must name the knob, got: {}",
+            body["error"]["message"]
+        );
+    }
+
+    /// Issue #3746: a refused pre-v13 WAL tail renders as `412
+    /// FAILED_PRECONDITION`, `retriable: false` (nested envelope) — not the
+    /// fallthrough `400 BadRequest` — matching the MCP surface.
+    #[tokio::test]
+    async fn pre_v13_wal_tail_renders_412_failed_precondition() {
+        use crate::core::error::StorageError;
+        let db_err: crate::core::error::Error = StorageError::PreV13WalTailRequiresMigration {
+            reason: "unreplayed pre-v13 tail; see docs/guides/migration-0.1-to-0.2.md".into(),
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(body["error"]["retriable"], false);
+    }
+
+    /// A NON-interner `CapacityExceeded` (some other resource) still renders as
+    /// `412 FAILED_PRECONDITION` with `{resource,current,limit}` details, but the
+    /// message is the plain Display (it does NOT name the interner knob) — the
+    /// actionable message is interner-specific.
+    #[tokio::test]
+    async fn non_interner_capacity_exceeded_keeps_plain_message() {
+        use crate::core::error::StorageError;
+        let db_err: crate::core::error::Error = StorageError::CapacityExceeded {
+            resource: "some other pool".into(),
+            current: 5,
+            limit: 5,
+        }
+        .into();
+        let (status, body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(body["error"]["details"]["resource"], "some other pool");
+        assert_eq!(body["error"]["message"], db_err.to_string());
+        assert!(
+            !body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("persistence.max_interned_strings")
+        );
+    }
+
+    /// Envelope PARITY guard (configurable interner cap): the actionable message
+    /// and structured `details` for a string-interner capacity breach are
+    /// duplicated verbatim across `mcp/error.rs` and `http/error.rs`; this test
+    /// catches drift by asserting the two surfaces emit byte-identical
+    /// `code`/`message`/`retriable`/`details`.
+    #[cfg(feature = "mcp-server")]
+    #[tokio::test]
+    async fn interner_cap_envelope_matches_mcp_surface() {
+        use crate::core::error::StorageError;
+        use crate::mcp::McpError;
+
+        let db_err: crate::core::error::Error = StorageError::CapacityExceeded {
+            resource: "string interner".into(),
+            current: 200,
+            limit: 200,
+        }
+        .into();
+
+        let mcp = McpError::from_db_error(&db_err).to_json();
+        let (_status, http_body) = body_json(AletheiaHttpError::from_db_error(&db_err)).await;
+        let http = &http_body["error"];
+
+        assert_eq!(mcp["code"], http["code"], "code must match across surfaces");
+        assert_eq!(
+            mcp["message"], http["message"],
+            "actionable message must match across surfaces"
+        );
+        assert_eq!(
+            mcp["retriable"], http["retriable"],
+            "retriable must match across surfaces"
+        );
+        assert_eq!(
+            mcp["details"], http["details"],
+            "structured details must match across surfaces"
+        );
     }
 
     #[tokio::test]
-    async fn auth_error_body_unchanged_still_has_code_only() {
+    async fn auth_error_renders_nested_unauthenticated() {
         let (status, body) = body_json(AletheiaHttpError::Unauthorized).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(body["code"], "UNAUTHENTICATED");
-        // Auth variants deliberately keep their pre-#3368 shape (no retriable).
-        assert!(body.get("retriable").is_none());
-        assert!(body.get("details").is_none());
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped"
+        );
+        assert_eq!(body["error"]["code"], "UNAUTHENTICATED");
+        assert_eq!(body["error"]["message"], "authentication required");
+        assert_eq!(body["error"]["retriable"], false);
+        assert!(body["error"].get("details").is_none());
     }
 }

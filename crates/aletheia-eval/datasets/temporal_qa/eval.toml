@@ -1,0 +1,11 @@
+# Paired evaluation manifest for the temporal-QA dataset. Runs full.toml and
+# baseline.toml over dataset.json and gates on the headline temporal-accuracy
+# lift (>= 25 percentage points) plus a near-perfect full-config score.
+dataset = "dataset.json"
+full = "full.toml"
+baseline = "baseline.toml"
+
+[gates]
+min_temporal_accuracy_delta = 0.25
+min_full_temporal_accuracy = 0.99
+min_full_citation_validity = 1.0

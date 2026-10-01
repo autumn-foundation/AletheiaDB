@@ -114,9 +114,13 @@ async fn find_neighbors_overflow_pagination_rejected() {
         "overflow attempt must be rejected"
     );
     let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
-    assert_eq!(body["success"], false);
     assert!(
-        body["error"]
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
+    assert!(
+        body["error"]["message"]
             .as_str()
             .unwrap()
             .contains("Pagination limit exceeded"),

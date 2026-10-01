@@ -45,7 +45,7 @@ use crate::core::property::PropertyMap;
 use crate::core::provenance::Provenance;
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use crate::core::version::VersionMetadata;
-use crate::storage::historical::HistoricalStorage;
+use crate::storage::historical::{HistoricalStorage, UpdatePlan};
 use std::sync::Arc;
 
 /// Helper function to create a bi-temporal interval with proper closing logic.
@@ -73,8 +73,11 @@ pub(crate) fn create_temporal_interval(
 /// 2.  Adds a new version to `HistoricalStorage`.
 /// 3.  Updates `TemporalIndexes` for time-travel queries.
 ///
-/// If this is an update, it also closes the transaction time of the previous version
-/// in historical storage to maintain history continuity.
+/// If this is an update, it supersedes the valid-time slice containing
+/// `valid_from` append-only: the slice's transaction time is closed, its
+/// uncovered prefix `[slice_start, valid_from)` is carried forward as a new
+/// (structural) version, and the new version covers `[valid_from, slice_end)`.
+/// See `storage::historical::slices`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_node_write(
     tx: &WriteTransaction,
@@ -88,40 +91,100 @@ pub(crate) fn apply_node_write(
     historical: &mut HistoricalStorage,
     provenance: Option<Arc<Provenance>>,
 ) -> Result<()> {
+    // GDPR crypto-shred (Issue #3359, PR-1b): `properties` here already carry any
+    // sealed `SUBJ` envelopes — sealing happens once on the write buffer in
+    // `commit_with_timestamp_inner` (post-validation, pre-WAL), so the WAL
+    // segment, the current tier below, and the historical tier below all receive
+    // byte-identical ciphertext. Do NOT seal again here (it would double-seal).
+
     // Create node with pending metadata (commit_timestamp finalized after full apply_changes).
     // Using uncommitted here prevents phantom visibility if apply_changes fails partway through.
     let metadata = VersionMetadata::uncommitted(tx.tx_id);
-    let node = Node::with_metadata(node_id, label, properties.clone(), version_id, metadata);
 
-    // Insert or update in current storage
     if is_create {
+        let node = Node::with_metadata(node_id, label, properties.clone(), version_id, metadata);
         tx.current.insert_node_direct(node, commit_timestamp)?;
-    } else {
-        tx.current.update_node_direct(node, commit_timestamp)?;
 
-        if let Some(current_version_id) = historical.get_current_node_version(node_id) {
-            historical.close_node_version_transaction_time(current_version_id, commit_timestamp)?;
-        }
+        // Store in historical storage (consume properties, avoiding second clone)
+        historical.add_node_version_with_provenance(
+            node_id,
+            version_id,
+            valid_from,
+            commit_timestamp,
+            label,
+            properties,
+            false, // not a tombstone
+            provenance,
+        )?;
+
+        // Index in temporal indexes with bi-temporal interval
+        let temporal = create_temporal_interval(valid_from, commit_timestamp, false)?;
+        tx.temporal_indexes
+            .insert_node_version(node_id, version_id, temporal)?;
+        return Ok(());
     }
 
-    // Store in historical storage (consume properties, avoiding second clone)
-    historical.add_node_version_with_provenance(
+    // Update: supersede the valid-time slice containing `valid_from` without
+    // rewriting any recorded interval (append-only, #3504). The uncovered
+    // prefix of the superseded slice is carried forward, a backfill is bounded
+    // by the next slice, and after a backfill the open head is re-asserted so
+    // current storage keeps the entity's actual current state. See
+    // `storage::historical::slices` for the model.
+    let plan = historical.plan_node_update(node_id, valid_from);
+    let (carry_id, reassert_id) = allocate_structural_ids(tx, &plan)?;
+    let current_properties = properties.clone();
+    let applied = historical.apply_node_update(
         node_id,
-        version_id,
+        &plan,
         valid_from,
         commit_timestamp,
+        version_id,
         label,
         properties,
-        false, // not a tombstone
         provenance,
+        carry_id,
+        reassert_id,
     )?;
 
-    // Index in temporal indexes with bi-temporal interval
-    let temporal = create_temporal_interval(valid_from, commit_timestamp, false)?;
-    tx.temporal_indexes
-        .insert_node_version(node_id, version_id, temporal)?;
+    let node = match applied.reasserted {
+        Some((head_id, head_label, head_properties)) => {
+            Node::with_metadata(node_id, head_label, head_properties, head_id, metadata)
+        }
+        None => Node::with_metadata(node_id, label, current_properties, version_id, metadata),
+    };
+    tx.current.update_node_direct(node, commit_timestamp)?;
+
+    // Index every appended version (carry-forward, new version, re-assertion).
+    for (vid, temporal) in applied.appended {
+        tx.temporal_indexes
+            .insert_node_version(node_id, vid, temporal)?;
+    }
 
     Ok(())
+}
+
+/// Allocate the structural (carry-forward / re-assertion) version ids an
+/// update plan needs from the shared version-id generator.
+///
+/// Structural ids are not logged in the WAL: crash recovery re-derives the same
+/// plan from the replayed history and mints its own (see `storage::recovery`).
+/// Lock order: the id generator is acquired after `historical` (allowed).
+fn allocate_structural_ids(
+    tx: &WriteTransaction,
+    plan: &UpdatePlan,
+) -> Result<(Option<VersionId>, Option<VersionId>)> {
+    let next = || -> Result<VersionId> { Ok(VersionId::structural(tx.version_id_gen.next()?)?) };
+    let carry_id = if plan.carry_from.is_some() {
+        Some(next()?)
+    } else {
+        None
+    };
+    let reassert_id = if plan.reassert.is_some() {
+        Some(next()?)
+    } else {
+        None
+    };
+    Ok((carry_id, reassert_id))
 }
 
 /// Apply an edge creation or update to storage.
@@ -149,47 +212,91 @@ pub(crate) fn apply_edge_write(
     historical: &mut HistoricalStorage,
     provenance: Option<Arc<Provenance>>,
 ) -> Result<()> {
+    // GDPR crypto-shred (Issue #3359, PR-1b): `properties` already carry any
+    // sealed envelopes (sealed on the write buffer in `commit_with_timestamp_inner`
+    // before WAL logging). Do NOT seal again here.
+
     // Create edge with pending metadata (commit_timestamp finalized after full apply_changes).
     let metadata = VersionMetadata::uncommitted(tx.tx_id);
-    let edge = Edge::with_metadata(
-        edge_id,
-        label,
-        source,
-        target,
-        properties.clone(),
-        version_id,
-        metadata,
-    );
 
-    // Insert or update in current storage
     if is_create {
+        let edge = Edge::with_metadata(
+            edge_id,
+            label,
+            source,
+            target,
+            properties.clone(),
+            version_id,
+            metadata,
+        );
         tx.current.insert_edge_direct(edge)?;
-    } else {
-        tx.current.update_edge_direct(edge)?;
 
-        if let Some(current_version_id) = historical.get_current_edge_version(edge_id) {
-            historical.close_edge_version_transaction_time(current_version_id, commit_timestamp)?;
-        }
+        // Store in historical storage (consume properties, avoiding second clone)
+        historical.add_edge_version_with_provenance(
+            edge_id,
+            version_id,
+            valid_from,
+            commit_timestamp,
+            label,
+            source,
+            target,
+            properties,
+            false, // not a tombstone
+            provenance,
+        )?;
+
+        // Index in temporal indexes with bi-temporal interval
+        let temporal = create_temporal_interval(valid_from, commit_timestamp, false)?;
+        tx.temporal_indexes
+            .insert_edge_version(edge_id, version_id, temporal)?;
+        return Ok(());
     }
 
-    // Store in historical storage (consume properties, avoiding second clone)
-    historical.add_edge_version_with_provenance(
+    // Update: append-only valid-time supersession, see `apply_node_write`.
+    let plan = historical.plan_edge_update(edge_id, valid_from);
+    let (carry_id, reassert_id) = allocate_structural_ids(tx, &plan)?;
+    let current_properties = properties.clone();
+    let applied = historical.apply_edge_update(
         edge_id,
-        version_id,
+        &plan,
         valid_from,
         commit_timestamp,
+        version_id,
         label,
         source,
         target,
         properties,
-        false, // not a tombstone
         provenance,
+        carry_id,
+        reassert_id,
     )?;
 
-    // Index in temporal indexes with bi-temporal interval
-    let temporal = create_temporal_interval(valid_from, commit_timestamp, false)?;
-    tx.temporal_indexes
-        .insert_edge_version(edge_id, version_id, temporal)?;
+    let edge = match applied.reasserted {
+        Some((head_id, head_label, head_properties)) => Edge::with_metadata(
+            edge_id,
+            head_label,
+            source,
+            target,
+            head_properties,
+            head_id,
+            metadata,
+        ),
+        None => Edge::with_metadata(
+            edge_id,
+            label,
+            source,
+            target,
+            current_properties,
+            version_id,
+            metadata,
+        ),
+    };
+    tx.current.update_edge_direct(edge)?;
+
+    for (vid, temporal) in applied.appended {
+        tx.temporal_indexes
+            .insert_edge_version(edge_id, vid, temporal)?;
+    }
 
     Ok(())
 }
@@ -218,10 +325,10 @@ pub(crate) fn apply_node_delete(
     // Get the node before deleting
     let node = tx.current.get_node(node_id)?;
 
-    // Close the current version's transaction_time in historical storage
-    if let Some(current_version_id) = historical.get_current_node_version(node_id) {
-        historical.close_node_version_transaction_time(current_version_id, commit_timestamp)?;
-    }
+    // Close the transaction time of the head AND every other still-recorded
+    // valid-time slice (carry-forwards from earlier updates): a delete withdraws
+    // the entity at every valid time as of this commit.
+    historical.close_all_node_slices(node_id, commit_timestamp)?;
 
     // Create tombstone interval using centralized logic
     let tombstone_temporal = create_temporal_interval(valid_from, commit_timestamp, true)?;
@@ -264,10 +371,8 @@ pub(crate) fn apply_edge_delete(
     // Get the edge before deleting
     let edge = tx.current.get_edge(edge_id)?;
 
-    // Close the current version's transaction_time in historical storage
-    if let Some(current_version_id) = historical.get_current_edge_version(edge_id) {
-        historical.close_edge_version_transaction_time(current_version_id, commit_timestamp)?;
-    }
+    // Close the head and every other still-recorded slice (see apply_node_delete).
+    historical.close_all_edge_slices(edge_id, commit_timestamp)?;
 
     // Create tombstone interval using centralized logic
     let tombstone_temporal = create_temporal_interval(valid_from, commit_timestamp, true)?;
@@ -643,30 +748,18 @@ pub(crate) fn apply_changes<'a>(
     // Acquire lock on historical storage once before processing all operations.
     let mut historical = tx.historical.write();
 
-    // Issue #3416 Pt1 — commit-time SI write-skew re-checks for node
-    // deletes/retracts AND edge creations, run under the SAME exclusive
-    // `historical.write()` guard so the two orderings are symmetric: whichever
-    // of a concurrent delete-node / create-edge pair applies SECOND aborts, so
-    // exactly one wins and no orphan is committed in EITHER ordering.
-    //
-    // `historical.write()` is the commit serialization point: no other tx can be
-    // applying while we hold it, so committed current state now reflects every
-    // earlier-committed transaction. Both checks read current storage / adjacency
-    // (leaf / order-class 6-7) while holding `historical` (class 3), never call
-    // back into `historical`/`wal`/`current_timestamp`, and touch no adjacency
-    // locks out of order — consistent with the CLAUDE.md lock order.
-    //
-    // Ordering (i): delete/retract applies second. It cannot see a concurrent
-    // create_edge that committed after its snapshot (disjoint write sets escape
-    // first-committer-wins); the delete-side check re-counts committed connected
-    // edges and aborts on a newly-appeared one.
-    detect_delete_orphan_write_skew(tx)?;
-    // Ordering (ii): create_edge applies second. Its endpoint existence was
-    // checked by `validate()` BEFORE the timestamp/WAL/apply phase and the apply
-    // path does no endpoint re-check, so a concurrent delete of an endpoint that
-    // commits between validate() and here would leave a dangling edge. The
-    // create-side check re-verifies both endpoints under the guard.
-    detect_create_edge_dangling_endpoint(tx)?;
+    // Issue #3413 (WAL abort framing): the commit-time precondition guards — the
+    // #3416 delete-orphan / dangling-endpoint write-skew re-checks and the
+    // #3577/#3755 CAS/lease/fence re-check — USED to run HERE, under this
+    // `historical.write()` guard, AFTER the WAL frame was already durable, so a
+    // rejection left a phantom `[BeginTx, ..ops.., CommitTx]` frame that crash
+    // recovery reapplied. They now run in `commit_with_timestamp_inner` BEFORE
+    // the WAL append, under the `current_timestamp` lock held across this apply.
+    // `current_timestamp` serializes commits end-to-end, so a guard that passed
+    // there is still valid here (no other committer can have applied in between),
+    // and a rejected transaction returns with NO WAL frame — nothing to replay.
+    // See [`detect_delete_orphan_write_skew`], [`detect_create_edge_dangling_endpoint`]
+    // (this module) and [`super::cas::detect_cas_precondition_violations`].
 
     // Issue #3406: the closing-version IDs (delete tombstones + retraction
     // versions) are pre-generated once per commit — BEFORE the WAL log phase —
@@ -730,17 +823,22 @@ pub(crate) fn apply_changes<'a>(
 ///
 /// # Locking
 ///
-/// Called while `historical.write()` (order class 3) is held. It reads the
-/// adjacency indexes (`outgoing`/`incoming`, classes 6/7) and current-storage
-/// edge map -- all LATER than `historical` in the documented lock order -- and
-/// never calls back into `historical`/`wal`/`current_timestamp`, so no
-/// lock-order inversion is introduced.
+/// Called while only `current_timestamp` (order class 1) is held, before the WAL
+/// append (Issue #3413). It reads the adjacency indexes (`outgoing`/`incoming`,
+/// classes 6/7) and current-storage edge map -- all LATER than `current_timestamp`
+/// in the documented lock order -- and never calls back into
+/// `historical`/`wal`/`current_timestamp`, so no lock-order inversion is
+/// introduced.
 ///
 /// # Cost
 ///
 /// O(degree) committed-adjacency reads per buffered node delete/retract, at
 /// commit only. Zero cost for transactions that delete/retract no nodes.
-fn detect_delete_orphan_write_skew(tx: &WriteTransaction) -> Result<()> {
+///
+/// Issue #3413: invoked from `commit_with_timestamp_inner` under the
+/// `current_timestamp` lock BEFORE the WAL append (not from `apply_changes`), so
+/// a rejection leaves no durable frame. Reads only current storage / adjacency.
+pub(super) fn detect_delete_orphan_write_skew(tx: &WriteTransaction) -> Result<()> {
     use crate::api::transaction::BufferedWrite;
 
     // Short-circuit (NIT): most transactions delete/retract no nodes; skip
@@ -846,15 +944,21 @@ fn detect_delete_orphan_write_skew(tx: &WriteTransaction) -> Result<()> {
 ///
 /// # Locking
 ///
-/// Called while `historical.write()` (order class 3) is held; reads only the
-/// current-storage node map (a leaf) and this tx's buffer, never calling back
-/// into `historical`/`wal`/`current_timestamp`. No lock-order inversion.
+/// Called while only `current_timestamp` (order class 1) is held, before the WAL
+/// append (Issue #3413); reads only the current-storage node map (a leaf) and
+/// this tx's buffer, never calling back into `historical`/`wal`/`current_timestamp`.
+/// No lock-order inversion.
 ///
 /// # Cost
 ///
 /// O(1) buffer/current lookups per buffered `CreateEdge`, at commit only. Zero
 /// cost for transactions that create no edges.
-fn detect_create_edge_dangling_endpoint(tx: &WriteTransaction) -> Result<()> {
+///
+/// Issue #3413: invoked from `commit_with_timestamp_inner` under the
+/// `current_timestamp` lock BEFORE the WAL append (not from `apply_changes`), so
+/// a rejection leaves no durable frame. Reads only this tx's buffer + current
+/// storage.
+pub(super) fn detect_create_edge_dangling_endpoint(tx: &WriteTransaction) -> Result<()> {
     use crate::api::transaction::BufferedWrite;
 
     // Resolve an endpoint exactly as `validation::validate` does: a same-tx

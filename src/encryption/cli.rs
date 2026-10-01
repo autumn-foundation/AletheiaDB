@@ -9,9 +9,10 @@
 use std::path::Path;
 
 use crate::encryption::KeyProviderError;
-use crate::encryption::config::{EncryptionConfig, KeyProviderConfig};
+use crate::encryption::config::EncryptionConfig;
 use crate::encryption::factory::Algorithm;
 use crate::encryption::key_provider::{FileKeyProvider, KeyProvider};
+use crate::encryption::passphrase::generate_passphrase_key_file;
 
 /// Result of a key generation operation.
 #[derive(Debug)]
@@ -79,6 +80,38 @@ pub fn generate_key_with_overwrite(
     })
 }
 
+/// Generate a new passphrase-wrapped master key file (Issue #3587).
+///
+/// Generates a random 256-bit MEK, wraps it under `passphrase` using the default
+/// Argon2id KDF, and writes a self-describing `AEKF` key file at `output_path`.
+/// When `overwrite` is `false` an existing file is never clobbered (`O_EXCL`);
+/// on Unix the file is created `0600` before any bytes are written.
+///
+/// # Security
+///
+/// The passphrase is consumed only to derive the wrapping key and is **never**
+/// written to disk, logged, or placed in the returned result or any error. The
+/// generated plaintext MEK is dropped (zeroized) before this function returns —
+/// only the wrapped file persists.
+///
+/// # Errors
+///
+/// Returns [`KeyProviderError`] if key derivation, encryption, or file writing
+/// fails, or (when `overwrite` is `false`) if a file already exists.
+pub fn generate_passphrase_key_with_overwrite(
+    output_path: &Path,
+    passphrase: &str,
+    overwrite: bool,
+) -> Result<KeyGenResult, KeyProviderError> {
+    // The returned MEK is dropped (zeroized) here; only the wrapped file remains.
+    let _mek = generate_passphrase_key_file(output_path, passphrase, overwrite)?;
+    Ok(KeyGenResult {
+        path: output_path.display().to_string(),
+        algorithm: "AES-256-GCM / ChaCha20-Poly1305 (passphrase-wrapped, Argon2id)".into(),
+        key_length: 32,
+    })
+}
+
 /// Information about the current encryption configuration.
 #[derive(Debug)]
 pub struct EncryptionStatus {
@@ -127,10 +160,7 @@ pub fn get_encryption_status(config: &EncryptionConfig) -> EncryptionStatus {
         Algorithm::Auto => "Auto (AES-256-GCM if AES-NI, else ChaCha20-Poly1305)",
     };
 
-    let (provider_type, provider_detail) = match &config.key_provider {
-        KeyProviderConfig::File { path } => ("file", path.display().to_string()),
-        KeyProviderConfig::Env { variable } => ("env", variable.clone()),
-    };
+    let (provider_type, provider_detail) = config.key_provider.describe();
 
     EncryptionStatus {
         enabled: true,
@@ -222,6 +252,7 @@ pub fn format_encryption_status(status: &EncryptionStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encryption::config::KeyProviderConfig;
     use std::path::PathBuf;
 
     #[test]

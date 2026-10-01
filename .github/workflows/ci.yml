@@ -20,10 +20,18 @@ jobs:
   test:
     name: Test Suite
     runs-on: ${{ matrix.os }}
+    # Nightly rustc is an advisory canary for upcoming compiler releases, not a
+    # merge gate. An ICE or breakage in a nightly cell must never cancel or
+    # redden the required stable cells: the matrix runs fail-fast: false so a
+    # broken cell cannot cancel its siblings, and nightly cells are
+    # continue-on-error so their failures stay visible without failing the run.
+    continue-on-error: ${{ startsWith(matrix.rust, 'nightly') }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        rust: [stable, nightly]
+        # nightly pinned to a known-good date: nightly-2026-07-13+ ICEs on a standard #[test] (rustc_test_entrypoint_marker) — upstream https://github.com/rust-lang/rust/issues/100263 . Bump/remove once the ICE is fixed upstream.
+        rust: [stable, nightly-2026-07-12]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -60,7 +68,15 @@ jobs:
           key: ${{ runner.os }}-v2-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests
-        run: cargo test --verbose --features "config-toml,mcp-server,sharding-rpc,simulation"
+        run: cargo test --verbose --features "config-toml,mcp-server,sharding-rpc,simulation,cypher"
+
+      # The workspace is `default-members = ["."]`, so the root `cargo test`
+      # above never reaches the production server crate — which is where the
+      # daemon (Issue #2905) and the autumn-web 0.6 parity suite live. Without
+      # this step they run only under the coverage job's llvm-cov
+      # instrumentation, the slowest environment there is.
+      - name: Run server crate tests
+        run: cargo test --verbose -p aletheia-server
 
       - name: Run doc tests
         run: cargo test --doc --verbose
@@ -106,16 +122,51 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
+    # The instrumented llvm-cov build links many coverage-instrumented test
+    # binaries; each final link spawns an `ld` whose peak RSS is large (embedded
+    # coverage maps + debuginfo). At the runner's default build parallelism
+    # several `ld` processes are resident at once, and their combined peak has
+    # intermittently exhausted runner memory -> `ld` SIGBUS / core-dump (a
+    # distinct flake mode from the metrics counter race). Cap concurrent
+    # build/link jobs so at most two linkers are resident simultaneously, roughly
+    # halving the peak link-memory ceiling. This throttles the BUILD phase only
+    # (test execution and, crucially, the coverage thresholds/gating below are
+    # untouched); no `timeout-minutes` is set on this job, so the modest
+    # build-time increase is safe.
+    env:
+      CARGO_BUILD_JOBS: "2"
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      # The instrumented full-workspace llvm-cov build is by far the largest
+      # object graph CI produces (per-target instrumented rlibs + raw profraw),
+      # and it repeatedly ENOSPC'd on stock ubuntu-latest runners (~39 MB free
+      # at peak -> flaky red on #3605 / #3607). Reclaim aggressively BEFORE the
+      # build: the well-known GH-runner preinstalled bloat (~30+ GB of dotnet,
+      # android SDK, GHC, Swift, CodeQL, boost, powershell, JVMs, hosted tool
+      # cache, node) plus the Docker image cache and apt archive. This is the
+      # manual equivalent of jlumbroso/free-disk-space, inlined to avoid a
+      # third-party action in the coverage path (Issue #3625).
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup \
-            /usr/lib/jvm "$AGENT_TOOLSDIRECTORY" || true
-          df -h
+          echo "== disk before reclaim =="
+          df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost \
+            /usr/local/share/powershell \
+            /usr/share/swift \
+            /usr/lib/jvm \
+            /usr/local/lib/node_modules \
+            "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force 2>/dev/null || true
+          sudo apt-get clean || true
+          echo "== disk after reclaim =="
+          df -h /
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -137,8 +188,11 @@ jobs:
           path: ~/.cargo/git
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
 
+      # sql + cypher are added to the feature set so their modules
+      # (src/sql, src/cypher) are compiled and measured -- previously omitted,
+      # leaving that code entirely unmeasured (Issue #3625).
       - name: Generate coverage report
-        run: cargo llvm-cov --features "config-toml,mcp-server,sharding-rpc" --lcov --output-path lcov.info
+        run: cargo llvm-cov -p aletheiadb -p aletheia-server --features "config-toml,mcp-server,sharding-rpc,sql,cypher" --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6
@@ -151,7 +205,7 @@ jobs:
           verbose: true
 
       - name: Check coverage thresholds
-        run: cargo llvm-cov --features "config-toml,mcp-server,sharding-rpc" --fail-under-lines 85 --fail-under-functions 88 --fail-under-regions 88
+        run: cargo llvm-cov -p aletheiadb -p aletheia-server --features "config-toml,mcp-server,sharding-rpc,sql,cypher" --fail-under-lines 85 --fail-under-functions 88 --fail-under-regions 88
 
   lint:
     name: Linting
@@ -174,6 +228,9 @@ jobs:
   security:
     name: Security Audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -194,7 +251,23 @@ jobs:
           # RUSTSEC-2026-0187 (lopdf) precedent. rustsec/audit-check@v2 honors
           # only this `ignore:` input, so the advisory is listed here as well as
           # in .cargo/audit.toml.
-          ignore: "RUSTSEC-2026-0104, RUSTSEC-2024-0436, RUSTSEC-2023-0071"
+          #
+          # RUSTSEC-2026-0258: h2 0.3.27 "unbounded empty DATA frames" (low
+          # severity DoS). The h2 0.4 instance is patched (0.4.16 in the
+          # lockfile); no patched 0.3 release exists. Transitive-only, and
+          # only with optional features enabled: `encryption-aws-kms` (via
+          # aws-sdk-kms/test-util -> smithy legacy-test-util -> hyper-014,
+          # required by the mock Decrypt test) and `embeddings` (via
+          # embed_anything -> aws-sdk-s3 default `rustls` -> smithy
+          # tls-rustls -> hyper-014). This PR removed the redundant third
+          # enabler (aws-sdk-kms default `rustls`). The legacy connector is
+          # compiled but never instantiated by our code; absent from
+          # default/CI builds. See .cargo/audit.toml; tracked via #3807.
+          #
+          # RUSTSEC-2026-0235 (rkyv 0.7.46): RESOLVED — rust_decimal was
+          # updated 1.42.1 -> 1.43.0, which dropped its rkyv dependency
+          # entirely; rkyv no longer appears in Cargo.lock. Ignore removed.
+          ignore: "RUSTSEC-2026-0104, RUSTSEC-2024-0436, RUSTSEC-2023-0071, RUSTSEC-2026-0258"
 
   feature-matrix:
     name: Feature Matrix
@@ -233,3 +306,40 @@ jobs:
 
       - name: Verify feature flags compile standalone
         run: just check-features
+
+  wasm-check:
+    name: WASM Compile Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-v2-cargo-build-wasm-${{ hashFiles('**/Cargo.lock') }}
+
+      # The wasm32 ephemeral profile compiles the crate with no default features.
+      # The getrandom wasm backend rustflag is supplied by .cargo/config.toml, so
+      # no extra env is needed. This guards the wasm-gated code paths against
+      # regressions (0 errors, 0 warnings enforced separately by the code review).
+      - name: Compile-check wasm32 target
+        run: cargo check --target wasm32-unknown-unknown --no-default-features

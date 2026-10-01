@@ -31,6 +31,7 @@ mod budget;
 mod cursor;
 mod error;
 mod limits;
+pub mod proxy;
 mod server;
 mod tools;
 
@@ -45,15 +46,18 @@ pub use server::AletheiaMcpServer;
 
 // Re-export tool request/response types for testing (alphabetically sorted)
 pub use tools::{
-    CountEdgesRequest, CountNodesRequest, CreateEdgeRequest, CreateNodeRequest,
+    AwaitChangesRequest, CountEdgesRequest, CountNodesRequest, CreateEdgeRequest,
+    CreateNamespaceRequest, CreateNodeRequest, CreateNodeWithEmbeddingRequest,
     DatabaseStatsRequest, DeleteEdgeRequest, DeleteNodeCascadeRequest, DeleteNodeRequest,
-    EnableUniqueConstraintRequest, EnableVectorIndexRequest, FindNodesAtTimeRequest,
-    FindSimilarRequest, GetEdgeAtTimeRequest, GetEdgeHistoryRequest, GetEdgeRequest,
-    GetIncomingEdgesRequest, GetNodeAtTimeRequest, GetNodeHistoryRequest, GetNodeRequest,
-    GetOutgoingEdgesRequest, GetSchemaRequest, HybridQueryRequest, LineageQueryRequest,
-    ListChangesRequest, ListEdgesRequest, ListNodesRequest, ListUniqueConstraintsRequest,
-    ListVectorIndexesRequest, ProvenanceRequest, QueryRequest, RetractEdgeRequest,
-    RetractNodeRequest, TemporalBounds, TemporalExtentRequest, TraverseRequest, UpdateEdgeRequest,
+    DescribeNamespaceRequest, DesignateSubjectRequest, DesignationTargetInput, EmbedQueryRequest,
+    EmbedTextRequest, EnableUniqueConstraintRequest, EnableVectorIndexRequest, EraseSubjectRequest,
+    FindNodesAtTimeRequest, FindSimilarRequest, GetEdgeAtTimeRequest, GetEdgeHistoryRequest,
+    GetEdgeRequest, GetIncomingEdgesRequest, GetNodeAtTimeRequest, GetNodeHistoryRequest,
+    GetNodeRequest, GetOutgoingEdgesRequest, GetSchemaRequest, HybridQueryRequest,
+    LineageQueryRequest, ListChangesRequest, ListEdgesRequest, ListNamespacesRequest,
+    ListNodesRequest, ListUniqueConstraintsRequest, ListVectorIndexesRequest, ProvenanceRequest,
+    QueryRequest, RetractEdgeRequest, RetractNodeRequest, SemanticSearchRequest, TemporalBounds,
+    TemporalExtentRequest, TraverseRequest, UpdateEdgeRequest, UpdateNodeEmbeddingRequest,
     UpdateNodeRequest,
 };
 

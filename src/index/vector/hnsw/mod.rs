@@ -3,23 +3,42 @@
 //! This module provides a wrapper around the `usearch` library's HNSW index,
 //! implementing the `VectorIndex` trait for approximate k-nearest neighbor search.
 
+// The real HNSW implementation wraps the `usearch` C++ library, which cannot be
+// compiled to `wasm32-unknown-unknown`. On wasm the type is replaced by an inert
+// stub (see the bottom of this module) so the query engine still type-checks with
+// vector search disabled (Phase 1 wasm profile — vector search is OFF).
+#[cfg(not(target_arch = "wasm32"))]
 use crate::core::error::{Error, Result, VectorError};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::core::id::NodeId;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::core::property::MAX_VECTOR_DIMENSIONS;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::core::vector::validate_vector;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::index::vector::{DistanceMetric, Quantization, StorageMode, VectorIndex};
+#[cfg(not(target_arch = "wasm32"))]
 use dashmap::DashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use parking_lot::{Mutex, RwLock};
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::BufWriter;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
 /// HNSW configuration and builder.
 pub mod config;
 /// Persistence logic for HNSW index.
+/// The real (usearch-backed) HNSW index is native-only, so its persistence is too.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod persistence;
 /// Statistics for HNSW index.
 pub mod stats;
@@ -28,10 +47,13 @@ pub mod stats;
 mod tests;
 
 pub use config::{HnswConfig, HnswIndexBuilder};
+#[cfg(not(target_arch = "wasm32"))]
 use persistence::{load_mappings_with_integrity, verify_index_header, write_mappings_to_writer};
+#[cfg(not(target_arch = "wasm32"))]
 use stats::{IndexStats, MAX_SEARCH_ATTEMPTS};
 
 // Thread-local flag to detect re-entrant modification attempts during filtered search.
+#[cfg(not(target_arch = "wasm32"))]
 std::thread_local! {
     pub(crate) static IN_FILTER_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -49,10 +71,12 @@ pub(crate) static TEST_SKIP_CAPACITY_CHECK: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// RAII guard that sets IN_FILTER_CALLBACK to true on creation and restores previous value on drop.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct FilterCallbackGuard {
     prev: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl FilterCallbackGuard {
     pub(crate) fn new() -> Self {
         let prev = IN_FILTER_CALLBACK.with(|flag| flag.replace(true));
@@ -60,6 +84,7 @@ impl FilterCallbackGuard {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for FilterCallbackGuard {
     fn drop(&mut self) {
         IN_FILTER_CALLBACK.with(|flag| flag.set(self.prev));
@@ -67,6 +92,7 @@ impl Drop for FilterCallbackGuard {
 }
 
 /// Maximum number of results that can be requested in a search.
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_K: usize = 100_000;
 
 /// Maximum valid usearch key.
@@ -75,12 +101,15 @@ const MAX_K: usize = 100_000;
 /// protection in `add`) and when restoring persisted mappings
 /// (`restore_mapping`), so a corrupted `mappings.idx` containing a huge key
 /// can never overflow `usearch_key + 1` or poison `next_key`.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const MAX_VALID_KEY: u64 = u64::MAX - 1000;
 
 /// Number of sharded locks for entry updates.
+#[cfg(not(target_arch = "wasm32"))]
 const NUM_ENTRY_LOCKS: usize = 64;
 
 /// Convert our DistanceMetric to usearch's MetricKind
+#[cfg(not(target_arch = "wasm32"))]
 fn to_usearch_metric(metric: DistanceMetric) -> MetricKind {
     match metric {
         DistanceMetric::Cosine => MetricKind::Cos,
@@ -92,6 +121,7 @@ fn to_usearch_metric(metric: DistanceMetric) -> MetricKind {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn to_usearch_index_metric(metric: DistanceMetric) -> MetricKind {
     match metric {
         DistanceMetric::Tanimoto => MetricKind::Cos,
@@ -100,6 +130,7 @@ fn to_usearch_index_metric(metric: DistanceMetric) -> MetricKind {
 }
 
 /// Convert our Quantization to usearch's ScalarKind
+#[cfg(not(target_arch = "wasm32"))]
 fn to_usearch_scalar(quantization: Quantization) -> ScalarKind {
     match quantization {
         Quantization::F32 => ScalarKind::F32,
@@ -108,6 +139,7 @@ fn to_usearch_scalar(quantization: Quantization) -> ScalarKind {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn validate_metric_quantization(config: &HnswConfig) -> Result<()> {
     if config.metric == DistanceMetric::Tanimoto && config.quantization != Quantization::F32 {
         return Err(Error::Vector(VectorError::InvalidVector {
@@ -122,6 +154,7 @@ fn validate_metric_quantization(config: &HnswConfig) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn tanimoto_distance(a: &[f32], b: &[f32]) -> f32 {
     let mut dot = 0.0f64;
     let mut norm_a = 0.0f64;
@@ -148,6 +181,7 @@ fn tanimoto_distance(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn install_runtime_metric(index: &mut Index, config: &HnswConfig) {
     if let Some(ref custom) = config.custom_metric {
         let dims = config.dimensions;
@@ -161,11 +195,13 @@ fn install_runtime_metric(index: &mut Index, config: &HnswConfig) {
 }
 
 /// Check if a usearch error is transient and should be retried.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn is_retryable_usearch_error(error_msg: &str) -> bool {
     error_msg.contains("No available threads to lock")
 }
 
 // Helper to create the metric wrapper
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn create_metric_wrapper<F>(
     dims: usize,
     distance_fn: Arc<F>,
@@ -229,6 +265,7 @@ where
 /// The index supports two persistence modes:
 /// 1. **In-Memory**: Fast, ephemeral updates. Can be saved to disk via `save()`.
 /// 2. **Memory-Mapped**: Zero-copy loading from disk for instant startup. Read-only.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct HnswIndex {
     /// Underlying usearch index (C++ wrapper).
     /// Protected by RwLock for thread safety.
@@ -293,6 +330,7 @@ pub struct HnswIndex {
 unsafe impl Send for HnswIndex {}
 unsafe impl Sync for HnswIndex {}
 
+#[cfg(not(target_arch = "wasm32"))]
 impl std::fmt::Debug for HnswIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HnswIndex")
@@ -303,6 +341,7 @@ impl std::fmt::Debug for HnswIndex {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl HnswIndex {
     /// Internal constructor used by `HnswIndexBuilder`.
     ///
@@ -916,6 +955,7 @@ impl HnswIndex {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl VectorIndex for HnswIndex {
     /// Adds a vector to the index.
     ///
@@ -1336,5 +1376,107 @@ impl VectorIndex for HnswIndex {
 
     fn compact(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+// ============================================================================
+// wasm32 stub implementation
+// ============================================================================
+//
+// The real `HnswIndex` above wraps the `usearch` C++ library, which cannot be
+// compiled to `wasm32-unknown-unknown`. The Phase 1 wasm profile ships with
+// vector search **disabled** (see docs/plans/2026-07-20-aletheiadb-wasm.md), so
+// on wasm we provide an inert stub with the same public surface. It lets the
+// query engine and current-storage layer type-check unchanged while every
+// vector operation returns a structured `NotImplemented` error at runtime.
+#[cfg(target_arch = "wasm32")]
+use crate::core::error::{Error, Result};
+#[cfg(target_arch = "wasm32")]
+use crate::core::id::NodeId;
+#[cfg(target_arch = "wasm32")]
+use crate::index::vector::{DistanceMetric, VectorIndex};
+
+/// wasm32 stub for the usearch-backed HNSW index (vector search disabled).
+#[cfg(target_arch = "wasm32")]
+pub struct HnswIndex {
+    config: HnswConfig,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::fmt::Debug for HnswIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HnswIndex")
+            .field("wasm_stub", &true)
+            .field("dimensions", &self.config.dimensions)
+            .finish()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn vector_search_unavailable() -> Error {
+    Error::not_implemented(
+        "vector_search",
+        "vector search (HNSW/usearch) is not available on the wasm32 target",
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+impl HnswIndex {
+    /// Create a stub index. Construction succeeds so index registration works,
+    /// but every add/search operation returns `NotImplemented` on wasm.
+    pub fn new(config: HnswConfig) -> Result<Self> {
+        Ok(Self { config })
+    }
+
+    /// Stub mirror of the native builder entry point (`HnswIndexBuilder::build`).
+    /// Construction succeeds; every add/search operation returns
+    /// `NotImplemented` on wasm.
+    pub(crate) fn new_internal(config: HnswConfig) -> Result<Self> {
+        Ok(Self { config })
+    }
+
+    /// Return the configuration used to create this index.
+    pub fn config(&self) -> HnswConfig {
+        self.config.clone()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl VectorIndex for HnswIndex {
+    fn add(&self, _id: NodeId, _vector: &[f32]) -> Result<()> {
+        Err(vector_search_unavailable())
+    }
+
+    fn remove(&self, _id: NodeId) -> Result<()> {
+        // Removal is idempotent/lenient in the real index; treat as no-op.
+        Ok(())
+    }
+
+    fn search(&self, _query: &[f32], _k: usize) -> Result<Vec<(NodeId, f32)>> {
+        Err(vector_search_unavailable())
+    }
+
+    fn search_with_filter<F>(
+        &self,
+        _query: &[f32],
+        _k: usize,
+        _predicate: F,
+    ) -> Result<Vec<(NodeId, f32)>>
+    where
+        F: Fn(&NodeId) -> bool + Send + Sync,
+    {
+        Err(vector_search_unavailable())
+    }
+
+    fn len(&self) -> usize {
+        0
+    }
+
+    fn dimensions(&self) -> usize {
+        self.config.dimensions
+    }
+
+    fn distance_metric(&self) -> DistanceMetric {
+        self.config.metric
     }
 }

@@ -91,6 +91,11 @@ use crate::core::temporal::Timestamp;
 pub struct WriteRequestOptions {
     pub(crate) valid_from: Option<Timestamp>,
     pub(crate) provenance: Option<Provenance>,
+    /// Target namespace for a **create** (Issue #3349). `None` ⇒ the default
+    /// namespace (byte-identical to pre-namespace behavior). Ignored by update /
+    /// replace / delete / CAS paths, where the namespace is immutable and
+    /// re-stamped from the existing entity instead.
+    pub(crate) namespace: Option<crate::core::namespace::Namespace>,
 }
 
 impl WriteRequestOptions {
@@ -110,6 +115,27 @@ impl WriteRequestOptions {
     #[must_use]
     pub fn with_provenance(mut self, provenance: Provenance) -> Self {
         self.provenance = Some(provenance);
+        self
+    }
+
+    /// Set the target namespace for a **create** write (Issue #3349).
+    ///
+    /// Supplying a namespace to a non-create op (update / replace / CAS /
+    /// lease-claim) is rejected with `INVALID_ARGUMENT`
+    /// ([`NamespaceError::Immutable`](crate::core::namespace::NamespaceError::Immutable)),
+    /// because a namespace is fixed at creation and those paths re-stamp it from
+    /// the existing entity.
+    ///
+    /// Note: this low-level write-path does **not** auto-register the namespace
+    /// in the registry — that is the caller's responsibility (the
+    /// `create_*_in_namespace` convenience methods and the PR3 MCP/HTTP handlers
+    /// register after a successful commit). A raw `with_namespace` write can
+    /// therefore stamp an entity in a namespace the registry does not list; the
+    /// membership index rebuilt at load reconciles that registry-vs-data
+    /// divergence.
+    #[must_use]
+    pub fn with_namespace(mut self, namespace: crate::core::namespace::Namespace) -> Self {
+        self.namespace = Some(namespace);
         self
     }
 }
@@ -541,6 +567,7 @@ pub trait WriteOps: ReadOps {
         let options = WriteRequestOptions {
             valid_from,
             provenance: None,
+            namespace: None,
         };
         self.create_node_with_options(label, properties, options)
     }
@@ -634,6 +661,7 @@ pub trait WriteOps: ReadOps {
         let options = WriteRequestOptions {
             valid_from,
             provenance: None,
+            namespace: None,
         };
         self.create_edge_with_options(source, target, label, properties, options)
     }
@@ -719,6 +747,7 @@ pub trait WriteOps: ReadOps {
         let options = WriteRequestOptions {
             valid_from,
             provenance: None,
+            namespace: None,
         };
         self.update_node_with_options(node_id, properties, options)
     }
@@ -737,6 +766,213 @@ pub trait WriteOps: ReadOps {
         properties: PropertyMap,
         options: WriteRequestOptions,
     ) -> Result<()>;
+
+    /// Compare-and-set a node's properties, conditional on its committed head
+    /// still being `expected_version` (Issue #3577).
+    ///
+    /// This is a conditional **full replace** of the node's property map (not a
+    /// PATCH merge): the whole `properties` map becomes the new state, matching
+    /// the "write the whole claim state" semantics the lease layer builds on.
+    /// The label and node id are preserved.
+    ///
+    /// # Semantics
+    ///
+    /// The precondition is enforced at **commit time, under the
+    /// commit-serialization guard** — so two claimants opened on the same
+    /// snapshot cannot both succeed (the second observes the first's new version
+    /// and aborts). On success the new version id is returned. On a lost claim
+    /// the whole transaction aborts with
+    /// [`TransactionError::CasMismatch`](crate::core::error::TransactionError::CasMismatch)
+    /// (a non-retriable precondition failure, distinct from the retriable
+    /// `SerializationFailure`) and **nothing is written**. A CAS against a
+    /// nonexistent or deleted node fails with `CasMismatch { actual: None }`
+    /// rather than a `NodeNotFound`.
+    fn compare_and_set_node(
+        &mut self,
+        node_id: NodeId,
+        expected_version: crate::core::id::VersionId,
+        properties: PropertyMap,
+    ) -> Result<crate::core::id::VersionId> {
+        self.compare_and_set_node_with_options(
+            node_id,
+            expected_version,
+            properties,
+            WriteRequestOptions::default(),
+        )
+    }
+
+    /// [`compare_and_set_node`](Self::compare_and_set_node) with a
+    /// [`WriteRequestOptions`] bundle (backdated `valid_from` and/or write-time
+    /// provenance parity with `update_node`). This is the most general node-CAS
+    /// method; `compare_and_set_node` delegates to it.
+    fn compare_and_set_node_with_options(
+        &mut self,
+        node_id: NodeId,
+        expected_version: crate::core::id::VersionId,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<crate::core::id::VersionId>;
+
+    /// Compare-and-set an edge's properties, conditional on its committed head
+    /// still being `expected_version` (Issue #3577).
+    ///
+    /// Like [`compare_and_set_node`](Self::compare_and_set_node), but for an
+    /// edge: endpoints and type are immutable (only the property map is
+    /// conditionally replaced, mirroring `replace_edge`). Returns the new
+    /// version id on success; aborts with
+    /// [`TransactionError::CasMismatch`](crate::core::error::TransactionError::CasMismatch)
+    /// on a version mismatch.
+    fn compare_and_set_edge(
+        &mut self,
+        edge_id: EdgeId,
+        expected_version: crate::core::id::VersionId,
+        properties: PropertyMap,
+    ) -> Result<crate::core::id::VersionId> {
+        self.compare_and_set_edge_with_options(
+            edge_id,
+            expected_version,
+            properties,
+            WriteRequestOptions::default(),
+        )
+    }
+
+    /// [`compare_and_set_edge`](Self::compare_and_set_edge) with a
+    /// [`WriteRequestOptions`] bundle. The most general edge-CAS method.
+    fn compare_and_set_edge_with_options(
+        &mut self,
+        edge_id: EdgeId,
+        expected_version: crate::core::id::VersionId,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<crate::core::id::VersionId>;
+
+    /// Claim a node via a lease, succeeding iff the version still matches OR the
+    /// existing lease is expired (Issue #3577).
+    ///
+    /// A thin convenience over [`compare_and_set_node`](Self::compare_and_set_node):
+    /// it stamps `lease_owner_key = owner` and `lease_until_key = lease_until`
+    /// (as integer microseconds since epoch) into `properties` (a full replace),
+    /// then buffers a CAS whose commit-time precondition is
+    /// `current_version == expected_version` **OR** the entity's current
+    /// `lease_until_key` property is `<=` the commit timestamp (the lease is
+    /// expired / unclaimed). The property key names are caller-supplied — this is
+    /// a convention, not a hardcoded schema. Lease expiry is evaluated against
+    /// the commit HLC timestamp, not the transaction snapshot. Returns the new
+    /// version id on success; aborts with
+    /// [`TransactionError::CasMismatch`](crate::core::error::TransactionError::CasMismatch)
+    /// when the version is stale AND the lease is still held.
+    #[allow(clippy::too_many_arguments)]
+    fn claim_with_lease(
+        &mut self,
+        node_id: NodeId,
+        expected_version: crate::core::id::VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        owner: PropertyValue,
+        lease_until: Timestamp,
+        properties: PropertyMap,
+    ) -> Result<crate::core::id::VersionId> {
+        self.claim_with_lease_with_options(
+            node_id,
+            expected_version,
+            lease_owner_key,
+            lease_until_key,
+            owner,
+            lease_until,
+            properties,
+            WriteRequestOptions::default(),
+        )
+    }
+
+    /// [`claim_with_lease`](Self::claim_with_lease) with a
+    /// [`WriteRequestOptions`] bundle. The most general claim method.
+    #[allow(clippy::too_many_arguments)]
+    fn claim_with_lease_with_options(
+        &mut self,
+        node_id: NodeId,
+        expected_version: crate::core::id::VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        owner: PropertyValue,
+        lease_until: Timestamp,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<crate::core::id::VersionId>;
+
+    /// Fenced claim (DBOS Phase 3e): a safe-for-multi-executor
+    /// [`claim_with_lease`](Self::claim_with_lease) that additionally enforces a
+    /// **server-side monotonic fence** and computes the lease deadline on the
+    /// **DB** clock.
+    ///
+    /// Over `claim_with_lease` it adds two extensions:
+    ///
+    /// - **Monotonic fence:** the claim stamps `fence_key = new_fence` and is
+    ///   admitted at commit only if `new_fence` is **strictly greater** than the
+    ///   entity's committed fence (re-read under the commit-serialization guard).
+    ///   This makes the stale-fence steal collision impossible; a violation
+    ///   aborts with
+    ///   [`TransactionError::FenceTooLow`](crate::core::error::TransactionError::FenceTooLow)
+    ///   (non-retriable — recompute the fence). AND-composed with the usual
+    ///   version-match-OR-lease-expired claim gate.
+    /// - **DB-side lease deadline:** the caller passes a `lease_ttl` and the DB
+    ///   computes `lease_until = engine_now + lease_ttl`, so a skewed-fast
+    ///   executor can no longer install a far-future, un-stealable lease.
+    ///
+    /// The `lease_owner_key` / `lease_until_key` / `fence_key` names are
+    /// caller-supplied conventions, not a hardcoded schema. Delegates to
+    /// [`claim_with_lease_fenced_with_options`](Self::claim_with_lease_fenced_with_options).
+    ///
+    /// # Crash-durable fence (Issue #3413)
+    ///
+    /// The fence re-check runs BEFORE the WAL append (under `current_timestamp`),
+    /// so a claim rejected with
+    /// [`TransactionError::FenceTooLow`](crate::core::error::TransactionError::FenceTooLow)
+    /// appends **no WAL frame** and is never re-applied by crash recovery. The
+    /// fence is safe for zombie fencing across a crash.
+    #[allow(clippy::too_many_arguments)]
+    fn claim_with_lease_fenced(
+        &mut self,
+        node_id: NodeId,
+        expected_version: crate::core::id::VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        fence_key: &str,
+        owner: PropertyValue,
+        lease_ttl: std::time::Duration,
+        new_fence: i64,
+        properties: PropertyMap,
+    ) -> Result<crate::core::id::VersionId> {
+        self.claim_with_lease_fenced_with_options(
+            node_id,
+            expected_version,
+            lease_owner_key,
+            lease_until_key,
+            fence_key,
+            owner,
+            lease_ttl,
+            new_fence,
+            properties,
+            WriteRequestOptions::default(),
+        )
+    }
+
+    /// [`claim_with_lease_fenced`](Self::claim_with_lease_fenced) with a
+    /// [`WriteRequestOptions`] bundle (backdated `valid_from` and/or write-time
+    /// provenance). The most general fenced-claim method.
+    #[allow(clippy::too_many_arguments)]
+    fn claim_with_lease_fenced_with_options(
+        &mut self,
+        node_id: NodeId,
+        expected_version: crate::core::id::VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        fence_key: &str,
+        owner: PropertyValue,
+        lease_ttl: std::time::Duration,
+        new_fence: i64,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<crate::core::id::VersionId>;
 
     /// Update a node's properties.
     ///
@@ -797,6 +1033,7 @@ pub trait WriteOps: ReadOps {
         let options = WriteRequestOptions {
             valid_from,
             provenance: None,
+            namespace: None,
         };
         self.update_edge_with_options(edge_id, properties, options)
     }
@@ -879,6 +1116,7 @@ pub trait WriteOps: ReadOps {
             WriteRequestOptions {
                 valid_from,
                 provenance: None,
+                namespace: None,
             },
         )
     }
@@ -1008,6 +1246,7 @@ pub trait WriteOps: ReadOps {
             WriteRequestOptions {
                 valid_from,
                 provenance: None,
+                namespace: None,
             },
         )
     }
@@ -1051,6 +1290,129 @@ pub trait WriteOps: ReadOps {
     fn delete_edge(&mut self, edge_id: EdgeId) -> Result<()> {
         self.delete_edge_with_valid_time(edge_id, None)
     }
+
+    // ===== Replace / tombstone (non-PATCH) writes (Issue #3549) =====
+
+    /// Replace a node's **entire** property map and label (non-PATCH overwrite).
+    ///
+    /// Unlike [`update_node`](Self::update_node) (PATCH: merges the incoming map
+    /// onto the existing one), this performs a full overwrite: the node's
+    /// resulting property map is *exactly* `properties`, and its label becomes
+    /// `label`. Any key present on the prior version but absent from
+    /// `properties` is **removed** from current state — its history is
+    /// preserved and still recallable `AS OF` an earlier bi-temporal coordinate
+    /// (anchor *both* dimensions before the replace). Passing an empty map
+    /// removes all properties while keeping the node in existence.
+    ///
+    /// Node label mutation is only possible through this method;
+    /// [`update_node`](Self::update_node) preserves the label.
+    ///
+    /// This is the most general node-replace method; the other `replace_node*`
+    /// methods delegate to it. The provenance recorded here describes *this*
+    /// version only — it is not inherited from the version being replaced.
+    fn replace_node_with_options(
+        &mut self,
+        node_id: NodeId,
+        label: &str,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<()>;
+
+    /// Replace a node's entire property map and label with an optional backdated
+    /// `valid_from` time. See [`replace_node_with_options`](Self::replace_node_with_options).
+    fn replace_node_with_valid_time(
+        &mut self,
+        node_id: NodeId,
+        label: &str,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        self.replace_node_with_options(
+            node_id,
+            label,
+            properties,
+            WriteRequestOptions {
+                valid_from,
+                provenance: None,
+                namespace: None,
+            },
+        )
+    }
+
+    /// Replace a node's entire property map and label (full overwrite).
+    ///
+    /// Convenience wrapper: `valid_from` defaults to the transaction start time.
+    /// See [`replace_node_with_options`](Self::replace_node_with_options).
+    fn replace_node(
+        &mut self,
+        node_id: NodeId,
+        label: &str,
+        properties: PropertyMap,
+    ) -> Result<()> {
+        self.replace_node_with_valid_time(node_id, label, properties, None)
+    }
+
+    /// Replace an edge's **entire** property map (non-PATCH overwrite).
+    ///
+    /// Overwrites the property map exactly, like
+    /// [`replace_node_with_options`](Self::replace_node_with_options), but the
+    /// edge's `source`, `target`, and edge type (label) are **immutable** and
+    /// preserved from the existing edge (edge-type mutation is out of scope).
+    /// Any key absent from `properties` is removed from current state; history
+    /// is preserved. Passing an empty map removes all properties.
+    ///
+    /// This is the most general edge-replace method; the other `replace_edge*`
+    /// methods delegate to it.
+    fn replace_edge_with_options(
+        &mut self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<()>;
+
+    /// Replace an edge's entire property map with an optional backdated
+    /// `valid_from` time. See [`replace_edge_with_options`](Self::replace_edge_with_options).
+    fn replace_edge_with_valid_time(
+        &mut self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        self.replace_edge_with_options(
+            edge_id,
+            properties,
+            WriteRequestOptions {
+                valid_from,
+                provenance: None,
+                namespace: None,
+            },
+        )
+    }
+
+    /// Replace an edge's entire property map (full overwrite; endpoints/type
+    /// immutable). Convenience wrapper: `valid_from` defaults to the
+    /// transaction start time. See
+    /// [`replace_edge_with_options`](Self::replace_edge_with_options).
+    fn replace_edge(&mut self, edge_id: EdgeId, properties: PropertyMap) -> Result<()> {
+        self.replace_edge_with_valid_time(edge_id, properties, None)
+    }
+
+    /// Remove a single property key from a node (read-modify-replace).
+    ///
+    /// Reads the node's current property map (read-your-own-writes within the
+    /// transaction), drops `key`, and records a full replacement version with
+    /// the reduced map and the node's existing label. Removing a key that is
+    /// **absent** is a no-op that still succeeds and records **no** new version.
+    /// History is preserved: the removed key is still recallable `AS OF` an
+    /// earlier bi-temporal coordinate.
+    fn remove_node_property(&mut self, node_id: NodeId, key: &str) -> Result<()>;
+
+    /// Remove a single property key from an edge (read-modify-replace).
+    ///
+    /// Edge counterpart of [`remove_node_property`](Self::remove_node_property);
+    /// the edge's endpoints and type are preserved. Removing an absent key is a
+    /// no-op success that records no new version.
+    fn remove_edge_property(&mut self, edge_id: EdgeId, key: &str) -> Result<()>;
 }
 
 #[cfg(test)]

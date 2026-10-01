@@ -1,5 +1,6 @@
 //! Graph index persistence.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -9,14 +10,16 @@ use crc32fast::Hasher;
 use crate::core::GLOBAL_INTERNER;
 use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::storage::compression::decompress_with_limit;
 
+#[cfg(not(target_arch = "wasm32"))]
+use super::DELTA_MAGIC;
 use super::error::{IndexPersistenceError, Result};
-use super::formats::{
-    GraphIndexData, GraphIndexDelta, PersistedEdge, PersistedNode, PersistedPropertyMap,
-    PersistedPropertyValue,
-};
-use super::{DELTA_MAGIC, GRAPH_MAGIC, MANIFEST_VERSION};
+use super::formats::{GraphIndexData, PersistedPropertyMap, PersistedPropertyValue};
+#[cfg(not(target_arch = "wasm32"))]
+use super::formats::{GraphIndexDelta, PersistedEdge, PersistedNode};
+use super::{GRAPH_MAGIC, MANIFEST_VERSION};
 use crate::encryption::cipher::Cipher;
 
 /// Write a fully-built plaintext graph-file buffer to disk, encrypting the
@@ -41,6 +44,7 @@ fn write_graph_buffer_maybe_encrypted(
 /// Write a graph-file buffer, encrypting with the current generation of an
 /// [`IndexKeyring`](super::common::IndexKeyring) and stamping its `key_version`
 /// (Issue #488 key rotation). A `None` keyring writes plaintext.
+#[cfg(not(target_arch = "wasm32"))]
 fn write_graph_buffer_with_keyring(
     path: &Path,
     plaintext: &[u8],
@@ -58,6 +62,7 @@ fn write_graph_buffer_with_keyring(
 
 /// Map decompression errors to `IndexPersistenceError`, preserving the
 /// specific `SizeLimitExceeded` variant for capacity violations.
+#[cfg(not(target_arch = "wasm32"))]
 fn map_decompress_error(e: crate::core::error::Error) -> IndexPersistenceError {
     match e {
         crate::core::error::Error::Storage(
@@ -87,7 +92,23 @@ pub fn persist_property_value(value: &PropertyValue) -> Result<PersistedProperty
         PropertyValue::Float(f) => PersistedPropertyValue::Float(*f),
         PropertyValue::String(s) => {
             let interned = GLOBAL_INTERNER.intern(s.as_ref()).map_err(|e| {
-                IndexPersistenceError::Serialization(format!("Failed to intern string: {}", e))
+                // Preserve a STRUCTURED interner-capacity signal (configurable
+                // interner cap) so the background-persist worker suspends the
+                // affected index deterministically instead of scraping Display
+                // text. A capacity exhaustion here is exactly the "egregore hang"
+                // trigger: high-cardinality property VALUES interned lazily at
+                // persist time. Any other intern error keeps the generic wrap.
+                match e {
+                    crate::core::error::Error::Storage(
+                        crate::core::error::StorageError::CapacityExceeded {
+                            current, limit, ..
+                        },
+                    ) => IndexPersistenceError::InternerCapacityExceeded { current, limit },
+                    other => IndexPersistenceError::Serialization(format!(
+                        "Failed to intern string: {}",
+                        other
+                    )),
+                }
             })?;
             PersistedPropertyValue::String(interned.as_u32())
         }
@@ -184,15 +205,22 @@ pub fn restore_property_map(persisted: &PersistedPropertyMap) -> Result<Property
     for (key_idx, value) in &persisted.entries {
         let key_id = crate::core::InternedString::from_raw(*key_idx);
         let val = restore_property_value(value)?;
-        builder = GLOBAL_INTERNER
-            .resolve_with(key_id, |key_str| builder.insert(key_str, val))
-            .ok_or_else(|| {
-                IndexPersistenceError::Serialization(format!(
-                    "Failed to resolve interned property key with ID: {}. \
+        // Resolve the key to an owned Arc<str> BEFORE inserting it into the
+        // builder. `resolve_with` runs its closure while holding a DashMap shard
+        // read-guard on the interner; calling `builder.insert` (which re-interns
+        // the key) inside that closure re-enters the interner on the same shard
+        // and can self-deadlock under concurrent writers (shard reader/writer
+        // starvation — a restore racing another thread's fresh intern). Cloning
+        // the Arc via `resolve` releases the guard before the re-intern.
+        #[allow(deprecated)]
+        let key_str = GLOBAL_INTERNER.resolve(key_id).ok_or_else(|| {
+            IndexPersistenceError::Serialization(format!(
+                "Failed to resolve interned property key with ID: {}. \
                  This likely indicates data corruption.",
-                    key_idx
-                ))
-            })?;
+                key_idx
+            ))
+        })?;
+        builder = builder.insert(key_str.as_ref(), val);
     }
     Ok(builder.build())
 }
@@ -201,6 +229,7 @@ pub fn restore_property_map(persisted: &PersistedPropertyMap) -> Result<Property
 ///
 /// Shared by the checkpoint and backup code paths so the conversion logic
 /// lives in one place.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn extract_graph_data_from_snapshot(
     snapshot: &crate::storage::snapshot::CurrentStorageSnapshot,
 ) -> Result<GraphIndexData> {
@@ -283,6 +312,7 @@ pub fn save_graph_index_with_cipher(
 
 /// Save graph index data (uncompressed), encrypting with an
 /// [`IndexKeyring`](super::common::IndexKeyring) (Issue #488 key rotation).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn save_graph_index_with_keyring(
     data: &GraphIndexData,
     path: &Path,
@@ -295,6 +325,7 @@ pub(crate) fn save_graph_index_with_keyring(
 /// Load graph index data from disk and validate CRC32 checksum.
 ///
 /// Automatically detects zstd compression by checking for magic bytes.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
     load_graph_index_with_cipher(path, None)
 }
@@ -305,6 +336,7 @@ pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
 /// Shared by the buffered and memory-mapped read paths so the exact
 /// zstd-detect + CRC + decode logic is applied identically to a plaintext file
 /// and to the decrypted contents of an encrypted one.
+#[cfg(not(target_arch = "wasm32"))]
 fn decode_graph_bytes(buffer: &[u8], path: &Path) -> Result<GraphIndexData> {
     // Check minimum size (must have at least 4 bytes for CRC)
     if buffer.len() < 4 {
@@ -380,6 +412,7 @@ fn decode_graph_bytes(buffer: &[u8], path: &Path) -> Result<GraphIndexData> {
 ///
 /// Same as [`load_graph_index`], plus a structured error if the file is
 /// encrypted but no cipher is supplied or decryption fails.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_graph_index_with_cipher(
     path: &Path,
     cipher: Option<&Arc<dyn Cipher>>,
@@ -396,6 +429,7 @@ pub fn load_graph_index_with_cipher(
 /// Load graph index data, decrypting via an
 /// [`IndexKeyring`](super::common::IndexKeyring) that dispatches on the header
 /// `key_version` (Issue #488 key rotation).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn load_graph_index_with_keyring(
     path: &Path,
     keyring: Option<&super::common::IndexKeyring>,
@@ -438,6 +472,7 @@ pub fn new_graph_index_data() -> GraphIndexData {
 /// # Errors
 ///
 /// Returns an error if serialization, compression, or file write fails.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_graph_index_compressed(
     data: &GraphIndexData,
     path: &Path,
@@ -448,6 +483,7 @@ pub fn save_graph_index_compressed(
 
 /// Build the compressed plaintext graph-file buffer: `[zstd][crc32]` where the
 /// CRC32 is computed over the *uncompressed* bitcode (matching the read path).
+#[cfg(not(target_arch = "wasm32"))]
 fn build_graph_plaintext_compressed(
     data: &GraphIndexData,
     compression_level: i32,
@@ -480,6 +516,7 @@ fn build_graph_plaintext_compressed(
 ///
 /// Returns an error if serialization, compression, encryption, or file write
 /// fails.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_graph_index_compressed_with_cipher(
     data: &GraphIndexData,
     path: &Path,
@@ -492,6 +529,7 @@ pub fn save_graph_index_compressed_with_cipher(
 
 /// Save graph index data (zstd-compressed), encrypting with an
 /// [`IndexKeyring`](super::common::IndexKeyring) (Issue #488 key rotation).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn save_graph_index_compressed_with_keyring(
     data: &GraphIndexData,
     path: &Path,
@@ -528,6 +566,7 @@ pub(crate) fn save_graph_index_compressed_with_keyring(
 ///
 /// let data = load_graph_index_mmap(&path)?;
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_graph_index_mmap(path: &Path) -> Result<GraphIndexData> {
     load_graph_index_mmap_with_cipher(path, None)
 }
@@ -540,6 +579,7 @@ pub fn load_graph_index_mmap(path: &Path) -> Result<GraphIndexData> {
 /// falls back to a buffered read + decrypt + decode via
 /// [`load_graph_index_with_cipher`]. A legacy plaintext file takes the true
 /// mmap path unchanged.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_graph_index_mmap_with_cipher(
     path: &Path,
     cipher: Option<&Arc<dyn Cipher>>,
@@ -577,6 +617,7 @@ pub fn load_graph_index_mmap_with_cipher(
 }
 
 /// The original plaintext memory-mapped load path.
+#[cfg(not(target_arch = "wasm32"))]
 fn load_graph_index_mmap_plaintext(path: &Path) -> Result<GraphIndexData> {
     use memmap2::Mmap;
     use std::fs::File;
@@ -695,6 +736,7 @@ fn load_graph_index_mmap_plaintext(path: &Path) -> Result<GraphIndexData> {
 /// // Save only the delta (additions, modifications, deletions)
 /// save_graph_index_delta(&base_data, &modified_data, &delta_path, 3)?;
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_graph_index_delta(
     base: &GraphIndexData,
     modified: &GraphIndexData,
@@ -838,6 +880,7 @@ pub fn save_graph_index_delta(
 ///
 /// let reconstructed_data = load_graph_index_with_delta(&base_path, &delta_path, None)?;
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_graph_index_with_delta(
     base_path: &Path,
     delta_path: &Path,

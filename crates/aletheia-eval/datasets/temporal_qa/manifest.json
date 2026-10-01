@@ -1,0 +1,25 @@
+{
+  "name": "temporal_qa",
+  "version": "1.0.0",
+  "license": "CC0-1.0",
+  "license_note": "Public-domain synthetic data authored for this harness. No real persons or organizations; names are fictional.",
+  "format": "AletheiaDB eval dataset JSON (see crates/aletheia-eval/src/dataset.rs)",
+  "description": "Bi-temporal CEO-succession QA. Five fictional companies, each with three CEO tenures across three valid-time eras; each tenure node's valid interval is closed by retraction at the era boundary. Questions are anchored to a valid time and require reconstructing the CEO valid at that anchor.",
+  "size": {
+    "entities": 20,
+    "companies": 5,
+    "tenures": 15,
+    "updates": 0,
+    "edges": 0,
+    "questions": 15,
+    "temporal_questions": 15,
+    "note": "5 indexed Company nodes (vector-retrievable) + 15 Tenure fact nodes (5x3 eras); 10 retractions close the non-current eras."
+  },
+  "probes": [
+    "temporal_accuracy",
+    "citation_validity",
+    "precision_at_k",
+    "recall_at_k"
+  ],
+  "headline": "Temporally-anchored retrieval scores >= 25 percentage points higher temporal accuracy than the vector-only baseline."
+}

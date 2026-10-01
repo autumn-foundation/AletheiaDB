@@ -10,12 +10,17 @@
 //! - Reconstruction walks backward to nearest anchor and applies deltas forward
 //! - TinyLFU cache reduces redundant delta chain traversals for concurrent reads
 
-use crate::core::changefeed::{EntityKind, RawChange, build_raw_change};
+use crate::core::changefeed::{
+    BoundedChanges, ChangeCursor, EntityKind, RawChange, build_raw_change, consider_version,
+};
 use crate::core::error::{Result, StorageError, TemporalError};
 use crate::core::graph::{Edge, Node};
 use crate::core::history::{EntityHistory, VersionDiff, VersionInfo};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
+use crate::core::namespace::{
+    NamespaceId, intern_namespace, namespace_of, unresolved_namespace_id,
+};
 use crate::core::observer::{Observer, StorageEvent, notify_observers};
 use crate::core::property::PropertyMap;
 use crate::core::provenance::Provenance;
@@ -33,10 +38,12 @@ use std::time::Duration;
 use tracing;
 
 mod hooks;
+mod slices;
 mod snapshot_policy;
 
 use hooks::{AnchorHookContext, HookMetrics};
 pub use hooks::{HookMetricsSnapshot, PreAnchorHook};
+pub(crate) use slices::UpdatePlan;
 pub use snapshot_policy::SnapshotPolicy;
 use snapshot_policy::SnapshotPolicyRegistry;
 
@@ -155,6 +162,24 @@ pub struct HistoricalStorage {
     node_version_counts: FastHashMap<NodeId, usize>,
     /// Cached version counts per edge (for O(1) capacity checks).
     edge_version_counts: FastHashMap<EdgeId, usize>,
+    /// Still-recorded valid-time *slices* of each node that are NOT its head.
+    ///
+    /// A slice is a non-empty-valid-interval version whose transaction time is
+    /// still open: the database's current belief about the node over that
+    /// valid range. An update that supersedes a version at a later valid time
+    /// appends a carry-forward slice for the uncovered prefix, so a live node's
+    /// current belief is the head plus these slices, which together partition
+    /// valid time (see `slices.rs`). Indexed so that delete and backfill find
+    /// every slice in O(slices) without walking a chain that may run through
+    /// the cold tier. Rebuilt by [`rebuild_version_chains`](Self::rebuild_version_chains).
+    node_open_slices: FastHashMap<NodeId, Vec<VersionId>>,
+    /// Edge counterpart of [`node_open_slices`](Self::node_open_slices).
+    edge_open_slices: FastHashMap<EdgeId, Vec<VersionId>>,
+    /// Hot structural (ADR-0061) versions per node, so the per-entity version
+    /// cap counts only logical versions (writes).
+    node_structural_counts: FastHashMap<NodeId, usize>,
+    /// Edge counterpart of [`node_structural_counts`](Self::node_structural_counts).
+    edge_structural_counts: FastHashMap<EdgeId, usize>,
     /// Versions since last anchor per node (for O(1) anchor interval checks).
     /// Avoids walking the version chain on every add operation.
     node_versions_since_anchor: FastHashMap<NodeId, usize>,
@@ -250,6 +275,10 @@ pub struct HistoricalStorage {
     ///
     /// When configured, versions not found in hot storage will be looked up
     /// from cold storage via the tiered storage layer.
+    ///
+    /// The cold/tiered subsystem (redb-backed) is unavailable on `wasm32`, so
+    /// this field is elided there — the wasm profile is hot-only.
+    #[cfg(not(target_arch = "wasm32"))]
     tiered_storage: Option<Arc<super::tiered_storage::TieredStorage>>,
     /// Temporal indexes for O(log n) version lookups (Issue #209).
     ///
@@ -369,6 +398,10 @@ impl HistoricalStorage {
             edge_versions_since_anchor: FastHashMap::default(),
             cached_node_anchor_count: 0,
             cached_node_delta_count: 0,
+            node_open_slices: FastHashMap::default(),
+            edge_open_slices: FastHashMap::default(),
+            node_structural_counts: FastHashMap::default(),
+            edge_structural_counts: FastHashMap::default(),
             cached_edge_anchor_count: 0,
             cached_edge_delta_count: 0,
             node_property_cache: Arc::new(Cache::new(cache_size)),
@@ -385,6 +418,7 @@ impl HistoricalStorage {
             hook_metrics: HookMetrics::default(),
             node_snapshot_policies: SnapshotPolicyRegistry::default(),
             edge_snapshot_policies: SnapshotPolicyRegistry::default(),
+            #[cfg(not(target_arch = "wasm32"))]
             tiered_storage: None,
             temporal_indexes: None,
             temporal_adjacency_index: None,
@@ -821,9 +855,15 @@ impl HistoricalStorage {
         properties: PropertyMap,
         provenance: Option<Arc<Provenance>>,
     ) -> Result<()> {
-        // Check capacity limit using cached count (O(1) operation, DoS protection)
-        let version_count = self.node_version_counts.get(&node_id).copied().unwrap_or(0);
-        if version_count >= self.retention_policy.max_versions_per_entity {
+        // Check capacity limit using cached count (O(1) operation, DoS protection).
+        // The cap bounds LOGICAL versions (writes): structural versions
+        // (ADR-0061) are exempt — each write appends at most two of them, so
+        // memory stays bounded by a constant factor of the cap, and an update
+        // must not halve the entity's write headroom.
+        let version_count = self.node_logical_version_count(node_id);
+        if !version_id.is_structural()
+            && version_count >= self.retention_policy.max_versions_per_entity
+        {
             return Err(StorageError::CapacityExceeded {
                 resource: format!("node {} versions", node_id),
                 current: version_count,
@@ -943,6 +983,13 @@ impl HistoricalStorage {
             }
         }
 
+        // The superseded head stops being the head; if it is still a recorded
+        // valid-time slice (a same-transaction predecessor of a structural
+        // carry-forward), track it as an open slice.
+        if let Some(prev_id) = prev_version_id {
+            self.track_node_slice_if_open(node_id, prev_id);
+        }
+
         // Check if anchor before storing (for notifications and caching)
         let is_anchor = version.is_anchor();
 
@@ -950,6 +997,9 @@ impl HistoricalStorage {
         self.node_versions.insert(version_id, version);
         self.node_version_heads.insert(node_id, version_id);
         *self.node_version_counts.entry(node_id).or_insert(0) += 1;
+        if version_id.is_structural() {
+            *self.node_structural_counts.entry(node_id).or_insert(0) += 1;
+        }
 
         // Issue #212: Update cached stats counters for O(1) stats() retrieval
         if is_anchor {
@@ -1149,9 +1199,15 @@ impl HistoricalStorage {
         is_tombstone: bool,
         provenance: Option<Arc<Provenance>>,
     ) -> Result<()> {
-        // Check capacity limit using cached count (O(1) operation, DoS protection)
-        let version_count = self.edge_version_counts.get(&edge_id).copied().unwrap_or(0);
-        if version_count >= self.retention_policy.max_versions_per_entity {
+        // Check capacity limit using cached count (O(1) operation, DoS protection).
+        // The cap bounds LOGICAL versions (writes): structural versions
+        // (ADR-0061) are exempt — each write appends at most two of them, so
+        // memory stays bounded by a constant factor of the cap, and an update
+        // must not halve the entity's write headroom.
+        let version_count = self.edge_logical_version_count(edge_id);
+        if !version_id.is_structural()
+            && version_count >= self.retention_policy.max_versions_per_entity
+        {
             return Err(StorageError::CapacityExceeded {
                 resource: format!("edge {} versions", edge_id),
                 current: version_count,
@@ -1291,14 +1347,21 @@ impl HistoricalStorage {
             if let Some(ref adj_index) = self.temporal_adjacency_index {
                 let new_temporal = *prev.temporal();
                 if old_temporal.transaction_time().end() != new_temporal.transaction_time().end() {
-                    adj_index.close_edge_transaction_time(
+                    adj_index.close_edge_transaction_time_of(
                         edge_id,
                         source,
                         target,
+                        old_temporal.valid_time().start(),
+                        old_temporal.transaction_time().start(),
                         new_temporal.transaction_time().end(),
                     );
                 }
             }
+        }
+
+        // See the node path: keep a still-recorded superseded head tracked.
+        if let Some(prev_id) = prev_version_id {
+            self.track_edge_slice_if_open(edge_id, prev_id);
         }
 
         // Check if anchor before storing (for notifications and caching)
@@ -1308,6 +1371,9 @@ impl HistoricalStorage {
         self.edge_versions.insert(version_id, version);
         self.edge_version_heads.insert(edge_id, version_id);
         *self.edge_version_counts.entry(edge_id).or_insert(0) += 1;
+        if version_id.is_structural() {
+            *self.edge_structural_counts.entry(edge_id).or_insert(0) += 1;
+        }
 
         // Issue #212: Update cached stats counters for O(1) stats() retrieval
         if is_anchor {
@@ -1454,9 +1520,14 @@ impl HistoricalStorage {
     /// * `Err(TemporalError::MissingAnchor)` - An ancestor in the chain was removed
     /// * `Err(TemporalError::CorruptedVersionChain)` - Invalid chain structure
     fn reconstruct_node_properties_iterative(&self, version_id: VersionId) -> Result<PropertyMap> {
-        // Collect version IDs backwards from target to anchor
+        // Collect versions backwards from target to anchor. Each fetched
+        // `Arc<NodeVersion>` is cached here (not just its id) so the
+        // forward-apply pass below reuses it directly instead of re-fetching
+        // -- and re-cloning the full NodeVersion, PropertyDelta hashmaps
+        // included, out of hot storage -- every version in the chain a
+        // second time.
         // Pre-allocate with anchor_interval capacity to avoid reallocations
-        let mut version_ids: Vec<VersionId> =
+        let mut versions: Vec<Arc<NodeVersion>> =
             Vec::with_capacity(self.config.anchor_interval as usize);
         let mut current_id = version_id;
         let mut chain_length = 0;
@@ -1485,11 +1556,10 @@ impl HistoricalStorage {
             let version = match self.get_node_version_any_tier(current_id) {
                 Ok(v) => v,
                 Err(crate::core::error::Error::Storage(StorageError::VersionNotFound(_)))
-                    if !version_ids.is_empty() =>
+                    if !versions.is_empty() =>
                 {
-                    let entity_id = version_ids
+                    let entity_id = versions
                         .first()
-                        .and_then(|&vid| self.get_node_version_any_tier(vid).ok())
                         .map(|v| v.node_id.to_string())
                         .unwrap_or_else(|| format!("version {}", version_id));
                     return Err(TemporalError::MissingAnchor { entity_id }.into());
@@ -1499,9 +1569,10 @@ impl HistoricalStorage {
 
             let is_anchor = version.is_anchor();
             let prev_id = version.prev_version;
+            let node_id = version.node_id;
 
-            // Store version ID (we'll process these in reverse)
-            version_ids.push(current_id);
+            // Store the fetched version (we'll process these in reverse)
+            versions.push(version);
 
             // If we found an anchor, we're done collecting
             if is_anchor {
@@ -1510,25 +1581,23 @@ impl HistoricalStorage {
 
             // Get previous version for delta chain traversal
             current_id = prev_id.ok_or_else(|| TemporalError::CorruptedVersionChain {
-                entity_id: version.node_id.to_string(),
+                entity_id: node_id.to_string(),
                 reason: "Delta version has no previous version".to_string(),
             })?;
 
             chain_length += 1;
         }
 
-        // Now reconstruct properties by applying deltas in forward order
-        // The last element in version_ids is the anchor (base state)
-        let anchor_id =
-            version_ids
+        // Now reconstruct properties by applying deltas in forward order.
+        // The last element in `versions` is the anchor (base state) --
+        // already fetched above, no need to fetch it again.
+        let anchor_version =
+            versions
                 .last()
-                .copied()
                 .ok_or_else(|| TemporalError::CorruptedVersionChain {
                     entity_id: format!("version {}", version_id),
                     reason: "Empty version chain during reconstruction".to_string(),
                 })?;
-
-        let anchor_version = self.get_node_version_any_tier(anchor_id)?;
 
         let mut properties = match &anchor_version.data {
             VersionData::Anchor { properties, .. } => properties.clone(),
@@ -1544,9 +1613,7 @@ impl HistoricalStorage {
 
         // Apply deltas in forward order (reverse of collection order)
         // Skip the last element (anchor) since we already have its properties
-        for &vid in version_ids.iter().rev().skip(1) {
-            let version = self.get_node_version_any_tier(vid)?;
-
+        for version in versions.iter().rev().skip(1) {
             match &version.data {
                 VersionData::Delta { delta } => {
                     properties = delta.apply(&properties);
@@ -1570,9 +1637,12 @@ impl HistoricalStorage {
     /// Mirrors the node reconstruction algorithm for consistency. See
     /// `reconstruct_node_properties_iterative` for algorithm details.
     fn reconstruct_edge_properties_iterative(&self, version_id: VersionId) -> Result<PropertyMap> {
-        // Collect version IDs backwards from target to anchor
+        // Collect versions backwards from target to anchor, caching each
+        // fetched `Arc<EdgeVersion>` so the forward-apply pass below reuses
+        // it instead of re-fetching (and re-cloning) every version in the
+        // chain a second time. See `reconstruct_node_properties_iterative`.
         // Pre-allocate with anchor_interval capacity to avoid reallocations
-        let mut version_ids: Vec<VersionId> =
+        let mut versions: Vec<Arc<EdgeVersion>> =
             Vec::with_capacity(self.config.anchor_interval as usize);
         let mut current_id = version_id;
         let mut chain_length = 0;
@@ -1599,11 +1669,10 @@ impl HistoricalStorage {
             let version = match self.get_edge_version_any_tier(current_id) {
                 Ok(v) => v,
                 Err(crate::core::error::Error::Storage(StorageError::VersionNotFound(_)))
-                    if !version_ids.is_empty() =>
+                    if !versions.is_empty() =>
                 {
-                    let entity_id = version_ids
+                    let entity_id = versions
                         .first()
-                        .and_then(|&vid| self.get_edge_version_any_tier(vid).ok())
                         .map(|v| v.edge_id.to_string())
                         .unwrap_or_else(|| format!("version {}", version_id));
                     return Err(TemporalError::MissingAnchor { entity_id }.into());
@@ -1613,9 +1682,10 @@ impl HistoricalStorage {
 
             let is_anchor = version.is_anchor();
             let prev_id = version.prev_version;
+            let edge_id = version.edge_id;
 
-            // Store version ID (we'll process these in reverse)
-            version_ids.push(current_id);
+            // Store the fetched version (we'll process these in reverse)
+            versions.push(version);
 
             // If we found an anchor, we're done collecting
             if is_anchor {
@@ -1624,25 +1694,23 @@ impl HistoricalStorage {
 
             // Get previous version for delta chain traversal
             current_id = prev_id.ok_or_else(|| TemporalError::CorruptedVersionChain {
-                entity_id: version.edge_id.to_string(),
+                entity_id: edge_id.to_string(),
                 reason: "Delta version has no previous version".to_string(),
             })?;
 
             chain_length += 1;
         }
 
-        // Now reconstruct properties by applying deltas in forward order
-        // The last element in version_ids is the anchor (base state)
-        let anchor_id =
-            version_ids
+        // Now reconstruct properties by applying deltas in forward order.
+        // The last element in `versions` is the anchor (base state) --
+        // already fetched above, no need to fetch it again.
+        let anchor_version =
+            versions
                 .last()
-                .copied()
                 .ok_or_else(|| TemporalError::CorruptedVersionChain {
                     entity_id: format!("version {}", version_id),
                     reason: "Empty version chain during reconstruction".to_string(),
                 })?;
-
-        let anchor_version = self.get_edge_version_any_tier(anchor_id)?;
 
         let mut properties = match &anchor_version.data {
             VersionData::Anchor { properties, .. } => properties.clone(),
@@ -1658,9 +1726,7 @@ impl HistoricalStorage {
 
         // Apply deltas in forward order (reverse of collection order)
         // Skip the last element (anchor) since we already have its properties
-        for &vid in version_ids.iter().rev().skip(1) {
-            let version = self.get_edge_version_any_tier(vid)?;
-
+        for version in versions.iter().rev().skip(1) {
             match &version.data {
                 VersionData::Delta { delta } => {
                     properties = delta.apply(&properties);
@@ -1989,35 +2055,43 @@ impl HistoricalStorage {
         }
     }
 
-    /// Collect changefeed records for every committed version that falls within the given
-    /// transaction-time window, optionally constrained by a valid-time window and/or a
-    /// node-label / edge-type filter (Issue #3216).
+    /// Collect changefeed records for the committed versions that fall within the given
+    /// transaction-time window, optionally constrained by a valid-time window, a node-label /
+    /// edge-type filter, a resume cursor, and a `bound` on how many smallest-cursor rows to
+    /// retain (Issue #3216; filter + limit pushdown, PR 2).
     ///
     /// This is a read-only scan over the in-memory version maps. Only committed versions are
     /// ever present in these maps (versions are inserted on the commit-apply path), so the
-    /// changefeed never surfaces uncommitted or rolled-back data. The result is unordered and
-    /// unpaginated; the caller is responsible for deterministic ordering and cursor/limit
-    /// pagination.
+    /// changefeed never surfaces uncommitted or rolled-back data. The result is unordered; the
+    /// caller is responsible for deterministic ordering and final page selection.
+    ///
+    /// The `resume_after` cursor (strict `> cursor`) and the `bound` are applied **during** the
+    /// scan via [`BoundedChanges`], so the working set held in memory is `O(bound)` rather than
+    /// `O(matches)` — no post-collection materialize-then-refilter. Pass `usize::MAX` as `bound`
+    /// (and `None` as `resume_after`) to recover an unbounded, unresumed collection.
     ///
     /// # Performance
     ///
-    /// This is an O(V) scan of all node and edge versions in the **hot** maps. It is adequate
-    /// for the bounded windows this API targets; a future optimization could maintain a
-    /// transaction-time index keyed by `(commit_timestamp, kind, id)` to make this
-    /// O(log V + page). To keep the historical lock hold short, this produces lightweight
-    /// [`RawChange`]s (no owned label `String`); label resolution is deferred to the query
-    /// layer for surviving rows only. Cold-tier versions are scanned separately by the caller
-    /// after the lock is released (see `tiered_storage_arc`).
+    /// The candidate enumeration is still an O(V) walk of the hot maps (a future
+    /// `(commit_timestamp, kind, id)` index could make this O(log V + page)), but only the
+    /// `bound`-smallest survivors are retained. To keep the historical lock hold short, this
+    /// produces lightweight [`RawChange`]s (no owned label `String`); label resolution is
+    /// deferred to the query layer for surviving rows only. Cold-tier versions are scanned
+    /// separately by the caller after the lock is released (see `tiered_storage_arc`).
     pub(crate) fn collect_changes(
         &self,
         tx_window: &TimeRange,
         valid_window: Option<&TimeRange>,
         label_filter: Option<&str>,
+        resume_after: Option<ChangeCursor>,
+        bound: usize,
     ) -> Vec<RawChange> {
-        let mut out = Vec::new();
+        let mut acc = BoundedChanges::new(bound);
 
         for v in self.node_versions.values() {
-            if let Some(rec) = build_raw_change(
+            consider_version(
+                &mut acc,
+                resume_after,
                 v.id.as_u64(),
                 v.node_id.as_u64(),
                 EntityKind::Node,
@@ -2027,13 +2101,16 @@ impl HistoricalStorage {
                 tx_window,
                 valid_window,
                 label_filter,
-            ) {
-                out.push(rec);
-            }
+                // Lazy (Issue #3349, PR3c): derived only for a candidate that
+                // passed the cheap tx/valid/label filters.
+                || self.node_version_namespace_id(v),
+            );
         }
 
         for v in self.edge_versions.values() {
-            if let Some(rec) = build_raw_change(
+            consider_version(
+                &mut acc,
+                resume_after,
                 v.id.as_u64(),
                 v.edge_id.as_u64(),
                 EntityKind::Edge,
@@ -2043,8 +2120,185 @@ impl HistoricalStorage {
                 tx_window,
                 valid_window,
                 label_filter,
-            ) {
-                out.push(rec);
+                || self.edge_version_namespace_id(v),
+            );
+        }
+
+        acc.into_vec()
+    }
+
+    /// Derive the interned [`NamespaceId`] of a node version (Issue #3349, PR3c).
+    ///
+    /// The namespace is immutable and rides along the property map under
+    /// [`crate::core::namespace::NAMESPACE_KEY`], stamped on every anchor. An
+    /// anchor carries it directly (cheap, no walk); a delta does not (the
+    /// immutable key never diffs), so it is recovered by reconstructing the
+    /// version's properties (cached, and correct across the anchor chain / cold
+    /// tier). A legacy / `default` entity has no key and resolves to the default
+    /// namespace.
+    ///
+    /// # Fail-closed on reconstruction failure (Issue #3349, PR3c security fix)
+    ///
+    /// If reconstructing a delta's properties hard-fails (a delta chain deeper
+    /// than `max_reconstruction_depth` → `MaxDepthExceeded`, or a `MissingAnchor`),
+    /// the namespace **cannot** be derived. It is stamped with the reserved
+    /// [`crate::core::namespace::UNRESOLVED_NAMESPACE`] sentinel — **never**
+    /// [`Namespace::default`](crate::core::namespace::Namespace::default): failing
+    /// open to `default` (a real, subscribable namespace) would leak a non-default
+    /// entity's change to `default`-scoped subscribers and hide it from its own
+    /// namespace. The sentinel matches no user scope, so the change is withheld
+    /// from every user-scoped read while still surfacing under an `All` / unset
+    /// scope.
+    fn node_version_namespace_id(&self, v: &NodeVersion) -> NamespaceId {
+        match &v.data {
+            VersionData::Anchor { properties, .. } => intern_namespace(&namespace_of(properties)),
+            VersionData::Delta { .. } => match self.reconstruct_node_properties(v.id) {
+                Ok(p) => intern_namespace(&namespace_of(&p)),
+                Err(e) => {
+                    eprintln!(
+                        "Warning: changefeed namespace derivation failed for node version {} \
+                         ({e}); record scoped to the reserved '{}' namespace (fail-closed)",
+                        v.id,
+                        crate::core::namespace::UNRESOLVED_NAMESPACE
+                    );
+                    unresolved_namespace_id()
+                }
+            },
+        }
+    }
+
+    /// Edge counterpart of [`node_version_namespace_id`](Self::node_version_namespace_id).
+    /// Fail-closes to the [`crate::core::namespace::UNRESOLVED_NAMESPACE`] sentinel
+    /// on a reconstruction hard-failure (see that method).
+    fn edge_version_namespace_id(&self, v: &EdgeVersion) -> NamespaceId {
+        match &v.data {
+            VersionData::Anchor { properties, .. } => intern_namespace(&namespace_of(properties)),
+            VersionData::Delta { .. } => match self.reconstruct_edge_properties(v.id) {
+                Ok(p) => intern_namespace(&namespace_of(&p)),
+                Err(e) => {
+                    eprintln!(
+                        "Warning: changefeed namespace derivation failed for edge version {} \
+                         ({e}); record scoped to the reserved '{}' namespace (fail-closed)",
+                        v.id,
+                        crate::core::namespace::UNRESOLVED_NAMESPACE
+                    );
+                    unresolved_namespace_id()
+                }
+            },
+        }
+    }
+
+    /// Re-derive the namespace of any changefeed [`RawChange`]s left **unresolved**
+    /// (stamped with the [`crate::core::namespace::UNRESOLVED_NAMESPACE`] sentinel)
+    /// by a fast-path derivation, using tier-aware reconstruction (Issue #3349,
+    /// PR3c security fix).
+    ///
+    /// The cold-tier scan derives a delta's namespace from a running anchor map it
+    /// builds **within the cold scan** (see
+    /// [`crate::storage::redb_cold_storage::RedbColdStorage::collect_changes_filtered`]).
+    /// That map necessarily misses a delta whose covering anchor is **not in the
+    /// cold tier** — the LRU anchor-split case: under `MigrationPolicy::aggressive()`
+    /// / `enable_lru`, a frequently-accessed anchor stays HOT while an older delta
+    /// migrates COLD. The cold scan cannot resolve such a delta (it cannot see the
+    /// hot tier), so it marks it with the sentinel and defers to this method, which
+    /// runs at the [`HistoricalStorage`] layer where **both** tiers are visible via
+    /// [`reconstruct_node_properties`](Self::reconstruct_node_properties) /
+    /// [`reconstruct_edge_properties`](Self::reconstruct_edge_properties).
+    ///
+    /// A record whose namespace is genuinely unresolvable even with both tiers
+    /// (reconstruction hard-fails) keeps the sentinel — fail-closed, never
+    /// `default`. Records not carrying the sentinel are left untouched, so this is a
+    /// cheap no-op on the overwhelmingly common fully-resolved page.
+    pub(crate) fn resolve_unresolved_namespaces(&self, changes: &mut [RawChange]) {
+        let sentinel = unresolved_namespace_id();
+        for rec in changes.iter_mut() {
+            if rec.namespace_id != sentinel {
+                continue;
+            }
+            let Ok(version_id) = VersionId::new(rec.cursor.version_id) else {
+                continue;
+            };
+            let derived = match EntityKind::from_ord(rec.cursor.kind_ord) {
+                EntityKind::Node => self.reconstruct_node_properties(version_id),
+                EntityKind::Edge => self.reconstruct_edge_properties(version_id),
+            };
+            match derived {
+                Ok(p) => rec.namespace_id = intern_namespace(&namespace_of(&p)),
+                Err(e) => {
+                    // Genuinely unresolvable across both tiers: keep the fail-closed
+                    // sentinel (never `default`).
+                    eprintln!(
+                        "Warning: changefeed namespace derivation failed for version {} \
+                         ({e}); record scoped to the reserved '{}' namespace (fail-closed)",
+                        rec.cursor.version_id,
+                        crate::core::namespace::UNRESOLVED_NAMESPACE
+                    );
+                }
+            }
+        }
+    }
+
+    /// Build changefeed [`RawChange`]s for a specific, known set of just-committed version
+    /// ids — the push-changefeed counterpart to the window scan in
+    /// [`collect_changes`](Self::collect_changes) (Issue #3375).
+    ///
+    /// Where `collect_changes` scans *all* hot versions and filters by a transaction-time
+    /// window, this looks up only the `node_version_ids` / `edge_version_ids` produced by a
+    /// single transaction — an O(txn size) targeted read rather than an O(total) scan, so
+    /// the post-commit broadcast never pays for a full history rescan. Each record is built
+    /// through the **same** [`build_raw_change`] helper `collect_changes` uses (with the
+    /// version's own transaction-time interval as the window, which always contains its own
+    /// start), so the produced records are byte-identical to what `list_changes` would
+    /// return for that version — including tombstone empty valid ranges and Created vs
+    /// Modified classification. Unknown ids (e.g. a version already migrated to the cold
+    /// tier) are silently skipped.
+    ///
+    /// The result is unordered; the caller sorts by [`ChangeCursor`](crate::core::changefeed)
+    /// to obtain the #3216 deterministic total order.
+    pub(crate) fn collect_committed_changes(
+        &self,
+        node_version_ids: &[VersionId],
+        edge_version_ids: &[VersionId],
+    ) -> Vec<RawChange> {
+        let mut out = Vec::with_capacity(node_version_ids.len() + edge_version_ids.len());
+
+        for vid in node_version_ids {
+            if let Some(v) = self.node_versions.get(vid) {
+                let tx_window = v.temporal.transaction_time();
+                if let Some(rec) = build_raw_change(
+                    v.id.as_u64(),
+                    v.node_id.as_u64(),
+                    EntityKind::Node,
+                    &v.temporal,
+                    v.label,
+                    v.prev_version.is_none(),
+                    &tx_window,
+                    None,
+                    None,
+                    || self.node_version_namespace_id(v),
+                ) {
+                    out.push(rec);
+                }
+            }
+        }
+
+        for vid in edge_version_ids {
+            if let Some(v) = self.edge_versions.get(vid) {
+                let tx_window = v.temporal.transaction_time();
+                if let Some(rec) = build_raw_change(
+                    v.id.as_u64(),
+                    v.edge_id.as_u64(),
+                    EntityKind::Edge,
+                    &v.temporal,
+                    v.label,
+                    v.prev_version.is_none(),
+                    &tx_window,
+                    None,
+                    None,
+                    || self.edge_version_namespace_id(v),
+                ) {
+                    out.push(rec);
+                }
             }
         }
 
@@ -2055,6 +2309,7 @@ impl HistoricalStorage {
     ///
     /// Lets a caller release the historical lock and then scan the cold tier (disk I/O) without
     /// holding the lock across that I/O.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn tiered_storage_arc(&self) -> Option<Arc<super::tiered_storage::TieredStorage>> {
         self.tiered_storage.clone()
     }
@@ -2084,18 +2339,30 @@ impl HistoricalStorage {
     /// let tiered = TieredStorage::with_default_config(Box::new(cold));
     /// historical.set_tiered_storage(Arc::new(tiered));
     /// ```
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_tiered_storage(&mut self, tiered: Arc<super::tiered_storage::TieredStorage>) {
         self.tiered_storage = Some(tiered);
     }
 
     /// Get the tiered storage instance, if configured.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn tiered_storage(&self) -> Option<&super::tiered_storage::TieredStorage> {
         self.tiered_storage.as_deref()
     }
 
     /// Check if tiered storage is enabled.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn has_tiered_storage(&self) -> bool {
         self.tiered_storage.is_some()
+    }
+
+    /// Check if tiered storage is enabled.
+    ///
+    /// The cold/tiered subsystem is unavailable on `wasm32`, so this is always
+    /// `false` there (the wasm profile is hot-only).
+    #[cfg(target_arch = "wasm32")]
+    pub fn has_tiered_storage(&self) -> bool {
+        false
     }
 
     /// Set the temporal indexes for optimized version lookups (Issue #209).
@@ -2108,6 +2375,42 @@ impl HistoricalStorage {
     /// temporal indexes between the database and historical storage.
     pub fn set_temporal_indexes(&mut self, indexes: Arc<crate::index::temporal::TemporalIndexes>) {
         self.temporal_indexes = Some(indexes);
+    }
+
+    /// Temporarily detach the wired temporal indexes, returning whatever was
+    /// set (if anything), so a caller can run a multi-version replay pass
+    /// with the intra-replay "close previous version" hooks reduced to
+    /// no-ops, then reattach (`set_temporal_indexes`) and follow up with
+    /// [`rebuild_temporal_index_from_versions`](Self::rebuild_temporal_index_from_versions).
+    ///
+    /// # Why this exists (Issue #3355, Slice D)
+    ///
+    /// `add_node_version_with_interval`/[`close_node_version_transaction_time`](Self::close_node_version_transaction_time)
+    /// (and their edge equivalents) only ever *update* an existing temporal-index
+    /// entry (closing the previous version's interval) -- they never *insert* the
+    /// entry for the version just being created; only a full
+    /// [`rebuild_temporal_index_from_versions`](Self::rebuild_temporal_index_from_versions)
+    /// pass populates new entries. Startup replay (`db/config.rs`) and PITR
+    /// (`db/pitr.rs::finish_pitr_replay`) are both safe by construction: they
+    /// replay into a `HistoricalStorage` whose temporal indexes are not yet
+    /// wired (`None`) at all, so every intra-replay close call is already a
+    /// no-op, and the single rebuild call at the end is what populates the
+    /// index. A **live, already-wired** `HistoricalStorage` -- the replica
+    /// applier's case (`storage::replication::apply::apply_replica_batch`),
+    /// which replays into a database that has been serving temporal reads
+    /// since it was constructed -- has no such luxury: without detaching
+    /// first, a replayed batch containing two-or-more versions of the SAME
+    /// entity (e.g. a create immediately followed by an update, batched
+    /// together by a single fetch) hits a "version not found in metadata"
+    /// inconsistency, because the second version's *predecessor* was created
+    /// moments earlier in this same still-in-progress replay pass and has not
+    /// been indexed yet (indexing only happens at the end, via the rebuild).
+    /// Detaching first reproduces the startup/PITR no-op behavior on a live
+    /// store, deferring all indexing to the rebuild that already follows.
+    pub(crate) fn take_temporal_indexes(
+        &mut self,
+    ) -> Option<Arc<crate::index::temporal::TemporalIndexes>> {
+        self.temporal_indexes.take()
     }
 
     /// Set the temporal adjacency index for this storage.
@@ -2210,6 +2513,7 @@ impl HistoricalStorage {
     ) -> Result<Option<Arc<NodeVersion>>> {
         // Check hot storage first
         if let Some(version) = self.node_versions.get(&version_id) {
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(ref tiered) = self.tiered_storage {
                 tiered.record_hot_hit();
             }
@@ -2217,6 +2521,7 @@ impl HistoricalStorage {
         }
 
         // Fall back to cold storage if tiered storage is configured
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(ref tiered) = self.tiered_storage {
             return tiered.get_node_version_cold(version_id);
         }
@@ -2234,6 +2539,7 @@ impl HistoricalStorage {
     ) -> Result<Option<Arc<EdgeVersion>>> {
         // Check hot storage first
         if let Some(version) = self.edge_versions.get(&version_id) {
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(ref tiered) = self.tiered_storage {
                 tiered.record_hot_hit();
             }
@@ -2241,6 +2547,7 @@ impl HistoricalStorage {
         }
 
         // Fall back to cold storage if tiered storage is configured
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(ref tiered) = self.tiered_storage {
             return tiered.get_edge_version_cold(version_id);
         }
@@ -2261,6 +2568,7 @@ impl HistoricalStorage {
     /// # Returns
     ///
     /// Returns the number of versions migrated, or an error if migration fails.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn migrate_to_cold(
         &mut self,
         migration_service: &super::migration::MigrationService,
@@ -2292,11 +2600,30 @@ impl HistoricalStorage {
             let migrated = migration_service.migrate_node_versions(&node_versions_to_migrate)?;
             total_migrated += migrated;
 
+            // Issue #3677: record each migrated version's ChangeCursor in the cold-change
+            // directory AFTER it is durably in cold and BEFORE it is removed from the hot maps, so
+            // it is never absent from both hot and directory during the migration window.
+            if let Some(tiered) = self.tiered_storage.as_ref() {
+                tiered.record_cold_cursors(node_versions_to_migrate[..migrated].iter().map(|v| {
+                    ChangeCursor::for_version(
+                        v.temporal.transaction_time().start(),
+                        EntityKind::Node,
+                        v.node_id.as_u64(),
+                        v.id.as_u64(),
+                    )
+                }));
+            }
+
             // Remove migrated versions from hot storage
             for candidate in &node_candidates[..migrated] {
                 if let Some(version) = self.node_versions.remove(&candidate.version_id) {
                     // Update version count
                     if let Some(count) = self.node_version_counts.get_mut(&version.node_id) {
+                        *count = count.saturating_sub(1);
+                    }
+                    if version.id.is_structural()
+                        && let Some(count) = self.node_structural_counts.get_mut(&version.node_id)
+                    {
                         *count = count.saturating_sub(1);
                     }
                     // Issue #212: Update cached stats counters when migrating to cold storage
@@ -2330,12 +2657,31 @@ impl HistoricalStorage {
             let migrated = migration_service.migrate_edge_versions(&edge_versions_to_migrate)?;
             total_migrated += migrated;
 
+            // Issue #3677: record migrated edge cursors before removing them from the hot maps
+            // (see the node path above for the ordering invariant).
+            if let Some(tiered) = self.tiered_storage.as_ref() {
+                tiered.record_cold_cursors(edge_versions_to_migrate[..migrated].iter().map(|v| {
+                    ChangeCursor::for_version(
+                        v.temporal.transaction_time().start(),
+                        EntityKind::Edge,
+                        v.edge_id.as_u64(),
+                        v.id.as_u64(),
+                    )
+                }));
+            }
+
             // Remove migrated versions from hot storage
             for candidate in &edge_candidates[..migrated] {
                 if let Some(version) = self.edge_versions.remove(&candidate.version_id)
                     && let Some(count) = self.edge_version_counts.get_mut(&version.edge_id)
                 {
                     *count = count.saturating_sub(1);
+                    if version.id.is_structural()
+                        && let Some(structural) =
+                            self.edge_structural_counts.get_mut(&version.edge_id)
+                    {
+                        *structural = structural.saturating_sub(1);
+                    }
                     // Issue #212: Update cached stats counters when migrating to cold storage
                     if version.is_anchor() {
                         self.cached_edge_anchor_count =
@@ -2395,6 +2741,9 @@ impl HistoricalStorage {
             indexes.update_node_transaction_time_end(node_id, version_id, end_timestamp);
         }
 
+        // A tx-closed version is no longer part of the current belief.
+        self.untrack_node_slice(node_id, version_id);
+
         Ok(())
     }
 
@@ -2417,6 +2766,12 @@ impl HistoricalStorage {
         let source = version.source;
         let target = version.target;
 
+        // Capture the version's coordinates so the temporal adjacency index
+        // closes exactly this version's entry, not merely the edge's latest one
+        // (an edge may carry several still-recorded valid-time slices).
+        let valid_from = version.temporal.valid_time().start();
+        let tx_from = version.temporal.transaction_time().start();
+
         // Use TemporalVersion trait method
         version.close_transaction_time(end_timestamp)?;
 
@@ -2427,8 +2782,18 @@ impl HistoricalStorage {
 
         // Update temporal adjacency index to reflect the closed transaction time
         if let Some(ref adj_index) = self.temporal_adjacency_index {
-            adj_index.close_edge_transaction_time(edge_id, source, target, end_timestamp);
+            adj_index.close_edge_transaction_time_of(
+                edge_id,
+                source,
+                target,
+                valid_from,
+                tx_from,
+                end_timestamp,
+            );
         }
+
+        // A tx-closed version is no longer part of the current belief.
+        self.untrack_edge_slice(edge_id, version_id);
 
         Ok(())
     }
@@ -2813,6 +3178,11 @@ impl HistoricalStorage {
     /// Get the complete version history of a node.
     ///
     /// Returns all versions in chronological order (oldest first).
+    ///
+    /// One entry per write: structural versions (ADR-0061 carry-forwards and
+    /// re-assertions) are omitted. Use
+    /// [`get_node_valid_time_slices`](Self::get_node_valid_time_slices) for the
+    /// current valid-time partition.
     pub fn get_node_history(&self, node_id: NodeId) -> Result<EntityHistory> {
         #[cfg(feature = "observability")]
         let _span =
@@ -2834,6 +3204,13 @@ impl HistoricalStorage {
 
         // Reverse to get oldest-first order
         version_ids.reverse();
+
+        // History lists WRITES: structural versions (an update's carry-forward
+        // of the superseded valid-time prefix, a backfill's head re-assertion)
+        // restate facts already listed and are omitted (ADR-0061). The current
+        // valid-time partition, structural slices included, is served by
+        // `get_*_valid_time_slices`.
+        version_ids.retain(|vid| !vid.is_structural());
 
         // Build VersionInfo for each version
         let mut versions = Vec::with_capacity(version_ids.len());
@@ -2881,6 +3258,10 @@ impl HistoricalStorage {
 
         // Reverse to get oldest-first order
         version_ids.reverse();
+
+        // Logical version numbers count writes, matching `get_node_history`
+        // (structural versions are omitted, ADR-0061).
+        version_ids.retain(|vid| !vid.is_structural());
 
         // Convert 1-indexed version number to 0-indexed array index
         let index = version_number
@@ -2963,6 +3344,11 @@ impl HistoricalStorage {
     /// Get the complete version history of an edge.
     ///
     /// Returns all versions in chronological order (oldest first).
+    ///
+    /// One entry per write: structural versions (ADR-0061 carry-forwards and
+    /// re-assertions) are omitted. Use
+    /// [`get_edge_valid_time_slices`](Self::get_edge_valid_time_slices) for the
+    /// current valid-time partition.
     pub fn get_edge_history(&self, edge_id: EdgeId) -> Result<EntityHistory> {
         #[cfg(feature = "observability")]
         let _span =
@@ -2984,6 +3370,13 @@ impl HistoricalStorage {
 
         // Reverse to get oldest-first order
         version_ids.reverse();
+
+        // History lists WRITES: structural versions (an update's carry-forward
+        // of the superseded valid-time prefix, a backfill's head re-assertion)
+        // restate facts already listed and are omitted (ADR-0061). The current
+        // valid-time partition, structural slices included, is served by
+        // `get_*_valid_time_slices`.
+        version_ids.retain(|vid| !vid.is_structural());
 
         // Build VersionInfo for each version
         let mut versions = Vec::with_capacity(version_ids.len());
@@ -3508,6 +3901,9 @@ impl HistoricalStorage {
 
         // Update version count
         *self.node_version_counts.entry(node_id).or_insert(0) += 1;
+        if version_id.is_structural() {
+            *self.node_structural_counts.entry(node_id).or_insert(0) += 1;
+        }
 
         // Issue #212: Update cached stats counters during persistence restore
         if is_anchor {
@@ -3541,6 +3937,9 @@ impl HistoricalStorage {
 
         // Update version count
         *self.edge_version_counts.entry(edge_id).or_insert(0) += 1;
+        if version_id.is_structural() {
+            *self.edge_structural_counts.entry(edge_id).or_insert(0) += 1;
+        }
 
         // Issue #212: Update cached stats counters during persistence restore
         if is_anchor {
@@ -3590,18 +3989,44 @@ impl HistoricalStorage {
 
         // For each node, sort versions by tx_time and link them
         for (node_id, mut version_ids) in node_versions_by_id {
-            // Sort by transaction time start (ascending order)
+            // Sort by transaction time start (ascending order), tie-breaking on
+            // the unique `version_id`. The `version_id` tie-break makes the chain
+            // order deterministic when two versions share a `tx_start` (the input
+            // `version_ids` come from HashMap iteration, whose order is
+            // non-deterministic); without it the head and every reconstructed read
+            // would depend on iteration order (AC6 for counterfactual replay).
             // Phase 2: Use TIMESTAMP_MAX instead of i64::MAX
             use crate::core::temporal::TIMESTAMP_MAX;
             version_ids.sort_by_key(|vid| {
-                self.node_versions
-                    .get(vid)
-                    .map(|v| v.temporal.transaction_time().start())
-                    .unwrap_or(TIMESTAMP_MAX)
+                (
+                    self.node_versions
+                        .get(vid)
+                        .map(|v| v.temporal.transaction_time().start())
+                        .unwrap_or(TIMESTAMP_MAX),
+                    *vid,
+                )
             });
 
-            // Link prev/next
+            // An entity restored from a current-format (Issue #3387) file
+            // carries exact persisted chain links and tx-time closures; only a
+            // legacy file (every link `None`) needs the heuristic rebuild. The
+            // distinction matters for structural carry-forward versions: they
+            // are still-recorded slices that are NOT the latest version and
+            // share a transaction time with their successor, so the heuristic
+            // (sort by tx time, close every non-latest open interval, head =
+            // last) would mis-order, mis-close, and mis-head them. Legacy files
+            // predate structural versions.
+            let has_persisted_links = version_ids.iter().any(|vid| {
+                self.node_versions
+                    .get(vid)
+                    .is_some_and(|v| v.prev_version.is_some() || v.next_version.is_some())
+            });
+
+            // Link prev/next (legacy files only; persisted links are exact)
             for i in 0..version_ids.len() {
+                if has_persisted_links {
+                    break;
+                }
                 let vid = version_ids[i];
 
                 // Link to previous version (earlier in time)
@@ -3634,7 +4059,12 @@ impl HistoricalStorage {
             // Persistence only stores tx_start; after loading every version has
             // tx_end = TIMESTAMP_MAX.  Reconstruct: version[i].tx_end = version[i+1].tx_start.
             // Guard: skip if next_tx_start <= this version's tx_start to avoid zero-width [T,T) intervals.
-            for i in 0..version_ids.len().saturating_sub(1) {
+            let heuristic_len = if has_persisted_links {
+                0
+            } else {
+                version_ids.len()
+            };
+            for i in 0..heuristic_len.saturating_sub(1) {
                 let next_tx_start = self
                     .node_versions
                     .get(&version_ids[i + 1])
@@ -3651,7 +4081,26 @@ impl HistoricalStorage {
             }
 
             // Set head to the latest version (last in sorted order)
-            if let Some(&latest_vid) = version_ids.last() {
+            if let Some(&last_sorted) = version_ids.last() {
+                // With persisted links, the head is the end of the chain:
+                // follow `next_version` from the tx-latest version (a
+                // structural version can sort after its same-transaction
+                // successor by id).
+                let mut latest_vid = last_sorted;
+                if has_persisted_links {
+                    for _ in 0..version_ids.len() {
+                        match self
+                            .node_versions
+                            .get(&latest_vid)
+                            .and_then(|v| v.next_version)
+                        {
+                            Some(next) if self.node_versions.contains_key(&next) => {
+                                latest_vid = next
+                            }
+                            _ => break,
+                        }
+                    }
+                }
                 self.node_version_heads.insert(node_id, latest_vid);
 
                 // Issue #208: Rebuild counter cache for anchor interval checks
@@ -3691,17 +4140,40 @@ impl HistoricalStorage {
 
         // For each edge, sort versions by tx_time and link them
         for (edge_id, mut version_ids) in edge_versions_by_id {
-            // Sort by transaction time start (ascending order)
+            // Sort by transaction time start (ascending order), tie-breaking on
+            // the unique `version_id` for deterministic chain order under equal
+            // `tx_start` (see the node-chain comment above).
             // Phase 2: Use TIMESTAMP_MAX (already imported above)
             version_ids.sort_by_key(|vid| {
-                self.edge_versions
-                    .get(vid)
-                    .map(|v| v.temporal.transaction_time().start())
-                    .unwrap_or(TIMESTAMP_MAX)
+                (
+                    self.edge_versions
+                        .get(vid)
+                        .map(|v| v.temporal.transaction_time().start())
+                        .unwrap_or(TIMESTAMP_MAX),
+                    *vid,
+                )
             });
 
-            // Link prev/next
+            // An entity restored from a current-format (Issue #3387) file
+            // carries exact persisted chain links and tx-time closures; only a
+            // legacy file (every link `None`) needs the heuristic rebuild. The
+            // distinction matters for structural carry-forward versions: they
+            // are still-recorded slices that are NOT the latest version and
+            // share a transaction time with their successor, so the heuristic
+            // (sort by tx time, close every non-latest open interval, head =
+            // last) would mis-order, mis-close, and mis-head them. Legacy files
+            // predate structural versions.
+            let has_persisted_links = version_ids.iter().any(|vid| {
+                self.edge_versions
+                    .get(vid)
+                    .is_some_and(|v| v.prev_version.is_some() || v.next_version.is_some())
+            });
+
+            // Link prev/next (legacy files only; persisted links are exact)
             for i in 0..version_ids.len() {
+                if has_persisted_links {
+                    break;
+                }
                 let vid = version_ids[i];
 
                 // Link to previous version (earlier in time)
@@ -3732,7 +4204,12 @@ impl HistoricalStorage {
 
             // Fix transaction-time end for non-latest edge versions (mirror node logic).
             // Guard: skip if next_tx_start <= this version's tx_start to avoid zero-width [T,T) intervals.
-            for i in 0..version_ids.len().saturating_sub(1) {
+            let heuristic_len = if has_persisted_links {
+                0
+            } else {
+                version_ids.len()
+            };
+            for i in 0..heuristic_len.saturating_sub(1) {
                 let next_tx_start = self
                     .edge_versions
                     .get(&version_ids[i + 1])
@@ -3749,7 +4226,26 @@ impl HistoricalStorage {
             }
 
             // Set head to the latest version (last in sorted order)
-            if let Some(&latest_vid) = version_ids.last() {
+            if let Some(&last_sorted) = version_ids.last() {
+                // With persisted links, the head is the end of the chain:
+                // follow `next_version` from the tx-latest version (a
+                // structural version can sort after its same-transaction
+                // successor by id).
+                let mut latest_vid = last_sorted;
+                if has_persisted_links {
+                    for _ in 0..version_ids.len() {
+                        match self
+                            .edge_versions
+                            .get(&latest_vid)
+                            .and_then(|v| v.next_version)
+                        {
+                            Some(next) if self.edge_versions.contains_key(&next) => {
+                                latest_vid = next
+                            }
+                            _ => break,
+                        }
+                    }
+                }
                 self.edge_version_heads.insert(edge_id, latest_vid);
 
                 // Issue #208: Rebuild counter cache for anchor interval checks
@@ -3775,6 +4271,9 @@ impl HistoricalStorage {
                 self.edge_versions_since_anchor.insert(edge_id, count);
             }
         }
+
+        // Heads are final: re-derive the still-recorded non-head slices.
+        self.rebuild_open_slices();
     }
 
     /// Repopulate temporal indexes from existing version data.

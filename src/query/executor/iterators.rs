@@ -14,14 +14,17 @@ use tracing;
 use crate::core::error::Result;
 use crate::core::graph::Node;
 use crate::core::interning::GLOBAL_INTERNER;
-use crate::core::property::PropertyValue;
+use crate::core::namespace::{NamespaceScope, ResolvedScope};
+use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::provenance::Provenance;
 use crate::core::vector::DistanceMetric as VectorMetric;
-use crate::core::{NodeId, Timestamp};
+use crate::core::{EdgeId, NodeId, Timestamp};
 use crate::query::ir::{
     AggregateArg, AggregateFunc, AggregateGroupKey, AggregateSpec, Direction, Predicate,
-    PredicateValue, ProvenancePredicate, ScoreThreshold, SortKey,
+    PredicateValue, ProvenanceField, ProvenancePredicate, ProvenanceProjection, ScoreThreshold,
+    SortKey, TemporalWindowSpec, WindowAggArg, WindowAggFunc,
 };
+use crate::query::ir::{AlignNodeSource, TemporalAlignSpec};
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use std::cell::RefCell;
@@ -587,6 +590,129 @@ impl ResultIterator for NodeScanIterator {
     }
 }
 
+/// Edge-type filter state for an [`EdgeScanIterator`], resolved once at
+/// construction.
+///
+/// Mirrors [`ScanFilter`] for the node scan: a requested edge type is resolved
+/// to its interned id up front so each candidate edge is accepted/rejected by a
+/// cheap `InternedString` comparison rather than a string compare.
+enum EdgeScanFilter {
+    /// No edge-type filter: every existing edge is yielded.
+    All,
+    /// Yield only edges whose interned label equals this id.
+    Type(crate::core::interning::InternedString),
+    /// An edge type was requested but has never been interned, so no edge can
+    /// match. The scan yields nothing (as opposed to [`EdgeScanFilter::All`]).
+    None,
+}
+
+/// Sequential edge scan iterator, optionally applying an edge-type filter.
+///
+/// This is the edge counterpart to [`NodeScanIterator`] and backs the SQL
+/// `SELECT * FROM edges` path (`PhysicalOp::EdgeScan`). Edges have no id
+/// high-water mark analogous to [`CurrentStorage::get_max_node_id`], so the
+/// dense `[0, max_id)` sweep the node scan uses does not apply. Instead the
+/// iterator snapshots the live edge id set once at construction
+/// (via [`CurrentStorage::get_all_edge_ids`] -- an id-only snapshot, which does
+/// not clone the edges) and then materializes each [`Edge`] lazily with
+/// [`CurrentStorage::get_edge`] as `next()` is pulled. Only 8-byte ids are held
+/// resident; edge payloads are never all materialized at once.
+///
+/// # Filtering
+///
+/// An edge type is resolved to its interned id once. A requested-but-never-
+/// interned type short-circuits to an empty scan (mirroring the node scan's
+/// unknown-label semantics: unknown type yields nothing, **not** an unfiltered
+/// scan). SQL always emits `edge_type: None` (a bare `FROM edges`), so the
+/// `Type` path is exercised at the iterator/IR level; a `WHERE` predicate over
+/// edge properties is applied by the `FilterIterator` layered above this scan.
+///
+/// # Concurrency
+///
+/// No storage lock is held across a `next()` yield: the id snapshot is taken
+/// once, and each per-edge `get_edge` acquires and releases its shard lock
+/// internally. An edge deleted after the snapshot but before its `get_edge`
+/// surfaces as `EdgeNotFound` and is skipped (relaxed, non-isolated snapshot
+/// semantics, exactly like the node scan tolerating deleted ids).
+pub struct EdgeScanIterator {
+    filter: EdgeScanFilter,
+    edge_ids: std::vec::IntoIter<EdgeId>,
+    current: Arc<CurrentStorage>,
+}
+
+impl EdgeScanIterator {
+    /// Create a new edge scan, optionally filtered to a single edge type.
+    ///
+    /// Passing `None` scans every edge; passing `Some(type)` yields only edges
+    /// of that type (or nothing, if the type was never interned).
+    pub fn new(edge_type: Option<String>, current: Arc<CurrentStorage>) -> Self {
+        // Resolve the requested type to an interned id exactly once. An unknown
+        // type short-circuits to `None` so the scan yields nothing rather than
+        // degrading to an unfiltered scan.
+        let filter = match edge_type {
+            Option::None => EdgeScanFilter::All,
+            Some(ref t) => match GLOBAL_INTERNER.get_id(t) {
+                Some(id) => EdgeScanFilter::Type(id),
+                Option::None => EdgeScanFilter::None,
+            },
+        };
+
+        // Snapshot the live edge id set once. For an unknown type the snapshot
+        // is skipped entirely (no edge can match), so the scan drains
+        // immediately without touching storage.
+        let edge_ids = if matches!(filter, EdgeScanFilter::None) {
+            Vec::new()
+        } else {
+            current.get_all_edge_ids()
+        };
+
+        EdgeScanIterator {
+            filter,
+            edge_ids: edge_ids.into_iter(),
+            current,
+        }
+    }
+}
+
+impl ResultIterator for EdgeScanIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        // An edge type that was never interned can match no edge.
+        if matches!(self.filter, EdgeScanFilter::None) {
+            return None;
+        }
+
+        loop {
+            let id = self.edge_ids.next()?;
+
+            match self.current.get_edge(id) {
+                Ok(edge) => {
+                    // Apply the edge-type filter on the fully-loaded edge.
+                    if let EdgeScanFilter::Type(type_id) = self.filter
+                        && edge.label != type_id
+                    {
+                        continue;
+                    }
+                    return Some(Ok(QueryRow::from_entity(EntityResult::Edge(edge))));
+                }
+                // The id was live when the snapshot was taken but was deleted
+                // before this load; skip it (relaxed snapshot semantics).
+                Err(crate::core::error::Error::Storage(
+                    crate::core::error::StorageError::EdgeNotFound(_),
+                )) => continue,
+                Err(e) => return Some(Err(e)),
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if matches!(self.filter, EdgeScanFilter::None) {
+            return (0, Some(0));
+        }
+        // Upper bound only: a type filter or a concurrent deletion may drop ids.
+        (0, Some(self.edge_ids.len()))
+    }
+}
+
 /// Iterator for vector search results.
 ///
 /// # Context
@@ -1137,6 +1263,19 @@ fn is_missing_at_time(err: &crate::core::error::Error) -> bool {
     )
 }
 
+/// Whether an error from `get_node_at_time` means "this node is not visible at
+/// the coordinate" (so a temporal traversal should skip it, Issue #3622 F3)
+/// rather than a systemic failure. Covers the storage `NodeNotFound` /
+/// `VersionNotFound` that `get_node_at_time` raises plus the temporal variants.
+fn node_missing_at_time(err: &crate::core::error::Error) -> bool {
+    use crate::core::error::{Error, StorageError};
+    is_missing_at_time(err)
+        || matches!(
+            err,
+            Error::Storage(StorageError::NodeNotFound(_) | StorageError::VersionNotFound(_))
+        )
+}
+
 /// Iterator for valid-time range label scans (`BETWEEN ... AND ...`, Issue #552).
 ///
 /// # Semantics
@@ -1359,9 +1498,31 @@ pub struct TraversalIterator {
     /// Optional temporal context (valid_time, transaction_time) for edge filtering.
     /// When present, only edges that existed at the specified point in time are traversed.
     temporal_context: Option<(Timestamp, Timestamp)>,
+    /// When `true`, each emitted row carries the immediately-traversed edge
+    /// (reconstructed at `temporal_context`, or current-state) on its
+    /// [`QueryRow::edge`] side channel, for edge-property `WHERE` / `ORDER BY`
+    /// (Issue #3622). Set by the executor only when the physical plan references
+    /// an edge variable (a `Predicate::EdgeScoped` / `SortKey::EdgeProperty`),
+    /// so the overwhelming common case pays zero extra edge fetches.
+    bind_edge: bool,
+    /// Optional namespace scope (Issue #3349, PR2). When set, the traversal never
+    /// crosses an edge whose namespace ∉ scope, nor enqueues a target node whose
+    /// namespace ∉ scope — so an out-of-scope node is never reached, emitted, or
+    /// used as a bridge. `None` ⇒ prior namespace-agnostic behavior.
+    scope: Option<Arc<NamespaceScope>>,
+    /// The attached scope resolved to interned ids **once** at execute start and
+    /// threaded in (Issue #3349, PR2), so the current-state boundary check is a
+    /// per-edge integer-hash membership probe (a single integer compare for a
+    /// single-namespace scope) rather than a per-edge string hash.
+    /// [`ResolvedScope::All`] (or no attached scope) is a no-op boundary.
+    resolved_scope: ResolvedScope,
     // BFS state - reset for each input node (see doc comment above)
     frontier: VecDeque<(NodeId, Vec<EntityId>, usize)>,
-    visited: HashSet<NodeId>,
+    // `NodeId` is an internal sequential id, not untrusted input -- see
+    // `IdHashBuilder`'s docs. This set is rebuilt/cleared once per traversed
+    // start node and probed once per candidate neighbor, so it is on the hot
+    // path of every `MATCH ... -[...]-> ...` traversal.
+    visited: HashSet<NodeId, crate::core::hasher::IdHashBuilder>,
     input_exhausted: bool,
 }
 
@@ -1392,9 +1553,110 @@ impl TraversalIterator {
             current,
             historical,
             temporal_context,
+            bind_edge: false,
+            scope: None,
+            resolved_scope: ResolvedScope::All,
             frontier: VecDeque::new(),
-            visited: HashSet::new(),
+            visited: HashSet::default(),
             input_exhausted: false,
+        }
+    }
+
+    /// Attach a namespace scope (Issue #3349, PR2) so the traversal honors the
+    /// scope boundary: an edge whose namespace ∉ scope is never crossed, and a
+    /// target node whose namespace ∉ scope is never enqueued (so it is neither
+    /// emitted nor used to bridge deeper). [`NamespaceScope::All`] is a no-op.
+    #[must_use]
+    pub fn with_namespace_scope(
+        mut self,
+        scope: Arc<NamespaceScope>,
+        resolved: ResolvedScope,
+    ) -> Self {
+        // The scope was already resolved to interned ids once at execute start
+        // (Issue #3349, PR2 hoist); we only store the pre-resolved handle here so
+        // the current-state boundary check avoids per-edge string hashing (and,
+        // for a single-namespace scope, is a single integer compare).
+        self.resolved_scope = resolved;
+        self.scope = Some(scope);
+        self
+    }
+
+    /// Whether crossing to `target` over `edge_id` is permitted by the namespace
+    /// scope boundary (Issue #3349, PR2). Returns `true` when no restricting
+    /// scope is attached (fetching nothing). When a scope is attached, the edge
+    /// and target are reconstructed at the query coordinate and both their
+    /// (immutable) namespaces must be in scope.
+    fn boundary_allows(&self, edge_id: EdgeId, target: NodeId) -> bool {
+        let Some(scope) = &self.scope else {
+            return true;
+        };
+        if matches!(scope.as_ref(), NamespaceScope::All) {
+            return true;
+        }
+        // Fast path (current-state traversal): namespace is immutable, so the
+        // O(1) membership index is authoritative — no full edge/node
+        // reconstruction. Two interned-id hash probes per edge (the scope was
+        // resolved to ids once in `with_namespace_scope`).
+        if self.temporal_context.is_none() {
+            return scope_contains_current_edge(&self.current, edge_id, &self.resolved_scope)
+                && scope_contains_current_node(&self.current, target, &self.resolved_scope);
+        }
+        // Temporal traversal: reconstruct the edge and target AS-OF the
+        // coordinate so a since-deleted-but-then-valid edge is judged by its
+        // historical state (the membership index only reflects current state).
+        match self.reconstruct_bound_edge(edge_id) {
+            Ok(edge) if scope.contains(&edge.namespace()) => {}
+            _ => return false,
+        }
+        matches!(self.fetch_target_node(target), Ok(Some(node)) if scope.contains(&node.namespace()))
+    }
+
+    /// Enable attaching the immediately-traversed edge (reconstructed at the
+    /// query's bi-temporal coordinate) to each emitted row's
+    /// [`QueryRow::edge`] channel, for edge-property `WHERE` / `ORDER BY`
+    /// (Issue #3622). Defaults off, so ordinary traversals do no extra edge
+    /// work. Set by the executor only when the plan references an edge variable.
+    #[must_use]
+    pub fn bind_edges(mut self, enabled: bool) -> Self {
+        self.bind_edge = enabled;
+        self
+    }
+
+    /// Reconstruct the full edge `edge_id` as it exists at the traversal's
+    /// bi-temporal coordinate (or current state when none), for the
+    /// [`QueryRow::edge`] side channel (Issue #3622).
+    fn reconstruct_bound_edge(
+        &self,
+        edge_id: crate::core::EdgeId,
+    ) -> Result<crate::core::graph::Edge> {
+        match self.temporal_context {
+            Some((valid_time, tx_time)) => self
+                .historical
+                .read()
+                .get_edge_at_time(edge_id, valid_time, tx_time),
+            None => self.current.get_edge(edge_id),
+        }
+    }
+
+    /// Fetch the traversal target node, reconstructed at the query's bi-temporal
+    /// coordinate under a temporal context (Issue #3622 F3), or current state
+    /// otherwise. `Ok(None)` means the node is not valid/visible at the
+    /// coordinate and the row must be skipped (openCypher #3225); other errors
+    /// propagate.
+    fn fetch_target_node(&self, node_id: NodeId) -> Result<Option<Node>> {
+        match self.temporal_context {
+            Some((valid_time, tx_time)) => {
+                match self
+                    .historical
+                    .read()
+                    .get_node_at_time(node_id, valid_time, tx_time)
+                {
+                    Ok(node) => Ok(Some(node)),
+                    Err(e) if node_missing_at_time(&e) => Ok(None),
+                    Err(e) => Err(e),
+                }
+            }
+            None => self.current.get_node(node_id).map(Some),
         }
     }
 
@@ -1566,6 +1828,15 @@ impl ResultIterator for TraversalIterator {
                 if current_depth < self.depth {
                     let neighbors = self.get_neighbors(node_id);
                     for (target, edge_id) in neighbors {
+                        // Namespace scope boundary (Issue #3349, PR2): skip this
+                        // edge entirely when the edge's or the target's namespace
+                        // is out of scope, so an out-of-scope node is never
+                        // enqueued (never emitted, never a bridge). Skipping
+                        // *before* `visited.insert` means the same target can
+                        // still be reached over a different, in-scope edge.
+                        if !self.boundary_allows(edge_id, target) {
+                            continue;
+                        }
                         // Node-distinct / shortest-path reachability: a node is
                         // enqueued (and thus later emitted) once, at its shortest
                         // BFS depth. This also makes cyclic graphs terminate. It
@@ -1573,7 +1844,18 @@ impl ResultIterator for TraversalIterator {
                         // a target whose shortest path is below `min_depth` is
                         // marked visited here and never re-emitted deeper (see the
                         // struct-level docs).
-                        if self.visited.insert(target) {
+                        //
+                        // Relationship-distinct exception (Issue #3622): when an
+                        // edge variable is bound (`bind_edge`), emit ONE row per
+                        // traversed edge -- parallel edges to the same target (and
+                        // a self-loop) each surface with their own edge bound,
+                        // matching openCypher/Cypher per-edge semantics. This is
+                        // safe because `bind_edge` is only ever set on a single
+                        // fixed-length hop (the AQL converter rejects edge-var
+                        // refs on multi-hop / variable-length patterns), so the
+                        // depth-1 frontier never re-expands and cannot loop.
+                        let enqueue = self.visited.insert(target) || self.bind_edge;
+                        if enqueue {
                             // ⚡ Bolt Optimization: Pre-allocate capacity for new path to avoid reallocations.
                             // We are adding exactly 2 elements (edge and node) to the current path length.
                             let mut new_path = Vec::with_capacity(path.len() + 2);
@@ -1592,12 +1874,33 @@ impl ResultIterator for TraversalIterator {
                     && current_depth >= self.min_depth
                     && current_depth <= self.depth
                 {
-                    match self.current.get_node(node_id) {
-                        Ok(node) => {
-                            return Some(Ok(QueryRow::with_path(EntityResult::Node(node), path)));
-                        }
+                    // Reconstruct the target node at the query's bi-temporal
+                    // coordinate (Issue #3622 F3): under a temporal context the
+                    // node is read AS-OF the coordinate, symmetric with the
+                    // reconstructed edge -- so an edge predicate and a node
+                    // predicate in one WHERE see mutually consistent state. A
+                    // node not valid at the coordinate is excluded (openCypher
+                    // #3225: a node no longer valid there does not continue the
+                    // traversal). Current-state traversal is unchanged.
+                    let node = match self.fetch_target_node(node_id) {
+                        Ok(Some(node)) => node,
+                        Ok(None) => continue,
                         Err(e) => return Some(Err(e)),
+                    };
+                    let mut row = QueryRow::with_path(EntityResult::Node(node), path);
+                    // Edge-property WHERE / ORDER BY (Issue #3622): attach the
+                    // immediately-traversed edge (the last edge in the path),
+                    // reconstructed at the query coordinate. Only when the plan
+                    // referenced an edge variable.
+                    if self.bind_edge
+                        && let Some(edge_id) = last_edge_in_path(&row.path)
+                    {
+                        match self.reconstruct_bound_edge(edge_id) {
+                            Ok(edge) => row = row.with_edge_binding(edge),
+                            Err(e) => return Some(Err(e)),
+                        }
                     }
+                    return Some(Ok(row));
                 }
                 continue;
             }
@@ -1624,6 +1927,125 @@ impl ResultIterator for TraversalIterator {
                         return None;
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Whether the current edge `edge_id` is inside the **pre-resolved** scope
+/// `resolved` (Issue #3349, PR2), via O(1) interned-id membership probes.
+/// [`ResolvedScope::All`] matches everything. The scope is resolved to ids once
+/// at execute start (per query) and threaded down, so this per-edge check does
+/// no string hashing — and, for a single-namespace scope, is a single integer
+/// compare with no set scan.
+fn scope_contains_current_edge(
+    current: &CurrentStorage,
+    edge_id: EdgeId,
+    resolved: &ResolvedScope,
+) -> bool {
+    resolved.contains_by(|id| current.edge_in_namespace_id(edge_id, id))
+}
+
+/// Whether the current node `node_id` is inside the pre-resolved scope
+/// `resolved` (Issue #3349, PR2). See [`scope_contains_current_edge`].
+fn scope_contains_current_node(
+    current: &CurrentStorage,
+    node_id: NodeId,
+    resolved: &ResolvedScope,
+) -> bool {
+    resolved.contains_by(|id| current.node_in_namespace_id(node_id, id))
+}
+
+/// Namespace-scope entity filter (Issue #3349, PR2).
+///
+/// Drops rows whose primary entity's (immutable) namespace ∉ scope, so a scoped
+/// [`QueryBuilder`](crate::query::QueryBuilder) query returns only in-scope
+/// entities. It wraps the **source leaves** that produce entities (scans, id
+/// lookups, property/vector sources), so every downstream operator — LIMIT/SKIP,
+/// ORDER BY, DISTINCT, aggregation, COUNT — already sees only in-scope rows. The
+/// traversal *boundary* (never bridging through an out-of-scope node) is enforced
+/// separately in [`TraversalIterator`], so this filter only has to reject
+/// out-of-scope terminal entities.
+///
+/// Rows that carry no single scoped entity — a null binding, or an aggregation /
+/// multi-variable computed row — pass through unchanged (namespace scoping of
+/// aggregates is out of PR2 scope). An id-only entity is resolved against
+/// current storage to read its namespace; if it can no longer be loaded it is
+/// dropped (indistinguishable, to a scoped caller, from out-of-scope).
+pub struct ScopeFilterIterator {
+    input: Box<dyn ResultIterator>,
+    scope: Arc<NamespaceScope>,
+    current: Arc<CurrentStorage>,
+    /// The scope resolved to interned ids **once** at execute start and threaded
+    /// in (Issue #3349, PR2 hoist), so the id-only branches probe by integer id
+    /// without per-row string hashing — a single integer compare for a
+    /// single-namespace scope. [`ResolvedScope::All`] is a no-op filter.
+    resolved: ResolvedScope,
+}
+
+impl ScopeFilterIterator {
+    /// Wrap `input`, keeping only rows whose entity is in `scope`. `resolved` is
+    /// the scope pre-resolved to interned ids once at execute start (Issue #3349,
+    /// PR2 hoist) and shared into every source-leaf filter.
+    #[must_use]
+    pub fn new(
+        input: Box<dyn ResultIterator>,
+        scope: Arc<NamespaceScope>,
+        resolved: ResolvedScope,
+        current: Arc<CurrentStorage>,
+    ) -> Self {
+        ScopeFilterIterator {
+            input,
+            scope,
+            current,
+            resolved,
+        }
+    }
+
+    /// Whether `row`'s entity is visible under the scope.
+    ///
+    /// Full `Node`/`Edge` rows carry their own (immutable) namespace, read
+    /// directly — this is temporally correct because every mainline source
+    /// (current *and* point-in-time: `TemporalNode*`/`VectorResult` iterators)
+    /// emits a fully reconstructed entity, and a reconstructed entity carries
+    /// exactly the namespace it held at that coordinate.
+    ///
+    /// The id-only (`NodeId`/`EdgeId`) branches resolve membership via the O(1)
+    /// current-state membership index (no whole-entity clone; Issue #3349 B2).
+    /// This is a **current-state** probe: it would wrongly drop a since-deleted
+    /// id-only row under an `AS OF` read. That is safe because no mainline source
+    /// emits an id-only row in a temporal context — every temporal source emits a
+    /// full reconstructed `Node`/`Edge`, which is handled by the branches above
+    /// (Issue #3349 A5). If a future id-only temporal source is added, resolve it
+    /// via the historical path here instead.
+    fn row_in_scope(&self, row: &QueryRow) -> bool {
+        match &row.entity {
+            EntityResult::Node(node) => self.scope.contains(&node.namespace()),
+            EntityResult::Edge(edge) => self.scope.contains(&edge.namespace()),
+            EntityResult::NodeId(id) => {
+                scope_contains_current_node(&self.current, *id, &self.resolved)
+            }
+            EntityResult::EdgeId(id) => {
+                scope_contains_current_edge(&self.current, *id, &self.resolved)
+            }
+            // A null binding or a computed (aggregate / multi-variable) row has
+            // no single scoped entity — pass it through unchanged.
+            EntityResult::Null => true,
+        }
+    }
+}
+
+impl ResultIterator for ScopeFilterIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        loop {
+            match self.input.next()? {
+                Ok(row) => {
+                    if self.row_in_scope(&row) {
+                        return Some(Ok(row));
+                    }
+                    // otherwise skip and pull the next row
+                }
+                Err(e) => return Some(Err(e)),
             }
         }
     }
@@ -1661,6 +2083,14 @@ pub struct FilterIterator {
     /// Cached: does the predicate tree contain any provenance leaf? Computed
     /// once so `next()` avoids resolving provenance for property-only filters.
     needs_provenance: bool,
+    /// When `true`, property leaves are evaluated against an EDGE row's own
+    /// properties (real edge-property `WHERE`, Issue #3622) instead of the
+    /// single-entity pass-through. Set only by the executor when the filter's
+    /// input subtree is rooted at an `EdgeScan` (the SQL `FROM edges` lane),
+    /// where every bare property leaf unambiguously refers to the edge. Defaults
+    /// to `false`, preserving the AQL/Cypher pass-through semantics pinned by
+    /// `edge_non_provenance_leaf_is_pass_through`.
+    edge_mode: bool,
 }
 
 impl FilterIterator {
@@ -1678,6 +2108,7 @@ impl FilterIterator {
             predicate,
             historical: None,
             needs_provenance,
+            edge_mode: false,
         }
     }
 
@@ -1695,7 +2126,22 @@ impl FilterIterator {
             predicate,
             historical: Some(historical),
             needs_provenance,
+            edge_mode: false,
         }
+    }
+
+    /// Enable real edge-property evaluation (Issue #3622): when the row is an
+    /// edge, property leaves are matched against the edge's own properties
+    /// instead of the AQL/Cypher single-entity pass-through.
+    ///
+    /// The executor sets this only for a filter whose input stream is rooted at
+    /// an `EdgeScan` (the SQL `FROM edges` lane), where the stream is pure edges
+    /// and every bare property leaf unambiguously refers to the edge. Node and
+    /// null row handling are unchanged.
+    #[must_use]
+    pub fn evaluate_edge_properties(mut self, enabled: bool) -> Self {
+        self.edge_mode = enabled;
+        self
     }
 
     /// Returns `true` if the predicate tree contains any provenance leaf.
@@ -1706,6 +2152,12 @@ impl FilterIterator {
                 preds.iter().any(Self::predicate_needs_provenance)
             }
             Predicate::Not(pred) => Self::predicate_needs_provenance(pred),
+            // An edge-scoped wrapper (Issue #3622) carries only edge
+            // property/structural leaves (never provenance) in this lane, so it
+            // contributes no node-provenance requirement. Explicit rather than
+            // folded into the wildcard so a future edge-provenance leaf is a
+            // deliberate decision here.
+            Predicate::EdgeScoped(_) => false,
             _ => false,
         }
     }
@@ -1771,30 +2223,45 @@ impl FilterIterator {
     #[cfg(test)]
     fn evaluate(&self, node: &Node, prov: Option<&Provenance>) -> bool {
         let prov_cache: RefCell<Option<Option<Provenance>>> = RefCell::new(Some(prov.cloned()));
-        self.evaluate_predicate(&self.predicate, node, &prov_cache)
+        self.evaluate_predicate(&self.predicate, node, None, &prov_cache)
     }
 
     fn evaluate_predicate(
         &self,
         predicate: &Predicate,
         node: &Node,
+        edge: Option<&crate::core::graph::Edge>,
         prov_cache: &RefCell<Option<Option<Provenance>>>,
     ) -> bool {
         match predicate {
             Predicate::True => true,
             Predicate::False => false,
-            Predicate::Eq { key, value } => self.evaluate_eq(node, key, value),
-            Predicate::Ne { key, value } => self.evaluate_ne(node, key, value),
-            Predicate::Gt { key, value } => self.evaluate_gt(node, key, value),
-            Predicate::Lt { key, value } => self.evaluate_lt(node, key, value),
-            Predicate::Gte { key, value } => self.evaluate_gte(node, key, value),
-            Predicate::Lte { key, value } => self.evaluate_lte(node, key, value),
+            Predicate::Eq { key, value } => self.evaluate_eq(&node.properties, key, value),
+            Predicate::Ne { key, value } => self.evaluate_ne(&node.properties, key, value),
+            Predicate::Gt { key, value } => self.evaluate_gt(&node.properties, key, value),
+            Predicate::Lt { key, value } => self.evaluate_lt(&node.properties, key, value),
+            Predicate::Gte { key, value } => self.evaluate_gte(&node.properties, key, value),
+            Predicate::Lte { key, value } => self.evaluate_lte(&node.properties, key, value),
             Predicate::Exists(key) => node.properties.get(key).is_some(),
             Predicate::NotExists(key) => node.properties.get(key).is_none(),
-            Predicate::Contains { key, substring } => self.evaluate_contains(node, key, substring),
-            Predicate::StartsWith { key, prefix } => self.evaluate_starts_with(node, key, prefix),
-            Predicate::EndsWith { key, suffix } => self.evaluate_ends_with(node, key, suffix),
-            Predicate::In { key, values } => self.evaluate_in(node, key, values),
+            Predicate::Contains { key, substring } => {
+                self.evaluate_contains(&node.properties, key, substring)
+            }
+            Predicate::StartsWith { key, prefix } => {
+                self.evaluate_starts_with(&node.properties, key, prefix)
+            }
+            Predicate::EndsWith { key, suffix } => {
+                self.evaluate_ends_with(&node.properties, key, suffix)
+            }
+            Predicate::In { key, values } => self.evaluate_in(&node.properties, key, values),
+            // Edge-scoped leaf (Issue #3622): evaluate the wrapped sub-tree
+            // against the row's traversed edge with the shared openCypher edge
+            // semantics. A row whose edge is not valid at the query coordinate
+            // (no edge channel) fails the leaf.
+            Predicate::EdgeScoped(inner) => match edge {
+                Some(e) => self.evaluate_edge_full(inner, e, &RefCell::new(None)),
+                None => false,
+            },
             // Resolve provenance lazily so a cheaper conjunct that already
             // rejected the row short-circuits before any historical read.
             Predicate::Provenance(p) => {
@@ -1802,11 +2269,11 @@ impl FilterIterator {
             }
             Predicate::And(preds) => preds
                 .iter()
-                .all(|p| self.evaluate_predicate(p, node, prov_cache)),
+                .all(|p| self.evaluate_predicate(p, node, edge, prov_cache)),
             Predicate::Or(preds) => preds
                 .iter()
-                .any(|p| self.evaluate_predicate(p, node, prov_cache)),
-            Predicate::Not(pred) => !self.evaluate_predicate(pred, node, prov_cache),
+                .any(|p| self.evaluate_predicate(p, node, edge, prov_cache)),
+            Predicate::Not(pred) => !self.evaluate_predicate(pred, node, edge, prov_cache),
         }
     }
 
@@ -1838,79 +2305,249 @@ impl FilterIterator {
                 .any(|p| self.evaluate_edge_predicate(p, edge, prov_cache)),
             Predicate::Not(pred) => !self.evaluate_edge_predicate(pred, edge, prov_cache),
             Predicate::False => false,
+            // An edge-scoped wrapper (Issue #3622) does not occur on this
+            // edge-ROW pass-through path (the AQL converter only emits it over
+            // node rows carrying an edge side channel). Handle it correctly for
+            // robustness: evaluate the inner tree against the edge row itself,
+            // matching the deliberately-exhaustive style of `evaluate_edge_full`.
+            Predicate::EdgeScoped(inner) => match edge {
+                Some(e) => self.evaluate_edge_full(inner, e, prov_cache),
+                None => true,
+            },
             // Non-provenance leaves retain the pre-existing edge pass-through.
             _ => true,
         }
     }
 
-    fn evaluate_eq(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
-        let Some(prop) = node.properties.get(key) else {
+    fn evaluate_eq(&self, props: &PropertyMap, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = props.get(key) else {
             return false;
         };
         self.compare_eq(prop, value)
     }
 
-    fn evaluate_ne(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
-        let Some(prop) = node.properties.get(key) else {
+    fn evaluate_ne(&self, props: &PropertyMap, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = props.get(key) else {
             return true; // Non-existent != anything
         };
         !self.compare_eq(prop, value)
     }
 
-    fn evaluate_gt(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
-        let Some(prop) = node.properties.get(key) else {
+    fn evaluate_gt(&self, props: &PropertyMap, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = props.get(key) else {
             return false;
         };
         self.compare_gt(prop, value)
     }
 
-    fn evaluate_lt(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
-        let Some(prop) = node.properties.get(key) else {
+    fn evaluate_lt(&self, props: &PropertyMap, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = props.get(key) else {
             return false;
         };
         self.compare_lt(prop, value)
     }
 
-    fn evaluate_gte(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
-        let Some(prop) = node.properties.get(key) else {
+    fn evaluate_gte(&self, props: &PropertyMap, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = props.get(key) else {
             return false;
         };
         self.compare_gte(prop, value)
     }
 
-    fn evaluate_lte(&self, node: &Node, key: &str, value: &PredicateValue) -> bool {
-        let Some(prop) = node.properties.get(key) else {
+    fn evaluate_lte(&self, props: &PropertyMap, key: &str, value: &PredicateValue) -> bool {
+        let Some(prop) = props.get(key) else {
             return false;
         };
         self.compare_lte(prop, value)
     }
 
-    fn evaluate_contains(&self, node: &Node, key: &str, substring: &str) -> bool {
-        let Some(PropertyValue::String(s)) = node.properties.get(key) else {
+    fn evaluate_contains(&self, props: &PropertyMap, key: &str, substring: &str) -> bool {
+        let Some(PropertyValue::String(s)) = props.get(key) else {
             return false;
         };
         s.contains(substring)
     }
 
-    fn evaluate_starts_with(&self, node: &Node, key: &str, prefix: &str) -> bool {
-        let Some(PropertyValue::String(s)) = node.properties.get(key) else {
+    fn evaluate_starts_with(&self, props: &PropertyMap, key: &str, prefix: &str) -> bool {
+        let Some(PropertyValue::String(s)) = props.get(key) else {
             return false;
         };
         s.starts_with(prefix)
     }
 
-    fn evaluate_ends_with(&self, node: &Node, key: &str, suffix: &str) -> bool {
-        let Some(PropertyValue::String(s)) = node.properties.get(key) else {
+    fn evaluate_ends_with(&self, props: &PropertyMap, key: &str, suffix: &str) -> bool {
+        let Some(PropertyValue::String(s)) = props.get(key) else {
             return false;
         };
         s.ends_with(suffix)
     }
 
-    fn evaluate_in(&self, node: &Node, key: &str, values: &[PredicateValue]) -> bool {
-        let Some(prop) = node.properties.get(key) else {
+    fn evaluate_in(&self, props: &PropertyMap, key: &str, values: &[PredicateValue]) -> bool {
+        let Some(prop) = props.get(key) else {
             return false;
         };
         values.iter().any(|v| self.compare_eq(prop, v))
+    }
+
+    /// Evaluate the property/structural leaves of a predicate against a bare
+    /// [`PropertyMap`], shared by the node and edge (Issue #3622) paths. Returns
+    /// `Some(bool)` for a property/structural leaf, `None` for a leaf that needs
+    /// entity context (provenance) or a logical combinator, which the caller
+    /// handles with the appropriate entity-aware resolver.
+    fn evaluate_property_leaf(&self, predicate: &Predicate, props: &PropertyMap) -> Option<bool> {
+        match predicate {
+            Predicate::True => Some(true),
+            Predicate::False => Some(false),
+            Predicate::Eq { key, value } => Some(self.evaluate_eq(props, key, value)),
+            Predicate::Ne { key, value } => Some(self.evaluate_ne(props, key, value)),
+            Predicate::Gt { key, value } => Some(self.evaluate_gt(props, key, value)),
+            Predicate::Lt { key, value } => Some(self.evaluate_lt(props, key, value)),
+            Predicate::Gte { key, value } => Some(self.evaluate_gte(props, key, value)),
+            Predicate::Lte { key, value } => Some(self.evaluate_lte(props, key, value)),
+            Predicate::Exists(key) => Some(props.get(key).is_some()),
+            Predicate::NotExists(key) => Some(props.get(key).is_none()),
+            Predicate::Contains { key, substring } => {
+                Some(self.evaluate_contains(props, key, substring))
+            }
+            Predicate::StartsWith { key, prefix } => {
+                Some(self.evaluate_starts_with(props, key, prefix))
+            }
+            Predicate::EndsWith { key, suffix } => {
+                Some(self.evaluate_ends_with(props, key, suffix))
+            }
+            Predicate::In { key, values } => Some(self.evaluate_in(props, key, values)),
+            // Provenance / logical combinators / edge-scoped wrappers need
+            // entity context (resolved by the caller).
+            Predicate::Provenance(_)
+            | Predicate::And(_)
+            | Predicate::Or(_)
+            | Predicate::Not(_)
+            | Predicate::EdgeScoped(_) => None,
+        }
+    }
+
+    /// Evaluate the full predicate tree against an EDGE row, matching reserved
+    /// structural fields against the edge struct (Issue #3622 review fix),
+    /// property leaves against the edge's own properties (Issue #3622), and
+    /// provenance leaves against the edge's provenance bundle. Used only in
+    /// `edge_mode` (the SQL `FROM edges` lane); the AQL/Cypher pass-through path
+    /// stays in [`evaluate_edge_predicate`](Self::evaluate_edge_predicate).
+    ///
+    /// Edge WHERE follows **openCypher / node semantics**, NOT SQL three-valued
+    /// (UNKNOWN) logic: an `Eq` on an absent property is `false` (excludes the
+    /// row) while a `Ne` on an absent property is `true` (keeps the row), exactly
+    /// as [`evaluate_predicate`](Self::evaluate_predicate) treats node rows.
+    fn evaluate_edge_full(
+        &self,
+        predicate: &Predicate,
+        edge: &crate::core::graph::Edge,
+        prov_cache: &RefCell<Option<Option<Provenance>>>,
+    ) -> bool {
+        // Reserved structural fields (`type`/`label`/`source`/`target`/`id`) live
+        // on the edge STRUCT, not in `properties`, so resolve them there first
+        // (Issue #3622 review fix); otherwise `WHERE type = 'KNOWS'` etc. would
+        // silently match nothing.
+        if let Some(result) = self.evaluate_edge_structural_leaf(predicate, edge) {
+            return result;
+        }
+        if let Some(result) = self.evaluate_property_leaf(predicate, &edge.properties) {
+            return result;
+        }
+        match predicate {
+            Predicate::Provenance(p) => {
+                Self::eval_provenance_leaf(p, prov_cache, || self.resolve_edge_provenance(edge))
+            }
+            Predicate::And(preds) => preds
+                .iter()
+                .all(|p| self.evaluate_edge_full(p, edge, prov_cache)),
+            Predicate::Or(preds) => preds
+                .iter()
+                .any(|p| self.evaluate_edge_full(p, edge, prov_cache)),
+            Predicate::Not(pred) => !self.evaluate_edge_full(pred, edge, prov_cache),
+            // A nested edge-scoped wrapper (should not normally occur -- the AQL
+            // converter wraps leaves, not sub-trees) simply re-scopes to the
+            // same edge; unwrap and evaluate the inner tree.
+            Predicate::EdgeScoped(inner) => self.evaluate_edge_full(inner, edge, prov_cache),
+            // Every property/structural leaf is resolved above; only provenance
+            // leaves and logical combinators reach this match, and all four are
+            // handled explicitly. A future `Predicate` variant that is neither
+            // must be routed deliberately rather than silently passing through.
+            Predicate::True
+            | Predicate::False
+            | Predicate::Eq { .. }
+            | Predicate::Ne { .. }
+            | Predicate::Gt { .. }
+            | Predicate::Lt { .. }
+            | Predicate::Gte { .. }
+            | Predicate::Lte { .. }
+            | Predicate::Exists(_)
+            | Predicate::NotExists(_)
+            | Predicate::Contains { .. }
+            | Predicate::StartsWith { .. }
+            | Predicate::EndsWith { .. }
+            | Predicate::In { .. } => {
+                unreachable!("property/structural leaves are resolved before this match")
+            }
+        }
+    }
+
+    /// Evaluate a single predicate leaf that references a reserved *structural*
+    /// edge field (Issue #3622 review fix). Returns `Some(bool)` when `predicate`
+    /// is a keyed leaf whose key is a reserved structural field (resolving it
+    /// against the edge's struct via [`edge_structural_value`]), and `None`
+    /// otherwise (not a keyed leaf, or a genuine user-property key -- both of
+    /// which the caller resolves against `edge.properties`).
+    ///
+    /// Structural fields always exist, so the openCypher three-valued
+    /// asymmetries around missing keys never fire here; the operator semantics
+    /// (`Eq`/`Ne`/comparisons/`In`/string ops/`Exists`) mirror the property path.
+    fn evaluate_edge_structural_leaf(
+        &self,
+        predicate: &Predicate,
+        edge: &crate::core::graph::Edge,
+    ) -> Option<bool> {
+        let key = match predicate {
+            Predicate::Eq { key, .. }
+            | Predicate::Ne { key, .. }
+            | Predicate::Gt { key, .. }
+            | Predicate::Lt { key, .. }
+            | Predicate::Gte { key, .. }
+            | Predicate::Lte { key, .. }
+            | Predicate::Exists(key)
+            | Predicate::NotExists(key)
+            | Predicate::Contains { key, .. }
+            | Predicate::StartsWith { key, .. }
+            | Predicate::EndsWith { key, .. }
+            | Predicate::In { key, .. } => key.as_str(),
+            _ => return None,
+        };
+        let value = edge_structural_value(edge, key)?;
+        Some(match predicate {
+            Predicate::Eq { value: v, .. } => self.compare_eq(&value, v),
+            Predicate::Ne { value: v, .. } => !self.compare_eq(&value, v),
+            Predicate::Gt { value: v, .. } => self.compare_gt(&value, v),
+            Predicate::Lt { value: v, .. } => self.compare_lt(&value, v),
+            Predicate::Gte { value: v, .. } => self.compare_gte(&value, v),
+            Predicate::Lte { value: v, .. } => self.compare_lte(&value, v),
+            // A structural field is always present.
+            Predicate::Exists(_) => true,
+            Predicate::NotExists(_) => false,
+            Predicate::Contains { substring, .. } => match &value {
+                PropertyValue::String(s) => s.contains(substring.as_str()),
+                _ => false,
+            },
+            Predicate::StartsWith { prefix, .. } => match &value {
+                PropertyValue::String(s) => s.starts_with(prefix.as_str()),
+                _ => false,
+            },
+            Predicate::EndsWith { suffix, .. } => match &value {
+                PropertyValue::String(s) => s.ends_with(suffix.as_str()),
+                _ => false,
+            },
+            Predicate::In { values, .. } => values.iter().any(|v| self.compare_eq(&value, v)),
+            // `key` was bound above only for the keyed-leaf arms.
+            _ => unreachable!("key resolved above implies a keyed leaf predicate"),
+        })
     }
 
     fn compare_eq(&self, prop: &PropertyValue, value: &PredicateValue) -> bool {
@@ -2003,6 +2640,9 @@ impl FilterIterator {
             | Predicate::Contains { .. }
             | Predicate::StartsWith { .. }
             | Predicate::EndsWith { .. } => false,
+            // A null OPTIONAL MATCH binding carries no traversed edge either, so
+            // an edge-scoped leaf is not-true (Issue #3622).
+            Predicate::EdgeScoped(_) => false,
             // A null OPTIONAL MATCH binding carries no entity and therefore no
             // provenance bundle: `provenance(x) IS NULL` is true, every other
             // provenance comparison is not-true (Issue #3354a).
@@ -2024,9 +2664,16 @@ impl ResultIterator for FilterIterator {
                         // and memoized per row, so an AND/OR of a property
                         // filter and a provenance filter shares one lookup and a
                         // cheaper conjunct's rejection skips the historical read
-                        // entirely (Issue #3354a).
+                        // entirely (Issue #3354a). A `Predicate::EdgeScoped` leaf
+                        // (Issue #3622) evaluates against the row's traversed
+                        // edge side channel.
                         let prov_cache: RefCell<Option<Option<Provenance>>> = RefCell::new(None);
-                        if self.evaluate_predicate(&self.predicate, node, &prov_cache) {
+                        if self.evaluate_predicate(
+                            &self.predicate,
+                            node,
+                            row.edge.as_ref(),
+                            &prov_cache,
+                        ) {
                             return Some(Ok(row));
                         }
                         // Filter didn't pass, continue to next
@@ -2035,6 +2682,20 @@ impl ResultIterator for FilterIterator {
                         // evaluated with null semantics (comparisons are
                         // not-true, IS NULL is true).
                         if self.evaluate_null(&self.predicate) {
+                            return Some(Ok(row));
+                        }
+                        // Filter didn't pass, continue to next
+                    } else if self.edge_mode && row.entity.as_edge().is_some() {
+                        // Real edge-property evaluation (Issue #3622, SQL `FROM
+                        // edges` lane): the stream is pure edges, so every
+                        // property leaf refers to the edge's own properties.
+                        // Provenance leaves resolve against the edge's bundle.
+                        let edge = row
+                            .entity
+                            .as_edge()
+                            .expect("as_edge checked in the branch guard");
+                        let prov_cache: RefCell<Option<Option<Provenance>>> = RefCell::new(None);
+                        if self.evaluate_edge_full(&self.predicate, edge, &prov_cache) {
                             return Some(Ok(row));
                         }
                         // Filter didn't pass, continue to next
@@ -2114,6 +2775,18 @@ pub struct OptionalApplyIterator {
     steps: Vec<crate::query::planner::physical::OptionalPhysicalStep>,
     current: Arc<CurrentStorage>,
     historical: Arc<RwLock<HistoricalStorage>>,
+    /// Optional namespace scope (Issue #3349, PR2). Threaded from the executor so
+    /// the sub-pipeline built per seed row (its `Scan` source leaf and every
+    /// `Traverse` hop) honors the same scope boundary as the outer plan — else a
+    /// scoped `OPTIONAL MATCH` would leak cross-namespace bindings. `None` ⇒ prior
+    /// namespace-agnostic behavior. Unreachable until PR3 wires Cypher/AQL scope
+    /// to `OPTIONAL MATCH`, but wired here (defense in depth) so it can never be
+    /// silently wrong.
+    scope: Option<Arc<NamespaceScope>>,
+    /// The attached `scope` resolved to interned ids once (Issue #3349, PR2), so
+    /// the sub-pipeline's per-edge/per-row checks avoid re-resolving. `All` when
+    /// no restricting scope is attached.
+    resolved_scope: ResolvedScope,
     /// True when the first step is a Scan (leading OPTIONAL MATCH form).
     standalone: bool,
     /// The sub-pipeline currently being drained (one per seed row).
@@ -2136,6 +2809,24 @@ impl OptionalApplyIterator {
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
     ) -> Self {
+        Self::with_namespace_scope(input, steps, current, historical, None, ResolvedScope::All)
+    }
+
+    /// Create an OptionalApplyIterator whose sub-pipeline honors a namespace
+    /// scope (Issue #3349, PR2). `scope` is the outer plan's scope and `resolved`
+    /// its once-resolved interned-id form; both are threaded into the per-seed
+    /// sub-pipeline so its source leaf and traversal hops are scope-bounded. A
+    /// `None` / [`ResolvedScope::All`] scope reproduces the namespace-agnostic
+    /// behavior of [`new`](Self::new).
+    #[must_use]
+    pub fn with_namespace_scope(
+        input: Box<dyn ResultIterator>,
+        steps: Vec<crate::query::planner::physical::OptionalPhysicalStep>,
+        current: Arc<CurrentStorage>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        scope: Option<Arc<NamespaceScope>>,
+        resolved: ResolvedScope,
+    ) -> Self {
         use crate::query::planner::physical::OptionalPhysicalStep;
         let standalone = matches!(steps.first(), Some(OptionalPhysicalStep::Scan { .. }));
         Self {
@@ -2143,12 +2834,21 @@ impl OptionalApplyIterator {
             steps,
             current,
             historical,
+            scope,
+            resolved_scope: resolved,
             standalone,
             inner: None,
             inner_matched: false,
             done: false,
             current_seed: None,
         }
+    }
+
+    /// The attached scope only if it actually restricts (present and not `All`).
+    fn restricting_scope(&self) -> Option<&Arc<NamespaceScope>> {
+        self.scope
+            .as_ref()
+            .filter(|s| !matches!(s.as_ref(), NamespaceScope::All))
     }
 
     /// Build the optional sub-pipeline for one seed row (or, for the
@@ -2164,11 +2864,22 @@ impl OptionalApplyIterator {
         for step in &self.steps {
             iter = match step {
                 OptionalPhysicalStep::Scan { label } => {
-                    // Source step (standalone form): replaces the seed input.
-                    Box::new(NodeScanIterator::new(
+                    // Source step (standalone form): replaces the seed input. When
+                    // scoped (Issue #3349, PR2), wrap it in the source-leaf
+                    // namespace filter exactly as the main pipeline does.
+                    let mut scan: Box<dyn ResultIterator> = Box::new(NodeScanIterator::new(
                         label.clone(),
                         Arc::clone(&self.current),
-                    ))
+                    ));
+                    if let Some(scope) = self.restricting_scope() {
+                        scan = Box::new(ScopeFilterIterator::new(
+                            scan,
+                            Arc::clone(scope),
+                            self.resolved_scope.clone(),
+                            Arc::clone(&self.current),
+                        ));
+                    }
+                    scan
                 }
                 OptionalPhysicalStep::Traverse {
                     direction,
@@ -2176,16 +2887,25 @@ impl OptionalApplyIterator {
                     min_depth,
                     depth,
                     temporal_context,
-                } => Box::new(TraversalIterator::new(
-                    iter,
-                    *direction,
-                    label.clone(),
-                    *min_depth,
-                    *depth,
-                    Arc::clone(&self.current),
-                    Arc::clone(&self.historical),
-                    *temporal_context,
-                )),
+                } => {
+                    let mut traversal = TraversalIterator::new(
+                        iter,
+                        *direction,
+                        label.clone(),
+                        *min_depth,
+                        *depth,
+                        Arc::clone(&self.current),
+                        Arc::clone(&self.historical),
+                        *temporal_context,
+                    );
+                    // Namespace boundary (Issue #3349, PR2): a scoped optional
+                    // traversal never crosses an out-of-scope edge/node.
+                    if let Some(scope) = self.restricting_scope() {
+                        traversal = traversal
+                            .with_namespace_scope(Arc::clone(scope), self.resolved_scope.clone());
+                    }
+                    Box::new(traversal)
+                }
                 OptionalPhysicalStep::Filter(predicate) => {
                     Box::new(FilterIterator::with_historical(
                         iter,
@@ -2620,6 +3340,195 @@ impl ResultIterator for ProvenanceFilterIterator {
                 row
             })
         })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+/// Row count below which the wall-clock deadline is polled on *every* row, and
+/// at/above which it is polled once per [`DEADLINE_CHECK_STRIDE`] rows.
+///
+/// This hybrid exists to reconcile two requirements that a single fixed stride
+/// cannot:
+///
+/// - **Correctness for slow, low-row-count queries** (e.g. a handful of deep
+///   temporal reconstructions, each taking many milliseconds). A pure stride
+///   would only re-poll the clock every `STRIDE` rows, so a query that produces
+///   *fewer than* `STRIDE` rows would be checked only at row 0 and then run to
+///   completion no matter how long it took — the deadline would never fire.
+///   Polling every row for the first `PRECISE_DEADLINE_ROWS` rows guarantees
+///   such a query is cut at the first row boundary past its deadline.
+/// - **Cheapness for large benign scans** (the AC6 "fast queries are not taxed"
+///   concern). `Instant::now()` is a ~15-25ns vDSO call; paying it on every one
+///   of a million rows would be a measurable throughput tax. Beyond
+///   `PRECISE_DEADLINE_ROWS` the query is, by definition, a *many-row* scan, so
+///   the clock read is amortized to `1/STRIDE`.
+const PRECISE_DEADLINE_ROWS: usize = 4096;
+
+/// Stride (in rows) at which the wall-clock deadline is polled once a scan has
+/// produced more than [`PRECISE_DEADLINE_ROWS`] rows. See that constant for the
+/// precision/overhead rationale.
+///
+/// Row index 0 always polls (so an already-past deadline short-circuits *before*
+/// the first pull). The residual precision tradeoff — cancellation is a
+/// row-boundary event, so a *many-fast-rows* scan can overshoot its deadline by
+/// up to the time to produce `STRIDE` more rows (tens of microseconds; far
+/// inside the ≤10% grace bound even for a 100ms timeout) — applies only in the
+/// amortized regime. A query whose *individual rows* each exceed the grace
+/// budget can overshoot by one such row regardless of stride: the inherent floor
+/// of cooperative, row-granular cancellation.
+const DEADLINE_CHECK_STRIDE: usize = 64;
+
+/// Cooperative-cancellation wrapper enforcing per-query resource limits
+/// (Issue #3368 engine lane; see [`crate::query::limits`]).
+///
+/// Installed by [`super::QueryExecutor::execute`] only when
+/// [`QueryResourceLimits::is_unlimited`] is `false` -- the common, unlimited
+/// case never allocates this wrapper and pays no per-row overhead (see the
+/// module-level docs on `crate::query::limits`).
+///
+/// Each dimension is checked in a fixed order on every [`next`](Self::next)
+/// call:
+///
+/// 1. **Wall-clock timeout**, checked *before* pulling from the inner
+///    iterator, so a query that already blew its budget performs no further
+///    work at all (provably: the test suite wraps a mock inner iterator that
+///    panics if `next()` is ever called and confirms a past deadline never
+///    reaches it).
+/// 2. **Result rows**, checked after a row is pulled.
+/// 3. **Memory bytes** (via [`estimate_row_bytes`]), checked after a row is
+///    pulled and has passed the row-count check.
+///
+/// Once any dimension is breached the guard is "fused": every subsequent
+/// `next()` call returns `None` without touching the inner iterator again,
+/// mirroring the standard library's `Fuse` behavior for an iterator that has
+/// just yielded an error it cannot meaningfully recover from mid-stream.
+pub struct ResourceGuardIterator {
+    inner: Box<dyn ResultIterator>,
+    deadline: Option<std::time::Instant>,
+    max_rows: Option<usize>,
+    max_memory_bytes: Option<usize>,
+    counters: Option<Arc<crate::query::limits::LimitCounters>>,
+    /// When the guard was constructed. Used to report `consumed` (elapsed
+    /// milliseconds) on a wall-clock timeout error.
+    started: std::time::Instant,
+    /// The wall-clock budget in milliseconds, captured at construction as the
+    /// remaining time-to-deadline (an honest proxy for the originally
+    /// configured timeout, since the guard is installed immediately after the
+    /// deadline is computed). `0` when there is no deadline.
+    configured_timeout_ms: u64,
+    rows_emitted: usize,
+    bytes_accumulated: usize,
+    /// Set once any dimension has been breached; short-circuits all further
+    /// `next()` calls to `None`.
+    terminated: bool,
+}
+
+impl ResourceGuardIterator {
+    /// Wrap `inner` with the given resolved `limits`, optionally recording
+    /// terminations into `counters`.
+    pub fn new(
+        inner: Box<dyn ResultIterator>,
+        limits: crate::query::limits::QueryResourceLimits,
+        counters: Option<Arc<crate::query::limits::LimitCounters>>,
+    ) -> Self {
+        let started = std::time::Instant::now();
+        let configured_timeout_ms = limits
+            .deadline
+            .map(|d| d.saturating_duration_since(started).as_millis() as u64)
+            .unwrap_or(0);
+        ResourceGuardIterator {
+            inner,
+            deadline: limits.deadline,
+            max_rows: limits.max_rows,
+            max_memory_bytes: limits.max_memory_bytes,
+            counters,
+            started,
+            configured_timeout_ms,
+            rows_emitted: 0,
+            bytes_accumulated: 0,
+            terminated: false,
+        }
+    }
+
+    fn record(&self, dimension: crate::query::limits::LimitDimension) {
+        if let Some(counters) = &self.counters {
+            counters.record_termination(dimension);
+        }
+    }
+}
+
+impl ResultIterator for ResourceGuardIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        use crate::core::error::{Error, QueryError};
+        use crate::query::limits::LimitDimension;
+
+        if self.terminated {
+            return None;
+        }
+
+        // 1. Wall-clock timeout: checked BEFORE pulling from `inner`, so a
+        // query that has already exhausted its budget never does another unit of
+        // work. The clock is polled on every row for the first
+        // `PRECISE_DEADLINE_ROWS` rows (so a slow, low-row-count query is cut
+        // precisely) and once per `DEADLINE_CHECK_STRIDE` rows thereafter (so a
+        // large benign scan pays no per-row clock syscall). Row index 0 always
+        // polls. See the two constants' docs for the full rationale.
+        if let Some(deadline) = self.deadline
+            && (self.rows_emitted < PRECISE_DEADLINE_ROWS
+                || self.rows_emitted.is_multiple_of(DEADLINE_CHECK_STRIDE))
+            && std::time::Instant::now() >= deadline
+        {
+            self.terminated = true;
+            self.record(LimitDimension::WallClockTimeout);
+            let consumed = self.started.elapsed().as_millis() as u64;
+            return Some(Err(Error::Query(QueryError::ResourceExhausted {
+                dimension: LimitDimension::WallClockTimeout.as_str(),
+                limit: self.configured_timeout_ms,
+                consumed,
+                retriable: true,
+            })));
+        }
+
+        let row = match self.inner.next()? {
+            Ok(row) => row,
+            Err(e) => return Some(Err(e)),
+        };
+
+        // 2. Result rows.
+        self.rows_emitted += 1;
+        if let Some(max_rows) = self.max_rows
+            && self.rows_emitted > max_rows
+        {
+            self.terminated = true;
+            self.record(LimitDimension::ResultRows);
+            return Some(Err(Error::Query(QueryError::ResourceExhausted {
+                dimension: LimitDimension::ResultRows.as_str(),
+                limit: max_rows as u64,
+                consumed: self.rows_emitted as u64,
+                retriable: false,
+            })));
+        }
+
+        // 3. Memory bytes. Only pay the row-byte-estimation cost when the
+        // dimension is actually enforced.
+        if let Some(budget) = self.max_memory_bytes {
+            self.bytes_accumulated += crate::query::limits::estimate_row_bytes(&row);
+            if self.bytes_accumulated > budget {
+                self.terminated = true;
+                self.record(LimitDimension::MemoryBytes);
+                return Some(Err(Error::Query(QueryError::ResourceExhausted {
+                    dimension: LimitDimension::MemoryBytes.as_str(),
+                    limit: budget as u64,
+                    consumed: self.bytes_accumulated as u64,
+                    retriable: false,
+                })));
+            }
+        }
+
+        Some(Ok(row))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -3115,6 +4024,656 @@ impl ResultIterator for AggregateIterator {
     }
 }
 
+/// One change-point in an entity's reconstructed valid-time timeline, as
+/// believed at the query's transaction-time coordinate (Issue #3363). The
+/// version's value holds from `valid_from` until the next change-point (or
+/// forever, for the last one).
+struct BelievedVersion {
+    /// Valid-time interval start, microseconds since epoch.
+    valid_from: i64,
+    /// The version's reconstructed properties.
+    properties: crate::core::property::PropertyMap,
+}
+
+/// Per-window, per-aggregate accumulator for temporal window aggregation.
+struct WindowAcc {
+    func: WindowAggFunc,
+    /// COUNT: entities/samples present; CHANGES: version-start count.
+    count: i64,
+    /// Count of numeric samples folded (value aggregates).
+    numeric_count: i64,
+    sum_i: i128,
+    sum_f: f64,
+    saw_float: bool,
+    min: Option<PropertyValue>,
+    max: Option<PropertyValue>,
+}
+
+impl WindowAcc {
+    fn new(func: WindowAggFunc) -> Self {
+        WindowAcc {
+            func,
+            count: 0,
+            numeric_count: 0,
+            sum_i: 0,
+            sum_f: 0.0,
+            saw_float: false,
+            min: None,
+            max: None,
+        }
+    }
+
+    /// Fold one numeric value sample (SUM/AVG/MIN/MAX/COUNT-of-property).
+    fn fold_value(&mut self, v: &PropertyValue) {
+        if let Some(f) = property_as_f64(v) {
+            self.numeric_count += 1;
+            self.sum_f += f;
+            match v {
+                PropertyValue::Int(i) => self.sum_i += i128::from(*i),
+                PropertyValue::Float(_) => self.saw_float = true,
+                _ => {}
+            }
+            match &self.min {
+                Some(m) if compare_property(v, m) != std::cmp::Ordering::Less => {}
+                _ => self.min = Some(v.clone()),
+            }
+            match &self.max {
+                Some(m) if compare_property(v, m) != std::cmp::Ordering::Greater => {}
+                _ => self.max = Some(v.clone()),
+            }
+        }
+    }
+
+    /// Produce the final [`PropertyValue`] for this window/aggregate. Value
+    /// aggregates over an empty/absent sample set yield `Null` (an explicit
+    /// "no data" marker per the #3363 contract); COUNT/CHANGES yield `0`.
+    fn finalize(self) -> PropertyValue {
+        match self.func {
+            WindowAggFunc::Count | WindowAggFunc::Changes => PropertyValue::Int(self.count),
+            WindowAggFunc::Sum => {
+                if self.numeric_count == 0 {
+                    PropertyValue::Null
+                } else if self.saw_float {
+                    PropertyValue::Float(self.sum_f)
+                } else {
+                    // All-integer sum; promote to float only if it overflows i64.
+                    i64::try_from(self.sum_i)
+                        .map(PropertyValue::Int)
+                        .unwrap_or(PropertyValue::Float(self.sum_f))
+                }
+            }
+            WindowAggFunc::Avg => {
+                if self.numeric_count == 0 {
+                    PropertyValue::Null
+                } else {
+                    PropertyValue::Float(self.sum_f / self.numeric_count as f64)
+                }
+            }
+            WindowAggFunc::Min => self.min.unwrap_or(PropertyValue::Null),
+            WindowAggFunc::Max => self.max.unwrap_or(PropertyValue::Null),
+        }
+    }
+}
+
+/// Temporal aggregation window iterator (Issue #3363).
+///
+/// On the first `next()` it drains the upstream matched-entity stream to a set
+/// of node ids, reconstructs each entity's valid-time history as believed at the
+/// spec's transaction-time coordinate, buckets that history into the spec's
+/// tumbling windows, and emits one computed-column [`QueryRow`] per window
+/// carrying `window_start`/`window_end` (RFC 3339) followed by each aggregate.
+/// See [`crate::query::temporal_window`] for the boundary contract and the
+/// crate guide for the sampling rules.
+pub struct TemporalWindowAggregateIterator {
+    input: Option<Box<dyn ResultIterator>>,
+    spec: TemporalWindowSpec,
+    historical: Arc<RwLock<HistoricalStorage>>,
+    output: std::vec::IntoIter<QueryRow>,
+    drained: bool,
+}
+
+impl TemporalWindowAggregateIterator {
+    /// Create a new temporal window aggregation iterator.
+    pub fn new(
+        input: Box<dyn ResultIterator>,
+        spec: TemporalWindowSpec,
+        historical: Arc<RwLock<HistoricalStorage>>,
+    ) -> Self {
+        TemporalWindowAggregateIterator {
+            input: Some(input),
+            spec,
+            historical,
+            output: Vec::new().into_iter(),
+            drained: false,
+        }
+    }
+
+    fn drain(&mut self) -> Result<()> {
+        let mut input = match self.input.take() {
+            Some(i) => i,
+            None => return Ok(()),
+        };
+
+        // Collect distinct matched node ids, preserving discovery order. v1
+        // windows nodes only (the converter rejects edge/traversal windows).
+        let mut node_ids: Vec<NodeId> = Vec::new();
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        while let Some(row) = input.next() {
+            let row = row?;
+            if let Some(EntityId::Node(id)) = row.entity.id()
+                && seen.insert(id)
+            {
+                node_ids.push(id);
+            }
+        }
+
+        // Generate the tumbling windows (validated at convert time; re-run here
+        // to obtain the boundaries). A structured error would already have been
+        // raised during conversion, so this is effectively infallible.
+        let windows = crate::query::temporal_window::generate_windows(
+            self.spec.range_start_micros,
+            self.spec.range_end_micros,
+            self.spec.granularity,
+        )
+        .map_err(|e| {
+            crate::core::error::Error::Query(crate::core::error::QueryError::InvalidParameter {
+                parameter: "temporal window".to_string(),
+                reason: format!("{e:?}"),
+            })
+        })?;
+
+        let as_of = self.spec.as_of_system_time;
+        let naggs = self.spec.aggregates.len();
+        // accs[window_index][aggregate_index]
+        let mut accs: Vec<Vec<WindowAcc>> = windows
+            .iter()
+            .map(|_| {
+                self.spec
+                    .aggregates
+                    .iter()
+                    .map(|a| WindowAcc::new(a.func))
+                    .collect()
+            })
+            .collect();
+
+        {
+            let hist = self.historical.read();
+            for node_id in &node_ids {
+                // Reconstruct the entity's valid-time timeline as believed at
+                // the transaction-time coordinate (#3363 AC: later corrections
+                // must not rewrite past analytics). Every version *recorded by*
+                // `as_of` (`transaction_from <= as_of`) contributes a
+                // change-point at its `valid_from`; versions recorded later are
+                // invisible. Multiple versions sharing a `valid_from` are a
+                // same-instant correction, so we keep the one with the latest
+                // belief (greatest `transaction_from <= as_of`). Both value
+                // sampling and CHANGES read from this single, consistent source.
+                // Entities absent from current state (e.g. deleted) cannot be
+                // walked in v1 and are skipped (documented).
+                let believed: Vec<BelievedVersion> = match hist.get_node_history(*node_id) {
+                    Ok(h) => {
+                        let mut by_vf: std::collections::HashMap<
+                            i64,
+                            (Timestamp, crate::core::property::PropertyMap),
+                        > = std::collections::HashMap::new();
+                        for ver in h.versions {
+                            let tx_from = ver.temporal.transaction_time().start();
+                            if tx_from > as_of {
+                                continue;
+                            }
+                            let vf = ver.temporal.valid_time().start().wallclock();
+                            match by_vf.get(&vf) {
+                                Some((existing_tx, _)) if *existing_tx >= tx_from => {}
+                                _ => {
+                                    by_vf.insert(vf, (tx_from, ver.properties));
+                                }
+                            }
+                        }
+                        let mut v: Vec<BelievedVersion> = by_vf
+                            .into_iter()
+                            .map(|(valid_from, (_, properties))| BelievedVersion {
+                                valid_from,
+                                properties,
+                            })
+                            .collect();
+                        v.sort_by_key(|b| b.valid_from);
+                        v
+                    }
+                    Err(_) => continue,
+                };
+
+                for (w_idx, window) in windows.iter().enumerate() {
+                    // Value sample: the value in effect at the window start --
+                    // the change-point with the greatest `valid_from <= start`.
+                    // `None` => the entity did not yet exist at the window start.
+                    let sample = believed
+                        .iter()
+                        .rev()
+                        .find(|b| b.valid_from <= window.start_micros);
+
+                    for (a_idx, agg) in self.spec.aggregates.iter().enumerate() {
+                        let acc = &mut accs[w_idx][a_idx];
+                        match (agg.func, &agg.arg) {
+                            (WindowAggFunc::Changes, arg) => {
+                                acc.count += changes_in_window(&believed, window, arg);
+                            }
+                            (WindowAggFunc::Count, WindowAggArg::Star) => {
+                                if sample.is_some() {
+                                    acc.count += 1;
+                                }
+                            }
+                            (WindowAggFunc::Count, WindowAggArg::Property(key)) => {
+                                if let Some(v) = sample.and_then(|b| b.properties.get(key.as_str()))
+                                    && property_as_f64(v).is_some()
+                                {
+                                    acc.count += 1;
+                                }
+                            }
+                            // Value aggregates (SUM/AVG/MIN/MAX) over a property.
+                            (_, WindowAggArg::Property(key)) => {
+                                if let Some(v) = sample.and_then(|b| b.properties.get(key.as_str()))
+                                {
+                                    acc.fold_value(v);
+                                }
+                            }
+                            // SUM/AVG/MIN/MAX with a `*` argument is rejected at
+                            // convert time; nothing to fold if it slips through.
+                            (_, WindowAggArg::Star) => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        // Emit one row per window: window_start, window_end, then aggregates.
+        let mut rows = Vec::with_capacity(windows.len());
+        for (w_idx, window) in windows.iter().enumerate() {
+            let mut columns: Vec<(String, PropertyValue)> = Vec::with_capacity(2 + naggs);
+            columns.push((
+                "window_start".to_string(),
+                PropertyValue::String(Arc::from(
+                    crate::query::temporal_window::format_rfc3339(window.start_micros).as_str(),
+                )),
+            ));
+            columns.push((
+                "window_end".to_string(),
+                PropertyValue::String(Arc::from(
+                    crate::query::temporal_window::format_rfc3339(window.end_micros).as_str(),
+                )),
+            ));
+            let window_accs = std::mem::take(&mut accs[w_idx]);
+            for (agg, acc) in self.spec.aggregates.iter().zip(window_accs) {
+                columns.push((agg.output_name.clone(), acc.finalize()));
+            }
+            rows.push(QueryRow::from_columns(columns));
+        }
+        self.output = rows.into_iter();
+        Ok(())
+    }
+}
+
+/// Count the versions whose valid interval *starts* within `window`
+/// (`[start, end)`), among the believed versions, for a `CHANGES` aggregate.
+///
+/// - `CHANGES(*)` / `CHANGES(v)` counts every entity version starting in the
+///   window.
+/// - `CHANGES(v.prop)` counts only versions whose value for `prop` differs from
+///   the immediately-preceding believed version's value (a genuine property
+///   change; the first believed version counts as a change from "absent").
+fn changes_in_window(
+    believed: &[BelievedVersion],
+    window: &crate::query::temporal_window::Window,
+    arg: &WindowAggArg,
+) -> i64 {
+    let in_window = |vf: i64| vf >= window.start_micros && vf < window.end_micros;
+    match arg {
+        WindowAggArg::Star => believed.iter().filter(|b| in_window(b.valid_from)).count() as i64,
+        WindowAggArg::Property(key) => {
+            let mut count = 0i64;
+            for (i, b) in believed.iter().enumerate() {
+                if !in_window(b.valid_from) {
+                    continue;
+                }
+                let cur = b.properties.get(key.as_str());
+                let prev = if i == 0 {
+                    None
+                } else {
+                    believed[i - 1].properties.get(key.as_str())
+                };
+                if !property_values_equal(cur, prev) {
+                    count += 1;
+                }
+            }
+            count
+        }
+    }
+}
+
+/// Equality of two optional property values for property-change detection.
+fn property_values_equal(a: Option<&PropertyValue>, b: Option<&PropertyValue>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+impl ResultIterator for TemporalWindowAggregateIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        if !self.drained {
+            self.drained = true;
+            if let Err(e) = self.drain() {
+                return Some(Err(e));
+            }
+        }
+        self.output.next().map(Ok)
+    }
+}
+
+/// Temporal join / align iterator (Issue #3379).
+///
+/// On the first `next()` it drains the upstream matched-participant stream. For
+/// each matched row it extracts each participant's node id (and any gating edge
+/// id) per the spec, reconstructs each participant's believed valid-time
+/// timeline (and gating-edge presence intervals) as of the spec's
+/// transaction-time coordinate, and runs the storage-free
+/// [`crate::query::temporal_join`] alignment for the requested mode. Each
+/// resulting alignment coordinate becomes one computed-column [`QueryRow`]
+/// carrying the coordinate (RFC 3339) followed by the resolved `RETURN` items.
+pub struct TemporalJoinIterator {
+    input: Option<Box<dyn ResultIterator>>,
+    spec: TemporalAlignSpec,
+    historical: Arc<RwLock<HistoricalStorage>>,
+    output: std::vec::IntoIter<QueryRow>,
+    drained: bool,
+}
+
+impl TemporalJoinIterator {
+    /// Create a new temporal join iterator.
+    pub fn new(
+        input: Box<dyn ResultIterator>,
+        spec: TemporalAlignSpec,
+        historical: Arc<RwLock<HistoricalStorage>>,
+    ) -> Self {
+        TemporalJoinIterator {
+            input: Some(input),
+            spec,
+            historical,
+            output: Vec::new().into_iter(),
+            drained: false,
+        }
+    }
+
+    /// Extract the node id for a participant from a matched row, per its
+    /// configured [`AlignNodeSource`].
+    fn participant_node_id(row: &QueryRow, source: AlignNodeSource) -> Option<NodeId> {
+        match source {
+            AlignNodeSource::Entity => row.entity.node_id(),
+            AlignNodeSource::PathIndex(i) => match row.path.as_ref()?.get(i)? {
+                EntityId::Node(id) => Some(*id),
+                EntityId::Edge(_) => None,
+            },
+        }
+    }
+
+    /// Extract the gating edge id for a participant from a matched row.
+    fn gate_edge_id(row: &QueryRow, path_index: usize) -> Option<EdgeId> {
+        match row.path.as_ref()?.get(path_index)? {
+            EntityId::Edge(id) => Some(*id),
+            EntityId::Node(_) => None,
+        }
+    }
+
+    /// Reconstruct a node's believed valid-time timeline as of `as_of`: every
+    /// version recorded by `as_of` (`transaction_from <= as_of`) contributes a
+    /// change-point over its half-open valid interval `[valid_from, valid_to)`;
+    /// same-`valid_from` corrections keep the latest belief (mirrors the #3363
+    /// believed-version reconstruction). A retraction (#3230) / delete closes
+    /// the covering version's `valid_to`, so the entity becomes **absent** at/
+    /// after it rather than presumed present forever (Issue #3379 correctness,
+    /// symmetric with the edge-gate path).
+    ///
+    /// A genuinely missing node (`NodeNotFound`) yields an **empty** timeline
+    /// (a legitimate "absent" — the participant is simply null everywhere); any
+    /// **other** storage error is a real failure and is propagated so it can
+    /// surface as a structured `QueryError` rather than being silently read as
+    /// "not found" (Issue #3379 review finding).
+    fn node_timeline(
+        hist: &HistoricalStorage,
+        node_id: NodeId,
+        as_of: Timestamp,
+    ) -> Result<crate::query::temporal_join::Timeline> {
+        use crate::core::error::{Error, StorageError};
+        use crate::query::temporal_join::{ChangePoint, Timeline};
+        let h = match hist.get_node_history(node_id) {
+            Ok(h) => h,
+            Err(Error::Storage(StorageError::NodeNotFound(_))) => {
+                return Ok(Timeline::default());
+            }
+            Err(e) => return Err(e),
+        };
+        // valid_from -> (latest believed tx_from, properties, valid_to).
+        let mut by_vf: std::collections::HashMap<
+            i64,
+            (Timestamp, crate::core::property::PropertyMap, i64),
+        > = std::collections::HashMap::new();
+        for ver in h.versions {
+            let tx_from = ver.temporal.transaction_time().start();
+            if tx_from > as_of {
+                continue;
+            }
+            let vf = ver.temporal.valid_time().start().wallclock();
+            let vt = ver.temporal.valid_time().end().wallclock();
+            match by_vf.get(&vf) {
+                Some((existing_tx, _, _)) if *existing_tx >= tx_from => {}
+                _ => {
+                    by_vf.insert(vf, (tx_from, ver.properties, vt));
+                }
+            }
+        }
+        let changes = by_vf
+            .into_iter()
+            .map(|(valid_from, (_, properties, valid_to))| ChangePoint {
+                valid_from,
+                valid_to,
+                properties,
+            })
+            .collect();
+        Ok(Timeline::from_changes(changes))
+    }
+
+    /// Reconstruct an edge's believed presence intervals as of `as_of`: each
+    /// believed version contributes its half-open valid interval
+    /// `[valid_from, valid_to)` (an open interval ends at `i64::MAX`).
+    ///
+    /// As with [`node_timeline`](Self::node_timeline), a missing edge
+    /// (`EdgeNotFound`) yields **empty** presence intervals (a gate that is
+    /// never open); any other storage error is propagated (Issue #3379 review
+    /// finding — do not conflate a genuine error with not-found).
+    fn edge_presence(
+        hist: &HistoricalStorage,
+        edge_id: EdgeId,
+        as_of: Timestamp,
+    ) -> Result<crate::query::temporal_join::PresenceIntervals> {
+        use crate::core::error::{Error, StorageError};
+        use crate::query::temporal_join::PresenceIntervals;
+        let h = match hist.get_edge_history(edge_id) {
+            Ok(h) => h,
+            Err(Error::Storage(StorageError::EdgeNotFound(_))) => {
+                return Ok(PresenceIntervals::default());
+            }
+            Err(e) => return Err(e),
+        };
+        let mut by_vf: std::collections::HashMap<i64, (Timestamp, i64)> =
+            std::collections::HashMap::new();
+        for ver in h.versions {
+            let tx_from = ver.temporal.transaction_time().start();
+            if tx_from > as_of {
+                continue;
+            }
+            let vf = ver.temporal.valid_time().start().wallclock();
+            let vt = ver.temporal.valid_time().end().wallclock();
+            match by_vf.get(&vf) {
+                Some((existing_tx, _)) if *existing_tx >= tx_from => {}
+                _ => {
+                    by_vf.insert(vf, (tx_from, vt));
+                }
+            }
+        }
+        let intervals = by_vf.into_iter().map(|(vf, (_, vt))| (vf, vt)).collect();
+        Ok(PresenceIntervals { intervals })
+    }
+
+    fn drain(&mut self) -> Result<()> {
+        use crate::query::temporal_join::{
+            self, AlignCoordinate, AlignMode, Participant, PresenceIntervals,
+        };
+
+        let input = match self.input.take() {
+            Some(i) => i,
+            None => return Ok(()),
+        };
+
+        let as_of = self.spec.as_of_system_time;
+        let from = self.spec.range_start_micros;
+        let to = self.spec.range_end_micros;
+
+        // Phase 1: fully drain the upstream matched-participant stream into a
+        // Vec of per-row resolved (node id + gating edge id) tuples, THEN drop
+        // the input iterator, all BEFORE acquiring the `historical` read guard.
+        // Holding a parking_lot read guard across `input.next()` risks a
+        // recursive-read deadlock (an upstream iterator may itself take the
+        // same lock) and starves writers; mirror the #3363 sibling which drains
+        // first (Issue #3379 review finding — BLOCKER). A row whose participant
+        // node id cannot be located is skipped whole (defensive against a
+        // null/optional binding; the pattern shape normally guarantees it).
+        struct ResolvedParticipant {
+            node_id: NodeId,
+            gate_edge_id: Option<EdgeId>,
+        }
+        let mut resolved_rows: Vec<Vec<ResolvedParticipant>> = Vec::new();
+        {
+            let mut input = input;
+            while let Some(row) = input.next() {
+                let row = row?;
+                let mut resolved: Vec<ResolvedParticipant> =
+                    Vec::with_capacity(self.spec.participants.len());
+                let mut incomplete = false;
+                for p in &self.spec.participants {
+                    let Some(nid) = Self::participant_node_id(&row, p.node_source) else {
+                        incomplete = true;
+                        break;
+                    };
+                    let gate_edge_id = p
+                        .edge_gate_path_index
+                        .and_then(|idx| Self::gate_edge_id(&row, idx));
+                    resolved.push(ResolvedParticipant {
+                        node_id: nid,
+                        gate_edge_id,
+                    });
+                }
+                if !incomplete {
+                    resolved_rows.push(resolved);
+                }
+            }
+        }
+
+        // Phase 2: acquire the `historical` read guard in a scoped block and
+        // reconstruct each participant's believed timeline / gating-edge
+        // presence, run the storage-free alignment, and materialize rows. No
+        // `input.next()` runs while this guard is held.
+        let mut rows: Vec<QueryRow> = Vec::new();
+        let hist = self.historical.read();
+        for resolved in &resolved_rows {
+            let mut node_ids: Vec<NodeId> = Vec::with_capacity(resolved.len());
+            let mut participants: Vec<Participant> = Vec::with_capacity(resolved.len());
+            for (p, r) in self.spec.participants.iter().zip(resolved) {
+                node_ids.push(r.node_id);
+                let timeline = Self::node_timeline(&hist, r.node_id, as_of)?;
+                let gate: Option<PresenceIntervals> = match (p.edge_gate_path_index, r.gate_edge_id)
+                {
+                    (Some(_), Some(eid)) => Some(Self::edge_presence(&hist, eid, as_of)?),
+                    _ => None,
+                };
+                participants.push(Participant { timeline, gate });
+            }
+
+            // Run the storage-free alignment for the requested mode.
+            let aligned = match self.spec.mode {
+                AlignMode::Events => {
+                    temporal_join::align_events(&participants, self.spec.driver_index, from, to)
+                }
+                AlignMode::Overlap => temporal_join::align_overlap(&participants, from, to),
+            }
+            .map_err(temporal_join::align_error_to_query_error)?;
+
+            // Materialize each aligned coordinate into a computed-column row.
+            for arow in aligned {
+                let mut columns: Vec<(String, PropertyValue)> = Vec::new();
+                match arow.coordinate {
+                    AlignCoordinate::Instant(t) => columns.push((
+                        "align_valid_time".to_string(),
+                        PropertyValue::String(Arc::from(
+                            crate::query::temporal_window::format_rfc3339(t).as_str(),
+                        )),
+                    )),
+                    AlignCoordinate::Interval { from: s, to: e } => {
+                        columns.push((
+                            "overlap_from".to_string(),
+                            PropertyValue::String(Arc::from(
+                                crate::query::temporal_window::format_rfc3339(s).as_str(),
+                            )),
+                        ));
+                        columns.push((
+                            "overlap_to".to_string(),
+                            PropertyValue::String(Arc::from(
+                                crate::query::temporal_window::format_rfc3339(e).as_str(),
+                            )),
+                        ));
+                    }
+                }
+
+                for item in &self.spec.output_items {
+                    let pidx = item.participant_index;
+                    let value = match arow.sample_index.get(pidx).copied().flatten() {
+                        None => PropertyValue::Null,
+                        Some(sample_idx) => match &item.key {
+                            None => {
+                                // `RETURN v` (no key) -> the participant's node id.
+                                PropertyValue::Int(node_ids[pidx].as_u64() as i64)
+                            }
+                            Some(key) => participants[pidx].timeline.changes[sample_idx]
+                                .properties
+                                .get(key.as_str())
+                                .cloned()
+                                .unwrap_or(PropertyValue::Null),
+                        },
+                    };
+                    columns.push((item.output_name.clone(), value));
+                }
+
+                rows.push(QueryRow::from_columns(columns));
+            }
+        }
+        drop(hist);
+
+        self.output = rows.into_iter();
+        Ok(())
+    }
+}
+
+impl ResultIterator for TemporalJoinIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        if !self.drained {
+            self.drained = true;
+            if let Err(e) = self.drain() {
+                return Some(Err(e));
+            }
+        }
+        self.output.next().map(Ok)
+    }
+}
+
 /// A whole-row deduplication key for `DISTINCT`.
 #[derive(PartialEq, Eq, Hash)]
 enum DistinctRowKey {
@@ -3165,6 +4724,65 @@ impl ResultIterator for DistinctIterator {
     }
 }
 
+/// Resolve the write-time provenance bundle recorded on the version a row's
+/// entity represents (node or edge), at the query's bi-temporal coordinate
+/// (Issue #3354).
+///
+/// The entity's `current_version` already reflects an `AS OF` reconstruction
+/// (mirroring [`FilterIterator::resolve_node_provenance`]), so provenance is
+/// read as recorded at that coordinate. Returns `None` for an unattributed
+/// version, a non-entity row, or a lookup error.
+fn resolve_entity_provenance(
+    entity: &EntityResult,
+    historical: &Arc<RwLock<HistoricalStorage>>,
+) -> Option<Provenance> {
+    match entity {
+        EntityResult::Node(n) => historical
+            .read()
+            .get_node_version_provenance(n.current_version)
+            .ok()
+            .flatten(),
+        EntityResult::Edge(e) => historical
+            .read()
+            .get_edge_version_provenance(e.current_version)
+            .ok()
+            .flatten(),
+        _ => None,
+    }
+}
+
+/// Map a provenance field to its projected [`PropertyValue`] (Issue #3354).
+///
+/// An absent bundle, or a bundle missing the requested field, projects
+/// [`PropertyValue::Null`] -- distinguishing "no value" from any real value,
+/// exactly as the `WHERE` accessor semantics treat a missing field.
+fn provenance_field_value(prov: Option<&Provenance>, field: ProvenanceField) -> PropertyValue {
+    match field {
+        ProvenanceField::Source => prov
+            .and_then(Provenance::source)
+            .map_or(PropertyValue::Null, |s| PropertyValue::String(s.into())),
+        ProvenanceField::Confidence => prov
+            .and_then(Provenance::confidence)
+            .map_or(PropertyValue::Null, PropertyValue::Float),
+        ProvenanceField::Reason => prov
+            .and_then(Provenance::note)
+            .map_or(PropertyValue::Null, |s| PropertyValue::String(s.into())),
+    }
+}
+
+/// Provenance field value as an `Option`, collapsing [`PropertyValue::Null`]
+/// (absent bundle or missing field) to `None` so a sort treats it as a null
+/// (Issue #3354). Used by the decorate-sort-undecorate provenance ordering path.
+fn provenance_field_value_opt(
+    prov: Option<&Provenance>,
+    field: ProvenanceField,
+) -> Option<PropertyValue> {
+    match provenance_field_value(prov, field) {
+        PropertyValue::Null => None,
+        v => Some(v),
+    }
+}
+
 /// Look up a value for ordering by column/property name: first a node property
 /// (entity rows), then a computed aggregate column (`row.columns`) so ORDER BY
 /// can sort grouped/aggregate rows by a group key or aggregate alias.
@@ -3175,6 +4793,61 @@ fn row_value<'a>(row: &'a QueryRow, key: &str) -> Option<&'a PropertyValue> {
     row.columns
         .as_ref()
         .and_then(|cols| cols.iter().find(|(k, _)| k == key).map(|(_, v)| v))
+}
+
+/// Resolve a reserved *structural* edge field to a synthetic [`PropertyValue`]
+/// for edge-property WHERE / ORDER BY evaluation (Issue #3622).
+///
+/// Returns `None` for any key that is not a reserved structural field, so a
+/// genuine user property falls through to the edge's `properties` map. Resolving
+/// these reserved names against `properties` (where they never live) would
+/// silently yield null and mis-evaluate every predicate/sort key on them -- the
+/// exact silent-wrong-result the pre-#3622 rejection guarded against.
+///
+/// - `type` / `label` -> the edge's interned type string (compared / sorted as a
+///   `String`).
+/// - `source` / `target` -> the endpoint `NodeId` as its integer id.
+/// - `id` -> the edge's own `EdgeId` as its integer id.
+pub(crate) fn edge_structural_value(
+    edge: &crate::core::graph::Edge,
+    key: &str,
+) -> Option<PropertyValue> {
+    match key {
+        "type" | "label" => GLOBAL_INTERNER.resolve_with(edge.label, |s| PropertyValue::from(s)),
+        "source" => Some(PropertyValue::Int(edge.source.as_u64() as i64)),
+        "target" => Some(PropertyValue::Int(edge.target.as_u64() as i64)),
+        "id" => Some(PropertyValue::Int(edge.id.as_u64() as i64)),
+        _ => None,
+    }
+}
+
+/// The id of the last edge in a traversal path (the edge that reached the
+/// path's final node), for attaching the single-hop traversed edge to a row
+/// (Issue #3622). `None` when the path is absent or contains no edge.
+fn last_edge_in_path(path: &Option<Vec<EntityId>>) -> Option<crate::core::EdgeId> {
+    path.as_ref()?.iter().rev().find_map(|e| match e {
+        EntityId::Edge(id) => Some(*id),
+        EntityId::Node(_) => None,
+    })
+}
+
+/// Resolve a [`SortKey::EdgeProperty`] key from a row's traversed edge side
+/// channel (Issue #3622): reserved structural fields (via
+/// [`edge_structural_value`], shadowing user props) first, then the edge's own
+/// properties. `None` when the row has no edge channel or the key is absent, so
+/// the row sorts as a null value. Returns a [`Cow`] so a user property is
+/// borrowed (no clone per comparison); only a synthesized structural value is
+/// owned.
+fn edge_sort_value<'a>(
+    row: &'a QueryRow,
+    key: &str,
+) -> Option<std::borrow::Cow<'a, PropertyValue>> {
+    use std::borrow::Cow;
+    let edge = row.edge.as_ref()?;
+    if let Some(v) = edge_structural_value(edge, key) {
+        return Some(Cow::Owned(v));
+    }
+    edge.properties.get(key).map(Cow::Borrowed)
 }
 
 /// `ORDER BY` iterator: buffers the entire input and stably sorts it by one or
@@ -3190,16 +4863,89 @@ pub struct SortIterator {
     keys: Vec<(SortKey, bool)>,
     output: std::vec::IntoIter<QueryRow>,
     drained: bool,
+    /// Historical storage, needed only to resolve a [`SortKey::Provenance`] key
+    /// (Issue #3354) from each row entity's write-time provenance. `None` when
+    /// no provenance sort key is present (the common case), so an ordinary
+    /// property/score sort never touches historical storage.
+    historical: Option<Arc<RwLock<HistoricalStorage>>>,
+    /// When `true`, a [`SortKey::Property`] on an EDGE row reads the edge's own
+    /// properties (real edge-property `ORDER BY`, Issue #3622) instead of
+    /// resolving to null. Set only by the executor when the sort's input subtree
+    /// is rooted at an `EdgeScan` (the SQL `FROM edges` lane). Defaults to
+    /// `false`, preserving the node-only sort-key extraction for AQL/Cypher.
+    edge_mode: bool,
 }
 
 impl SortIterator {
     /// Create a new ORDER BY iterator sorting by `keys` (first = primary).
+    ///
+    /// Carries no historical handle, so a [`SortKey::Provenance`] key would
+    /// resolve to null for every row. Use [`with_historical`](Self::with_historical)
+    /// when an `ORDER BY` may reference a provenance accessor.
     pub fn new(input: Box<dyn ResultIterator>, keys: Vec<(SortKey, bool)>) -> Self {
         SortIterator {
             input: Some(input),
             keys,
             output: Vec::new().into_iter(),
             drained: false,
+            historical: None,
+            edge_mode: false,
+        }
+    }
+
+    /// Enable real edge-property ordering (Issue #3622): a [`SortKey::Property`]
+    /// on an edge row reads the edge's own properties instead of resolving to
+    /// null. The executor sets this only for a sort whose input stream is rooted
+    /// at an `EdgeScan` (the SQL `FROM edges` lane). Node-row and aggregate
+    /// column ordering are unchanged.
+    #[must_use]
+    pub fn order_by_edge_properties(mut self, enabled: bool) -> Self {
+        self.edge_mode = enabled;
+        self
+    }
+
+    /// Resolve the ordering value for a property key on a single row, honoring
+    /// edge-property mode (Issue #3622): a node row (or aggregate column) uses
+    /// the shared [`row_value`] lookup; an edge row in `edge_mode` reads its own
+    /// properties, with the reserved structural fields
+    /// (`type`/`label`/`source`/`target`/`id`) resolved against the edge struct
+    /// (review fix) -- otherwise `ORDER BY type` would sort by a null key on
+    /// every row. Structural values are synthesized owned, hence the [`Cow`].
+    fn property_sort_value<'a>(
+        &self,
+        row: &'a QueryRow,
+        prop: &str,
+    ) -> Option<std::borrow::Cow<'a, PropertyValue>> {
+        use std::borrow::Cow;
+        if let Some(v) = row_value(row, prop) {
+            return Some(Cow::Borrowed(v));
+        }
+        if self.edge_mode
+            && let Some(edge) = row.entity.as_edge()
+        {
+            if let Some(v) = edge_structural_value(edge, prop) {
+                return Some(Cow::Owned(v));
+            }
+            return edge.properties.get(prop).map(Cow::Borrowed);
+        }
+        None
+    }
+
+    /// Create a sort iterator with access to historical storage so a
+    /// [`SortKey::Provenance`] key (Issue #3354) resolves each row entity's
+    /// write-time provenance at the version the row represents.
+    pub fn with_historical(
+        input: Box<dyn ResultIterator>,
+        keys: Vec<(SortKey, bool)>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+    ) -> Self {
+        SortIterator {
+            input: Some(input),
+            keys,
+            output: Vec::new().into_iter(),
+            drained: false,
+            historical: Some(historical),
+            edge_mode: false,
         }
     }
 
@@ -3212,15 +4958,50 @@ impl SortIterator {
         while let Some(row) = input.next() {
             rows.push(row?);
         }
-        rows.sort_by(|a, b| self.cmp_rows(a, b));
-        self.output = rows.into_iter();
+
+        // Decorate-sort-undecorate for provenance sort keys (Issue #3354): a
+        // `SortKey::Provenance` resolution is a historical read under the shared
+        // `historical` lock. Resolving it inside the comparator would cost
+        // O(n log n) locked lookups; instead resolve each row's provenance
+        // bundle EXACTLY ONCE (n lookups, a single lock span), sort against the
+        // precomputed bundles, then strip. This mirrors the WHERE path's
+        // per-row memoization. Null placement and stable ordering are identical
+        // to the on-the-fly path. When no provenance key is present (the common
+        // case) the ordinary comparator runs and historical is never touched.
+        if self
+            .keys
+            .iter()
+            .any(|(k, _)| matches!(k, SortKey::Provenance(_)))
+        {
+            let mut decorated: Vec<(Option<Provenance>, QueryRow)> = rows
+                .into_iter()
+                .map(|row| {
+                    let prov = self
+                        .historical
+                        .as_ref()
+                        .and_then(|h| resolve_entity_provenance(&row.entity, h));
+                    (prov, row)
+                })
+                .collect();
+            decorated.sort_by(|(a_prov, a), (b_prov, b)| {
+                self.cmp_decorated(a_prov.as_ref(), a, b_prov.as_ref(), b)
+            });
+            self.output = decorated
+                .into_iter()
+                .map(|(_, row)| row)
+                .collect::<Vec<_>>()
+                .into_iter();
+        } else {
+            rows.sort_by(|a, b| self.cmp_rows(a, b));
+            self.output = rows.into_iter();
+        }
         Ok(())
     }
 
     fn cmp_rows(&self, a: &QueryRow, b: &QueryRow) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         for (key, descending) in &self.keys {
-            let ord = Self::cmp_by_key(a, b, key, *descending);
+            let ord = self.cmp_by_key(a, b, key, *descending);
             if ord != Ordering::Equal {
                 return ord;
             }
@@ -3228,9 +5009,70 @@ impl SortIterator {
         Ordering::Equal
     }
 
+    /// Compare two rows whose provenance bundles have already been resolved once
+    /// (decorate-sort-undecorate, Issue #3354). A `SortKey::Provenance` key reads
+    /// the precomputed bundle instead of re-resolving; every other key falls
+    /// through to [`cmp_by_key`](Self::cmp_by_key). Ordering (including
+    /// openCypher null placement) is identical to the on-the-fly comparator.
+    fn cmp_decorated(
+        &self,
+        a_prov: Option<&Provenance>,
+        a: &QueryRow,
+        b_prov: Option<&Provenance>,
+        b: &QueryRow,
+    ) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        for (key, descending) in &self.keys {
+            let ord = match key {
+                SortKey::Provenance(field) => {
+                    let av = provenance_field_value_opt(a_prov, *field);
+                    let bv = provenance_field_value_opt(b_prov, *field);
+                    Self::cmp_optional(av.as_ref(), bv.as_ref(), *descending)
+                }
+                other => self.cmp_by_key(a, b, other, *descending),
+            };
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        }
+        Ordering::Equal
+    }
+
+    /// Compare two nullable values with openCypher null placement (nulls last
+    /// for ASC, first for DESC), applying `descending` to present-present pairs.
+    fn cmp_optional(
+        x: Option<&PropertyValue>,
+        y: Option<&PropertyValue>,
+        descending: bool,
+    ) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (x, y) {
+            (Some(x), Some(y)) => {
+                let ord = compare_property(x, y);
+                if descending { ord.reverse() } else { ord }
+            }
+            (Some(_), None) => {
+                if descending {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            (None, Some(_)) => {
+                if descending {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            (None, None) => Ordering::Equal,
+        }
+    }
+
     /// Compare two rows by a single key, applying openCypher null placement
     /// (nulls last for ASC, first for DESC).
     fn cmp_by_key(
+        &self,
         a: &QueryRow,
         b: &QueryRow,
         key: &SortKey,
@@ -3238,28 +5080,35 @@ impl SortIterator {
     ) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         match key {
-            SortKey::Property(prop) => match (row_value(a, prop), row_value(b, prop)) {
-                (Some(x), Some(y)) => {
-                    let ord = compare_property(x, y);
-                    if descending { ord.reverse() } else { ord }
-                }
-                // openCypher: nulls last for ASC, first for DESC.
-                (Some(_), None) => {
-                    if descending {
-                        Ordering::Greater
-                    } else {
-                        Ordering::Less
-                    }
-                }
-                (None, Some(_)) => {
-                    if descending {
-                        Ordering::Less
-                    } else {
-                        Ordering::Greater
-                    }
-                }
-                (None, None) => Ordering::Equal,
-            },
+            SortKey::Property(prop) => {
+                let av = self.property_sort_value(a, prop);
+                let bv = self.property_sort_value(b, prop);
+                Self::cmp_optional(av.as_deref(), bv.as_deref(), descending)
+            }
+            // Edge-property ORDER BY (Issue #3622): resolve the key against the
+            // row's traversed edge side channel -- reserved structural fields
+            // (`type`/`label`/`source`/`target`/`id`) via `edge_structural_value`
+            // (shadowing user props), otherwise `edge.properties`. A row with no
+            // edge channel, or an absent key, sorts as null (openCypher null
+            // placement).
+            SortKey::EdgeProperty(prop) => {
+                let av = edge_sort_value(a, prop);
+                let bv = edge_sort_value(b, prop);
+                Self::cmp_optional(av.as_deref(), bv.as_deref(), descending)
+            }
+            // Fallback on-the-fly resolution (Issue #3354). The hot path routes
+            // provenance keys through `cmp_decorated` (resolve once per row), so
+            // this arm is only a defensive fallback; it matches the WHERE-clause
+            // resolution: an unattributed row (or a bundle missing the field)
+            // sorts as null.
+            SortKey::Provenance(field) => {
+                let resolve = |row: &QueryRow| -> Option<PropertyValue> {
+                    let historical = self.historical.as_ref()?;
+                    let prov = resolve_entity_provenance(&row.entity, historical);
+                    provenance_field_value_opt(prov.as_ref(), *field)
+                };
+                Self::cmp_optional(resolve(a).as_ref(), resolve(b).as_ref(), descending)
+            }
             SortKey::Score => {
                 let ord = a.score.partial_cmp(&b.score).unwrap_or(Ordering::Equal);
                 if descending { ord.reverse() } else { ord }
@@ -3283,6 +5132,96 @@ impl ResultIterator for SortIterator {
             }
         }
         self.output.next().map(Ok)
+    }
+}
+
+/// Provenance-projection iterator (Issue #3354): for each input row, resolves
+/// the row entity's write-time provenance and attaches one output column per
+/// projected accessor (`RETURN source(n)`, `RETURN n, confidence(n) AS conf`).
+///
+/// When the projection names a bare entity variable (`entity_binding`), the row
+/// is emitted through the **bindings + columns** shape so the entity stays
+/// observable alongside the projected columns (mirroring the multi-variable /
+/// aggregation row shape, and keeping the entity from being dropped by a
+/// columns-only consumer); otherwise a pure columns row is produced. The score,
+/// path, and timestamp of the input row are preserved.
+///
+/// Runs last in the pipeline (after Sort/Skip/Limit), so it is 1:1 and never
+/// perturbs ordering or pagination.
+pub struct ProvenanceProjectIterator {
+    input: Box<dyn ResultIterator>,
+    projection: ProvenanceProjection,
+    historical: Arc<RwLock<HistoricalStorage>>,
+}
+
+impl ProvenanceProjectIterator {
+    /// Create a provenance-projection iterator resolving against `historical`.
+    pub fn new(
+        input: Box<dyn ResultIterator>,
+        projection: ProvenanceProjection,
+        historical: Arc<RwLock<HistoricalStorage>>,
+    ) -> Self {
+        ProvenanceProjectIterator {
+            input,
+            projection,
+            historical,
+        }
+    }
+
+    /// Build the projected columns for one row's entity, consuming the input
+    /// row (it is 1:1 replaced by the projected row).
+    fn project_row(&self, row: QueryRow) -> QueryRow {
+        let prov = resolve_entity_provenance(&row.entity, &self.historical);
+        let projected: Vec<(String, PropertyValue)> = self
+            .projection
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.output_name.clone(),
+                    provenance_field_value(prov.as_ref(), item.field),
+                )
+            })
+            .collect();
+
+        // Preserve any bare entity via the bindings channel so it survives
+        // columns-only consumers (e.g. the MCP serializer); otherwise emit a
+        // pure columns row like aggregation output.
+        let bindings = self
+            .projection
+            .entity_binding
+            .as_ref()
+            .map(|var| vec![(var.clone(), row.entity.clone())]);
+
+        // Defense-in-depth (Issue #3354 findings #5/#7): MERGE onto any
+        // pre-existing columns rather than overwriting them. No upstream op
+        // currently populates `columns` before this iterator, but merging keeps
+        // the projection strictly additive if one ever does.
+        let mut columns = row.columns.unwrap_or_default();
+        columns.extend(projected);
+
+        QueryRow {
+            entity: EntityResult::Null,
+            score: row.score,
+            path: row.path,
+            timestamp: row.timestamp,
+            columns: Some(columns),
+            bindings,
+            edge: row.edge,
+        }
+    }
+}
+
+impl ResultIterator for ProvenanceProjectIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        match self.input.next()? {
+            Ok(row) => Some(Ok(self.project_row(row))),
+            Err(e) => Some(Err(e)),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.input.size_hint()
     }
 }
 
@@ -3405,6 +5344,172 @@ mod tests {
         fn size_hint(&self) -> (usize, Option<usize>) {
             self.items.size_hint()
         }
+    }
+
+    // ==================== ResourceGuardIterator (Issue #3368 engine lane) ==
+
+    /// An inner iterator that panics if `next()` is ever called. Used to
+    /// prove the wall-clock check runs BEFORE any pull from the wrapped
+    /// iterator.
+    struct PanicIfPulledIterator;
+
+    impl ResultIterator for PanicIfPulledIterator {
+        fn next(&mut self) -> Option<Result<QueryRow>> {
+            panic!("inner iterator must not be pulled once the deadline has passed");
+        }
+    }
+
+    fn resource_guard_test_rows(n: usize) -> Vec<Result<QueryRow>> {
+        (0..n)
+            .map(|i| {
+                Ok(QueryRow::from_entity(EntityResult::NodeId(
+                    NodeId::new(i as u64 + 1).unwrap(),
+                )))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn resource_guard_unlimited_passes_all_rows_through_unchanged() {
+        let inner = Box::new(MockIterator::from_results(resource_guard_test_rows(5)));
+        let mut guard = ResourceGuardIterator::new(
+            inner,
+            crate::query::limits::QueryResourceLimits::unlimited(),
+            None,
+        );
+
+        let mut count = 0;
+        while let Some(row) = guard.next() {
+            row.expect("unlimited guard must never error");
+            count += 1;
+        }
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn resource_guard_past_deadline_short_circuits_without_pulling_inner() {
+        let inner = Box::new(PanicIfPulledIterator);
+        let limits = crate::query::limits::QueryResourceLimits {
+            deadline: Some(std::time::Instant::now() - std::time::Duration::from_millis(10)),
+            ..crate::query::limits::QueryResourceLimits::unlimited()
+        };
+        let mut guard = ResourceGuardIterator::new(inner, limits, None);
+
+        let err = guard
+            .next()
+            .expect("must yield a result")
+            .expect_err("deadline already passed");
+        match err {
+            crate::core::error::Error::Query(
+                crate::core::error::QueryError::ResourceExhausted {
+                    dimension,
+                    retriable,
+                    ..
+                },
+            ) => {
+                assert_eq!(dimension, "wall_clock_timeout");
+                assert!(retriable, "a timeout is safe to retry");
+            }
+            other => panic!("expected ResourceExhausted, got {other:?}"),
+        }
+        // Fused: once terminated, subsequent calls return None (and would
+        // panic if they touched the inner PanicIfPulledIterator).
+        assert!(guard.next().is_none());
+    }
+
+    #[test]
+    fn resource_guard_row_cap_emits_exactly_the_cap_then_errors() {
+        let inner = Box::new(MockIterator::from_results(resource_guard_test_rows(5)));
+        let limits = crate::query::limits::QueryResourceLimits {
+            max_rows: Some(2),
+            ..crate::query::limits::QueryResourceLimits::unlimited()
+        };
+        let mut guard = ResourceGuardIterator::new(inner, limits, None);
+
+        assert!(guard.next().expect("row 1").is_ok());
+        assert!(guard.next().expect("row 2").is_ok());
+
+        let err = guard
+            .next()
+            .expect("must yield a result")
+            .expect_err("row 3 exceeds the cap of 2");
+        match err {
+            crate::core::error::Error::Query(
+                crate::core::error::QueryError::ResourceExhausted {
+                    dimension,
+                    limit,
+                    consumed,
+                    retriable,
+                },
+            ) => {
+                assert_eq!(dimension, "result_rows");
+                assert_eq!(limit, 2);
+                assert_eq!(consumed, 3);
+                assert!(!retriable, "a row-cap breach is not retriable");
+            }
+            other => panic!("expected ResourceExhausted, got {other:?}"),
+        }
+        // Fused.
+        assert!(guard.next().is_none());
+    }
+
+    #[test]
+    fn resource_guard_memory_cap_terminates_once_budget_exceeded() {
+        let inner = Box::new(MockIterator::from_results(resource_guard_test_rows(50)));
+        // A tiny budget: the very first row's estimated size already exceeds
+        // it (a bare NodeId row is small but non-zero), so the guard must
+        // still emit at least the rows that fit before terminating.
+        let first_row_bytes = crate::query::limits::estimate_row_bytes(&QueryRow::from_entity(
+            EntityResult::NodeId(NodeId::new(1).unwrap()),
+        ));
+        let limits = crate::query::limits::QueryResourceLimits {
+            max_memory_bytes: Some(first_row_bytes * 3),
+            ..crate::query::limits::QueryResourceLimits::unlimited()
+        };
+        let mut guard = ResourceGuardIterator::new(inner, limits, None);
+
+        let mut ok_count = 0;
+        loop {
+            match guard.next() {
+                Some(Ok(_)) => ok_count += 1,
+                Some(Err(crate::core::error::Error::Query(
+                    crate::core::error::QueryError::ResourceExhausted {
+                        dimension,
+                        retriable,
+                        ..
+                    },
+                ))) => {
+                    assert_eq!(dimension, "memory_bytes");
+                    assert!(!retriable, "a memory-cap breach is not retriable");
+                    break;
+                }
+                Some(Err(other)) => panic!("unexpected error: {other:?}"),
+                None => panic!("guard must terminate with an error before exhausting input"),
+            }
+        }
+        // Terminated strictly before all 50 rows were consumed.
+        assert!(ok_count < 50);
+        // Fused.
+        assert!(guard.next().is_none());
+    }
+
+    #[test]
+    fn resource_guard_records_counters_on_termination() {
+        let counters = Arc::new(crate::query::limits::LimitCounters::default());
+
+        let inner = Box::new(MockIterator::from_results(resource_guard_test_rows(3)));
+        let limits = crate::query::limits::QueryResourceLimits {
+            max_rows: Some(1),
+            ..crate::query::limits::QueryResourceLimits::unlimited()
+        };
+        let mut guard = ResourceGuardIterator::new(inner, limits, Some(counters.clone()));
+        assert!(guard.next().expect("row 1").is_ok());
+        assert!(guard.next().expect("row 2").is_err());
+
+        let snapshot = counters.snapshot();
+        assert_eq!(snapshot.result_rows, 1);
+        assert_eq!(snapshot.wall_clock_timeout, 0);
+        assert_eq!(snapshot.memory_bytes, 0);
     }
 
     // ==================== Edge provenance-accessor tests (Issue #3354a) ====
@@ -3552,6 +5657,625 @@ mod tests {
             vec![1],
             "non-provenance leaf passes through; only the provenance clause filters edges"
         );
+    }
+
+    // ============ Edge-property WHERE / ORDER BY (Issue #3622) =============
+
+    /// Build a bare current-state edge carrying a single integer `since`
+    /// property. No historical version is registered (edge-property evaluation
+    /// does not read historical storage), so this is cheap.
+    fn edge_with_since(edge_id: u64, since: i64) -> crate::core::graph::Edge {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let props = PropertyMapBuilder::new().insert("since", since).build();
+        crate::core::graph::Edge::new(
+            crate::core::id::EdgeId::new(edge_id).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            props,
+            VersionId::new(edge_id).unwrap(),
+        )
+    }
+
+    /// Feed edge rows through a `FilterIterator` in edge-property mode
+    /// (Issue #3622) and return the surviving edge ids (input order preserved).
+    fn filter_edge_ids_edge_mode(
+        edges: Vec<crate::core::graph::Edge>,
+        predicate: Predicate,
+    ) -> Vec<u64> {
+        let rows: Vec<Result<QueryRow>> = edges
+            .into_iter()
+            .map(|e| Ok(QueryRow::from_entity(EntityResult::Edge(e))))
+            .collect();
+        let input = Box::new(MockIterator::from_results(rows));
+        let mut filter = FilterIterator::new(input, predicate).evaluate_edge_properties(true);
+        let mut ids = Vec::new();
+        while let Some(row) = filter.next() {
+            if let EntityResult::Edge(e) = row.unwrap().entity {
+                ids.push(e.id.as_u64());
+            }
+        }
+        ids
+    }
+
+    /// Sort edge rows by `keys` in edge-property mode (Issue #3622) and return
+    /// the resulting edge ids in output order.
+    fn sort_edge_ids_edge_mode(
+        edges: Vec<crate::core::graph::Edge>,
+        keys: Vec<(SortKey, bool)>,
+    ) -> Vec<u64> {
+        let rows: Vec<Result<QueryRow>> = edges
+            .into_iter()
+            .map(|e| Ok(QueryRow::from_entity(EntityResult::Edge(e))))
+            .collect();
+        let input = Box::new(MockIterator::from_results(rows));
+        let mut sort = SortIterator::new(input, keys).order_by_edge_properties(true);
+        let mut ids = Vec::new();
+        while let Some(row) = sort.next() {
+            if let EntityResult::Edge(e) = row.unwrap().entity {
+                ids.push(e.id.as_u64());
+            }
+        }
+        ids
+    }
+
+    #[test]
+    fn edge_mode_filter_matches_edge_property_eq() {
+        // In edge-property mode a bare `Eq` leaf is evaluated against the edge's
+        // own properties: `since = 2021` keeps only edge 2.
+        let edges = vec![edge_with_since(1, 2020), edge_with_since(2, 2021)];
+        let predicate = Predicate::Eq {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2021),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![2]);
+    }
+
+    #[test]
+    fn edge_mode_filter_matches_edge_property_range() {
+        // A comparison leaf also evaluates: `since > 2020` keeps only edge 2.
+        let edges = vec![edge_with_since(1, 2020), edge_with_since(2, 2021)];
+        let predicate = Predicate::Gt {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2020),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![2]);
+    }
+
+    #[test]
+    fn edge_mode_filter_absent_property_excludes_all() {
+        // `Eq` on a property no edge carries excludes every edge (absent != any).
+        let edges = vec![edge_with_since(1, 2020), edge_with_since(2, 2021)];
+        let predicate = Predicate::Eq {
+            key: "missing".to_string(),
+            value: PredicateValue::Int(1),
+        };
+        assert_eq!(
+            filter_edge_ids_edge_mode(edges, predicate),
+            Vec::<u64>::new()
+        );
+    }
+
+    #[test]
+    fn default_mode_filter_passes_edge_property_leaf_through() {
+        // Regression guard for the AQL/Cypher contract: WITHOUT edge mode a bare
+        // property leaf on an edge row still passes through (mirrors the pinned
+        // `edge_non_provenance_leaf_is_pass_through`), so both edges survive.
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let predicate = Predicate::Eq {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2021),
+        };
+        let kept = filter_edge_ids(
+            &historical,
+            vec![edge_with_since(1, 2020), edge_with_since(2, 2021)],
+            predicate,
+        );
+        assert_eq!(
+            kept,
+            vec![1, 2],
+            "default (non-edge) mode passes property leaves through on edge rows"
+        );
+    }
+
+    #[test]
+    fn edge_mode_sort_orders_by_edge_property_desc() {
+        // Edge rows are sorted by their own `since` property, descending.
+        let edges = vec![
+            edge_with_since(1, 2020),
+            edge_with_since(2, 2022),
+            edge_with_since(3, 2021),
+        ];
+        let keys = vec![(SortKey::Property("since".to_string()), true)];
+        // 2022 (id 2), 2021 (id 3), 2020 (id 1).
+        assert_eq!(sort_edge_ids_edge_mode(edges, keys), vec![2, 3, 1]);
+    }
+
+    #[test]
+    fn edge_mode_sort_orders_by_edge_property_asc() {
+        let edges = vec![
+            edge_with_since(1, 2020),
+            edge_with_since(2, 2022),
+            edge_with_since(3, 2021),
+        ];
+        let keys = vec![(SortKey::Property("since".to_string()), false)];
+        // 2020 (id 1), 2021 (id 3), 2022 (id 2).
+        assert_eq!(sort_edge_ids_edge_mode(edges, keys), vec![1, 3, 2]);
+    }
+
+    #[test]
+    fn edge_mode_sort_absent_property_places_nulls_last_asc() {
+        // An edge missing the sort key sorts as null: last for ascending order.
+        let edges = vec![
+            edge_with_since(1, 2021),
+            edge_with_no_props(2),
+            edge_with_since(3, 2020),
+        ];
+        let keys = vec![(SortKey::Property("since".to_string()), false)];
+        // 2020 (id 3), 2021 (id 1), then the null-key edge (id 2) last.
+        assert_eq!(sort_edge_ids_edge_mode(edges, keys), vec![3, 1, 2]);
+    }
+
+    #[test]
+    fn default_mode_sort_leaves_edge_property_unsorted() {
+        // Regression guard: WITHOUT edge mode a property sort key on edge rows
+        // resolves to null for every row, so input order is preserved (stable
+        // sort) -- the pre-#3622 node-only behavior.
+        let edges = vec![
+            edge_with_since(3, 2020),
+            edge_with_since(1, 2022),
+            edge_with_since(2, 2021),
+        ];
+        let rows: Vec<Result<QueryRow>> = edges
+            .into_iter()
+            .map(|e| Ok(QueryRow::from_entity(EntityResult::Edge(e))))
+            .collect();
+        let input = Box::new(MockIterator::from_results(rows));
+        let keys = vec![(SortKey::Property("since".to_string()), true)];
+        let mut sort = SortIterator::new(input, keys); // edge_mode defaults false
+        let mut ids = Vec::new();
+        while let Some(row) = sort.next() {
+            if let EntityResult::Edge(e) = row.unwrap().entity {
+                ids.push(e.id.as_u64());
+            }
+        }
+        assert_eq!(
+            ids,
+            vec![3, 1, 2],
+            "default mode leaves edge rows in input order (property key is null)"
+        );
+    }
+
+    /// A bare current-state edge with no properties (for null-placement tests).
+    fn edge_with_no_props(edge_id: u64) -> crate::core::graph::Edge {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        crate::core::graph::Edge::new(
+            crate::core::id::EdgeId::new(edge_id).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(edge_id).unwrap(),
+        )
+    }
+
+    /// Build a bare current-state edge with an explicit label, source, and
+    /// target and no user properties -- for structural-field (`type`/`source`/
+    /// `target`/`id`) WHERE / ORDER BY tests (Issue #3622 review fix).
+    fn edge_typed(edge_id: u64, label: &str, source: u64, target: u64) -> crate::core::graph::Edge {
+        let label = GLOBAL_INTERNER.intern(label).unwrap();
+        crate::core::graph::Edge::new(
+            crate::core::id::EdgeId::new(edge_id).unwrap(),
+            label,
+            NodeId::new(source).unwrap(),
+            NodeId::new(target).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(edge_id).unwrap(),
+        )
+    }
+
+    /// Build a bare current-state edge carrying a single STRING property.
+    fn edge_with_str(edge_id: u64, key: &str, value: &str) -> crate::core::graph::Edge {
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let props = PropertyMapBuilder::new().insert(key, value).build();
+        crate::core::graph::Edge::new(
+            crate::core::id::EdgeId::new(edge_id).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            props,
+            VersionId::new(edge_id).unwrap(),
+        )
+    }
+
+    // ---- Reserved STRUCTURAL fields (type/label/source/target/id) -----------
+    // These live on the Edge struct, NOT in `properties`; edge_mode must resolve
+    // them there (Issue #3622 review fix) or every predicate/sort key on them is
+    // silently wrong.
+
+    #[test]
+    fn edge_mode_filter_matches_edge_type() {
+        // `WHERE type = 'KNOWS'` resolves the edge's LABEL, not a `type` property
+        // (which no edge has). Only the KNOWS edge (id 1) survives.
+        let edges = vec![
+            edge_typed(1, "KNOWS", 10, 20),
+            edge_typed(2, "FOLLOWS", 30, 40),
+        ];
+        let predicate = Predicate::Eq {
+            key: "type".to_string(),
+            value: PredicateValue::String("KNOWS".to_string()),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![1]);
+    }
+
+    #[test]
+    fn edge_mode_filter_matches_edge_label_alias() {
+        // `label` is an accepted alias for the edge type.
+        let edges = vec![
+            edge_typed(1, "KNOWS", 10, 20),
+            edge_typed(2, "FOLLOWS", 30, 40),
+        ];
+        let predicate = Predicate::Eq {
+            key: "label".to_string(),
+            value: PredicateValue::String("FOLLOWS".to_string()),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![2]);
+    }
+
+    #[test]
+    fn edge_mode_filter_matches_edge_source_and_target() {
+        // `source`/`target` resolve the endpoint NodeIds as integers.
+        let edges = vec![
+            edge_typed(1, "KNOWS", 10, 20),
+            edge_typed(2, "KNOWS", 11, 20),
+            edge_typed(3, "KNOWS", 10, 21),
+        ];
+        let by_source = Predicate::Eq {
+            key: "source".to_string(),
+            value: PredicateValue::Int(10),
+        };
+        assert_eq!(
+            filter_edge_ids_edge_mode(edges.clone(), by_source),
+            vec![1, 3],
+            "source = 10 keeps the two edges out of node 10"
+        );
+        let by_target = Predicate::Eq {
+            key: "target".to_string(),
+            value: PredicateValue::Int(20),
+        };
+        assert_eq!(
+            filter_edge_ids_edge_mode(edges, by_target),
+            vec![1, 2],
+            "target = 20 keeps the two edges into node 20"
+        );
+    }
+
+    #[test]
+    fn edge_mode_filter_matches_edge_id() {
+        // `id` resolves the edge's own EdgeId.
+        let edges = vec![edge_typed(7, "KNOWS", 1, 2), edge_typed(9, "KNOWS", 1, 2)];
+        let predicate = Predicate::Eq {
+            key: "id".to_string(),
+            value: PredicateValue::Int(9),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![9]);
+    }
+
+    #[test]
+    fn edge_mode_filter_source_range() {
+        // Comparison operators work on structural integer fields too.
+        let edges = vec![
+            edge_typed(1, "KNOWS", 5, 2),
+            edge_typed(2, "KNOWS", 15, 2),
+            edge_typed(3, "KNOWS", 25, 2),
+        ];
+        let predicate = Predicate::Gt {
+            key: "source".to_string(),
+            value: PredicateValue::Int(10),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![2, 3]);
+    }
+
+    #[test]
+    fn edge_mode_sort_by_type_source_target() {
+        // ORDER BY a structural field sorts by the resolved struct value, not a
+        // null key. `type` sorts lexicographically; `source`/`target` numerically.
+        let edges = vec![
+            edge_typed(1, "KNOWS", 30, 5),
+            edge_typed(2, "FOLLOWS", 10, 5),
+            edge_typed(3, "LIKES", 20, 5),
+        ];
+        let by_type = vec![(SortKey::Property("type".to_string()), false)];
+        // FOLLOWS < KNOWS < LIKES.
+        assert_eq!(
+            sort_edge_ids_edge_mode(edges.clone(), by_type),
+            vec![2, 1, 3]
+        );
+        let by_source = vec![(SortKey::Property("source".to_string()), false)];
+        // 10 (id 2) < 20 (id 3) < 30 (id 1).
+        assert_eq!(sort_edge_ids_edge_mode(edges, by_source), vec![2, 3, 1]);
+    }
+
+    // ---- Recursive combinators (AND / OR / NOT) in edge_mode ----------------
+
+    #[test]
+    fn edge_mode_filter_and_combinator() {
+        // `since > 2019 AND since < 2022` keeps only the middle edge (2021).
+        let edges = vec![
+            edge_with_since(1, 2018),
+            edge_with_since(2, 2021),
+            edge_with_since(3, 2023),
+        ];
+        let predicate = Predicate::And(vec![
+            Predicate::Gt {
+                key: "since".to_string(),
+                value: PredicateValue::Int(2019),
+            },
+            Predicate::Lt {
+                key: "since".to_string(),
+                value: PredicateValue::Int(2022),
+            },
+        ]);
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![2]);
+    }
+
+    #[test]
+    fn edge_mode_filter_or_combinator() {
+        // `since = 2018 OR since = 2023` keeps the two extremes.
+        let edges = vec![
+            edge_with_since(1, 2018),
+            edge_with_since(2, 2021),
+            edge_with_since(3, 2023),
+        ];
+        let predicate = Predicate::Or(vec![
+            Predicate::Eq {
+                key: "since".to_string(),
+                value: PredicateValue::Int(2018),
+            },
+            Predicate::Eq {
+                key: "since".to_string(),
+                value: PredicateValue::Int(2023),
+            },
+        ]);
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![1, 3]);
+    }
+
+    #[test]
+    fn edge_mode_filter_not_combinator() {
+        // `NOT (since = 2021)` drops only the 2021 edge.
+        let edges = vec![
+            edge_with_since(1, 2018),
+            edge_with_since(2, 2021),
+            edge_with_since(3, 2023),
+        ];
+        let predicate = Predicate::Not(Box::new(Predicate::Eq {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2021),
+        }));
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![1, 3]);
+    }
+
+    #[test]
+    fn edge_mode_filter_mixes_structural_and_property() {
+        // A combinator mixing a structural field and a user property.
+        let mut e1 = edge_typed(1, "KNOWS", 10, 2);
+        e1.properties = PropertyMapBuilder::new().insert("since", 2020).build();
+        let mut e2 = edge_typed(2, "FOLLOWS", 10, 2);
+        e2.properties = PropertyMapBuilder::new().insert("since", 2020).build();
+        let predicate = Predicate::And(vec![
+            Predicate::Eq {
+                key: "type".to_string(),
+                value: PredicateValue::String("KNOWS".to_string()),
+            },
+            Predicate::Eq {
+                key: "since".to_string(),
+                value: PredicateValue::Int(2020),
+            },
+        ]);
+        assert_eq!(filter_edge_ids_edge_mode(vec![e1, e2], predicate), vec![1]);
+    }
+
+    // ---- String edge properties: equality, LIKE family, ordering ------------
+
+    #[test]
+    fn edge_mode_filter_string_equality() {
+        let edges = vec![
+            edge_with_str(1, "role", "admin"),
+            edge_with_str(2, "role", "member"),
+        ];
+        let predicate = Predicate::Eq {
+            key: "role".to_string(),
+            value: PredicateValue::String("member".to_string()),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges, predicate), vec![2]);
+    }
+
+    #[test]
+    fn edge_mode_filter_string_like_family() {
+        let edges = vec![
+            edge_with_str(1, "role", "administrator"),
+            edge_with_str(2, "role", "moderator"),
+            edge_with_str(3, "role", "member"),
+        ];
+        let contains = Predicate::Contains {
+            key: "role".to_string(),
+            substring: "era".to_string(),
+        };
+        assert_eq!(
+            filter_edge_ids_edge_mode(edges.clone(), contains),
+            vec![2],
+            "only 'moderator' contains 'era'"
+        );
+        let starts = Predicate::StartsWith {
+            key: "role".to_string(),
+            prefix: "m".to_string(),
+        };
+        assert_eq!(
+            filter_edge_ids_edge_mode(edges.clone(), starts),
+            vec![2, 3],
+            "'moderator' and 'member' start with 'm'"
+        );
+        let ends = Predicate::EndsWith {
+            key: "role".to_string(),
+            suffix: "ator".to_string(),
+        };
+        assert_eq!(
+            filter_edge_ids_edge_mode(edges, ends),
+            vec![1, 2],
+            "'administrator' and 'moderator' end with 'ator'"
+        );
+    }
+
+    #[test]
+    fn edge_mode_sort_string_lexicographic() {
+        let edges = vec![
+            edge_with_str(1, "role", "member"),
+            edge_with_str(2, "role", "admin"),
+            edge_with_str(3, "role", "owner"),
+        ];
+        let keys = vec![(SortKey::Property("role".to_string()), false)];
+        // admin (2) < member (1) < owner (3).
+        assert_eq!(sort_edge_ids_edge_mode(edges, keys), vec![2, 1, 3]);
+    }
+
+    // ---- Null placement (DESC) ---------------------------------------------
+
+    #[test]
+    fn edge_mode_sort_absent_property_places_nulls_first_desc() {
+        // DESC: a missing sort key (null) orders FIRST (complements the ASC
+        // nulls-last case).
+        let edges = vec![
+            edge_with_since(1, 2021),
+            edge_with_no_props(2),
+            edge_with_since(3, 2020),
+        ];
+        let keys = vec![(SortKey::Property("since".to_string()), true)];
+        // null edge (id 2) first, then 2021 (id 1), then 2020 (id 3).
+        assert_eq!(sort_edge_ids_edge_mode(edges, keys), vec![2, 1, 3]);
+    }
+
+    // ---- Multi-key ORDER BY + tie stability ---------------------------------
+
+    #[test]
+    fn edge_mode_sort_multi_key_with_tie_stability() {
+        // Order by `since` ASC, then `id`... but `id` here is a genuine property
+        // to keep the test independent of structural resolution; ties on `since`
+        // retain input order (stable sort).
+        let mk = |edge_id: u64, since: i64| {
+            let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+            let props = PropertyMapBuilder::new()
+                .insert("since", since)
+                .insert("rank", (edge_id as i64) % 2) // 1,0,1,0 -> secondary key
+                .build();
+            crate::core::graph::Edge::new(
+                crate::core::id::EdgeId::new(edge_id).unwrap(),
+                label,
+                NodeId::new(1).unwrap(),
+                NodeId::new(2).unwrap(),
+                props,
+                VersionId::new(edge_id).unwrap(),
+            )
+        };
+        // Two edges share since=2020; primary sorts them together, secondary
+        // `rank` ASC orders rank 0 before rank 1.
+        let edges = vec![mk(1, 2020), mk(2, 2020), mk(3, 2019)];
+        let keys = vec![
+            (SortKey::Property("since".to_string()), false),
+            (SortKey::Property("rank".to_string()), false),
+        ];
+        // since: 2019 (id3) first; then the 2020 pair ordered by rank: id2(rank0),id1(rank1).
+        assert_eq!(sort_edge_ids_edge_mode(edges, keys), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn edge_mode_sort_ties_retain_input_order() {
+        // All equal keys -> stable sort preserves input order.
+        let edges = vec![
+            edge_with_since(5, 2020),
+            edge_with_since(3, 2020),
+            edge_with_since(8, 2020),
+        ];
+        let keys = vec![(SortKey::Property("since".to_string()), false)];
+        assert_eq!(sort_edge_ids_edge_mode(edges, keys), vec![5, 3, 8]);
+    }
+
+    // ---- Operator coverage: Ne / Gte / Lte / Lt / Exists --------------------
+
+    #[test]
+    fn edge_mode_filter_ne_gte_lte_lt() {
+        let edges = vec![
+            edge_with_since(1, 2019),
+            edge_with_since(2, 2020),
+            edge_with_since(3, 2021),
+        ];
+        let ne = Predicate::Ne {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2020),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges.clone(), ne), vec![1, 3]);
+        let gte = Predicate::Gte {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2020),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges.clone(), gte), vec![2, 3]);
+        let lte = Predicate::Lte {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2020),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges.clone(), lte), vec![1, 2]);
+        let lt = Predicate::Lt {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2020),
+        };
+        assert_eq!(filter_edge_ids_edge_mode(edges, lt), vec![1]);
+    }
+
+    #[test]
+    fn edge_mode_filter_exists() {
+        let edges = vec![edge_with_since(1, 2020), edge_with_no_props(2)];
+        let predicate = Predicate::Exists("since".to_string());
+        assert_eq!(
+            filter_edge_ids_edge_mode(edges, predicate),
+            vec![1],
+            "only the edge carrying `since` exists"
+        );
+    }
+
+    #[test]
+    fn edge_mode_filter_ne_on_missing_property_returns_row() {
+        // openCypher three-valued asymmetry: `Ne` on an ABSENT edge property
+        // returns the row (unlike `Eq`, which excludes it). Edge WHERE follows
+        // openCypher/node semantics here, NOT SQL three-valued UNKNOWN.
+        let edges = vec![edge_with_since(1, 2020), edge_with_no_props(2)];
+        let predicate = Predicate::Ne {
+            key: "missing".to_string(),
+            value: PredicateValue::Int(1),
+        };
+        assert_eq!(
+            filter_edge_ids_edge_mode(edges, predicate),
+            vec![1, 2],
+            "Ne on a property no edge carries returns every edge (present != absent)"
+        );
+    }
+
+    // ---- Empty edge stream through edge_mode Filter and Sort ----------------
+
+    #[test]
+    fn edge_mode_filter_empty_stream_is_empty() {
+        let predicate = Predicate::Eq {
+            key: "since".to_string(),
+            value: PredicateValue::Int(2020),
+        };
+        assert_eq!(
+            filter_edge_ids_edge_mode(Vec::new(), predicate),
+            Vec::<u64>::new()
+        );
+    }
+
+    #[test]
+    fn edge_mode_sort_empty_stream_is_empty() {
+        let keys = vec![(SortKey::Property("since".to_string()), false)];
+        assert_eq!(sort_edge_ids_edge_mode(Vec::new(), keys), Vec::<u64>::new());
     }
 
     // ==================== EmptyIterator Tests ====================
@@ -4762,6 +7486,126 @@ mod tests {
 
         iter.next();
         // After consuming one id the remaining upper bound shrinks.
+        assert_eq!(iter.size_hint(), (0, Some(3)));
+    }
+
+    // ==================== EdgeScanIterator Tests ====================
+
+    /// Build a small graph (2 nodes, 2 KNOWS edges + 1 FOLLOWS edge) for edge
+    /// scan tests. Returns the storage and the count of KNOWS edges (2).
+    fn edge_scan_fixture() -> Arc<CurrentStorage> {
+        let current = Arc::new(CurrentStorage::new());
+        let a = current
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "a").build())
+            .unwrap();
+        let b = current
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "b").build())
+            .unwrap();
+        current
+            .create_edge(a, b, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+        current
+            .create_edge(b, a, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+        current
+            .create_edge(a, b, "FOLLOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+        current
+    }
+
+    fn drain(mut iter: EdgeScanIterator) -> Vec<crate::core::graph::Edge> {
+        let mut edges = Vec::new();
+        while let Some(item) = iter.next() {
+            edges.push(item.unwrap().entity.as_edge().unwrap().clone());
+        }
+        edges
+    }
+
+    #[test]
+    fn test_edge_scan_iterator_all_edges() {
+        // `edge_type: None` scans every edge regardless of type.
+        let current = edge_scan_fixture();
+        let edges = drain(EdgeScanIterator::new(None, current));
+        assert_eq!(edges.len(), 3, "unfiltered scan yields all 3 edges");
+    }
+
+    #[test]
+    fn test_edge_scan_iterator_type_filter_matches_only_that_type() {
+        // `edge_type: Some("KNOWS")` yields only the two KNOWS edges.
+        let current = edge_scan_fixture();
+        let edges = drain(EdgeScanIterator::new(Some("KNOWS".to_string()), current));
+        assert_eq!(edges.len(), 2, "type filter must yield only KNOWS edges");
+        assert!(
+            edges.iter().all(|e| e.has_label_str("KNOWS")),
+            "every yielded edge must be a KNOWS edge"
+        );
+    }
+
+    #[test]
+    fn test_edge_scan_iterator_unknown_type_yields_nothing() {
+        // A type filter whose type was never interned must yield zero rows,
+        // NOT degrade into an unfiltered full scan (mirrors NodeScan).
+        let current = edge_scan_fixture();
+        let mut iter = EdgeScanIterator::new(Some("NONEXISTENT".to_string()), current);
+        assert!(
+            iter.next().is_none(),
+            "unknown edge type must match no edges, not all of them"
+        );
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+    }
+
+    #[test]
+    fn test_edge_scan_iterator_empty_storage() {
+        let current = Arc::new(CurrentStorage::new());
+        let mut iter = EdgeScanIterator::new(None, current);
+        assert!(iter.next().is_none(), "no edges -> no rows");
+    }
+
+    #[test]
+    fn test_edge_scan_iterator_yields_edge_entities() {
+        // Every yielded row must be an Edge entity (not a Node).
+        let current = edge_scan_fixture();
+        let mut iter = EdgeScanIterator::new(None, current);
+        while let Some(item) = iter.next() {
+            let row = item.unwrap();
+            assert!(
+                row.entity.as_edge().is_some(),
+                "edge scan must yield Edge entities"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_scan_iterator_skips_edge_deleted_after_snapshot() {
+        // Exercises the `EdgeNotFound => continue` skip arm: the id snapshot is
+        // taken at construction, then one edge is deleted from storage before
+        // the scan is drained. The deleted id must be skipped (no panic, no
+        // error) and only the surviving edges yielded.
+        let current = edge_scan_fixture(); // 3 edges
+        let all_ids = current.get_all_edge_ids();
+        assert_eq!(all_ids.len(), 3, "fixture must start with 3 edges");
+
+        // Construct the iterator first so it snapshots all 3 ids...
+        let iter = EdgeScanIterator::new(None, Arc::clone(&current));
+        // ...then delete one edge out from under the snapshot.
+        current
+            .delete_edge(all_ids[0])
+            .expect("delete_edge should succeed");
+
+        let edges = drain(iter);
+        assert_eq!(
+            edges.len(),
+            2,
+            "the edge deleted after the snapshot must be skipped, leaving 2"
+        );
+    }
+
+    #[test]
+    fn test_edge_scan_iterator_size_hint_reports_edge_count() {
+        // A full (unfiltered) scan's size_hint upper bound equals the number of
+        // snapshotted edge ids.
+        let current = edge_scan_fixture(); // 3 edges
+        let iter = EdgeScanIterator::new(None, current);
         assert_eq!(iter.size_hint(), (0, Some(3)));
     }
 

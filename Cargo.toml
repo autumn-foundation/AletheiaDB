@@ -1,17 +1,34 @@
 [package]
 name = "aletheiadb"
-version = "0.3.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.92"
 authors = ["AletheiaDB Contributors"]
 description = "A high-performance bi-temporal graph database for LLM integration"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/madmax983/AletheiaDB"
+repository = "https://github.com/autumn-foundation/AletheiaDB"
 homepage = "https://madmax983.github.io/AletheiaDB/"
 documentation = "https://docs.rs/aletheiadb"
 readme = "README.md"
 keywords = ["database", "graph", "temporal", "bitemporal", "llm"]
 categories = ["database-implementations", "data-structures"]
+# Trim non-crate trees from the published crates.io tarball. src/, tests/,
+# benches/, examples/, docs/, README.md, CHANGELOG.md, LICENSE-*, and Cargo.toml
+# are all retained.
+exclude = [
+    "clients/",
+    ".jules/",
+    ".github/",
+    "scripts/",
+    "benchmarks/",
+    "test_vis/",
+    ".cargo/",
+    "proptest-regressions/",
+    "Dockerfile",
+    ".dockerignore",
+    ".pre-commit-config.yaml",
+    ".mirirc",
+]
 
 # Workspace root (added for the autumn-web 0.5.0 migration spike, Issue #3524).
 # `aletheia-autumn-spike` is an isolated member crate that depends on
@@ -27,7 +44,15 @@ categories = ["database-implementations", "data-structures"]
 # 0.5's proc-macros hard-code `::autumn_web`, so the 0.5 surface must live in a
 # crate whose extern prelude binds `autumn_web` to 0.5. It requires an explicit
 # `-p aletheia-server`; bare cargo stays root-scoped via `default-members`.
-members = ["crates/autumn-spike", "crates/aletheia-server"]
+# `aletheia-bench-ldbc` is the LDBC-style benchmark suite (Issue #3373): an
+# isolated member depending only on the root `aletheiadb` public surface. It
+# requires an explicit `-p aletheia-bench-ldbc`; bare cargo stays root-scoped
+# via `default-members`, so the existing CI gates and coverage (`-p` per crate)
+# are entirely unaffected by adding it.
+# `aletheia-eval` is the retrieval-eval harness crate (Issue #3366), likewise an
+# isolated member requiring an explicit `-p aletheia-eval` (bare cargo stays
+# root-scoped via `default-members`).
+members = ["crates/autumn-spike", "crates/aletheia-server", "crates/aletheia-bench-ldbc", "crates/aletheia-eval"]
 default-members = ["."]
 # `python/` and `fuzz/` are independent crates with their own manifests (the
 # Python wheels + cargo-fuzz workflows build them standalone); keep them OUT of
@@ -35,11 +60,21 @@ default-members = ["."]
 exclude = ["python", "fuzz"]
 
 [dependencies]
+# CLI shell completions (Issue #3619). `clap`/`clap_complete` drive
+# `aletheia completions <shell>`; the CLI itself still uses a hand-rolled
+# parser, so these are plain, unconditional deps (available even under
+# `--no-default-features`) rather than being gated behind a feature. Pinned to
+# 4.6.x to match the already-resolved transitive `clap` 4.6.1 and avoid a
+# duplicate major.
+clap = "4.6"
+clap_complete = "4.6"
 bytemuck = { version = "1.25.0", features = ["extern_crate_alloc", "derive"] }
 dashmap = "6.1"
 crc32fast = "1.4"
 parking_lot = "0.12"
-usearch = "2.25.2"
+# 128-bit atomics: lock-free via cmpxchg16b (x86-64) / casp (aarch64).
+# Backs the commit clock's allocation frontier (src/core/commit_clock.rs).
+portable-atomic = { version = "1.13", features = ["fallback"] }
 # SIMD-accelerated vector distance kernels (Issue #426). Optional: enabled via
 # the `simsimd` feature (on by default). Provides runtime-dispatched x86
 # AVX2/AVX-512 AND ARM NEON/SVE kernels, replacing the crate's hand-written
@@ -51,12 +86,16 @@ arc-swap = "1.9"
 quick_cache = "0.6"
 crossbeam-channel = "0.5"
 bitcode = "0.6"
-zstd = "0.13"
-memmap2 = "0.9"
 thiserror = "2.0"
 smallvec = "1.13"
 chrono = "0.4"
 arbitrary = { version = "1.4", features = ["derive"], optional = true }
+
+# Concurrent JSON-RPC relaying in the `aletheia-mcp` daemon-client proxy
+# (Issue #2905): `FuturesUnordered` lets one stdio session have several frames in
+# flight without `tokio::spawn`'s `'static` bound, so a long-running tool call
+# (e.g. `await_changes`) cannot block the whole session.
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["std"] }
 
 # Pin native-tls only when features that pull reqwest are active.
 # Kept optional so the Python SDK build (no reqwest features) has no OpenSSL dep.
@@ -101,7 +140,9 @@ tower = { version = "0.5", optional = true }
 tower-http = { version = "0.6", optional = true, features = ["cors", "trace", "set-header"] }
 
 # Embedding generation dependencies (all optional via feature flags)
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros"], optional = true }
+# `sync` (Notify) + `time` (sleep/select) power the event-driven changefeed
+# long-poll wait (Issue #3673); harmless when tokio is pulled by another feature.
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time"], optional = true }
 embed_anything = { version = "0.6.7", optional = true }
 # embed_anything 0.6.7 accepts candle ^0.9.1 but does not build against 0.9.2's
 # wider CpuStorage enum yet. Keep these pins until upstream handles the new variants.
@@ -112,9 +153,6 @@ candle-transformers = { version = "=0.10.2", optional = true }
 # HTTP client for sharding RPC and optional integrations
 reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false, optional = true }
 serde_json = { version = "1.0", optional = false }
-
-# Redb for tiered cold storage (pure Rust, ADR-0025)
-redb = "4.1"
 
 # SQL parser for SQL:2011 temporal syntax support (optional)
 sqlparser = { version = "0.40", optional = true }
@@ -134,22 +172,47 @@ parquet = { version = "59", default-features = false, features = ["arrow", "snap
 # are unconditional so the compute/csv/json/ipc kernels are not pulled in.
 arrow = { version = "59", default-features = false, optional = true }
 
-# Parallel iteration for sharded vector index
-rayon = "1.12"
-comfy-table = "7.2.2"
-crossterm = "0.29.0"
 rand = { version = "0.8", features = ["small_rng"] }
 # tempfile is needed at runtime: AletheiaDB::new() backs its WAL with a
 # temporary directory so the default constructor is truly ephemeral.
 tempfile = "3.27"
 
 # Encryption at rest (ADR-0028)
-aes-gcm = "0.10"
+# `zeroize` (Issue #488 P2.1): wipe a retired cipher's expanded key schedule on
+# drop. Without it, a rotated-out cipher's key schedule would linger
+# un-zeroized in memory after `retain_only` drops it. aes-gcm gates this behind
+# an opt-in `zeroize` feature; chacha20poly1305 0.10 has no such feature because
+# it zeroizes its key schedule unconditionally (via the inner `chacha20` crate),
+# so no feature is needed there.
+aes-gcm = { version = "0.10", features = ["zeroize"] }
 chacha20poly1305 = "0.10"
 hkdf = "0.13"
 sha2 = "0.11"
 zeroize = { version = "1.8", features = ["derive"] }
-aws-sdk-kms = { version = "1.106.0", optional = true }
+# default-features disabled (Issue #3807): aws-sdk-kms's default `rustls`
+# feature maps to aws-smithy-runtime's legacy `tls-rustls` connector, which
+# enables aws-smithy-http-client's `hyper-014` feature and pulls hyper 0.14 /
+# h2 0.3 (RUSTSEC-2026-0258 — no patched 0.3 release exists upstream).
+# `default-https-client` selects the modern hyper-1.x / h2-0.4 client instead
+# (rustls-aws-lc TLS); `rt-tokio` keeps the async runtime. The KMS provider
+# only uses the SDK's client-builder API, which is unchanged by this.
+aws-sdk-kms = { version = "1.106.0", optional = true, default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+# Mocked AWS transport for the KMS provider's Decrypt success-path test
+# (Issue #3587 review). Enabled ONLY by the `encryption-aws-kms` feature and
+# referenced solely from `#[cfg(test)]` code, so it never touches a normal build
+# without KMS. aws-sdk-kms already pulls the smithy runtime transitively; this
+# adds the purpose-built mock client on top.
+aws-smithy-mocks = { version = "0.3.0", optional = true }
+
+# Passphrase-wrapped master-key files (Issue #3587). The passphrase module is
+# always compiled with the (non-feature-gated) encryption module, so these KDF
+# crates are non-optional. `argon2` is the memory-hard default; `pbkdf2` is the
+# interoperable fallback. `pbkdf2` 0.12 is built on the digest-0.10 ecosystem,
+# so it is paired with a sha2-0.10 copy aliased as `sha2_pbkdf2` (the primary
+# `sha2` dep is 0.11, a different digest generation).
+argon2 = { version = "0.5", features = ["zeroize"] }
+pbkdf2 = "0.12"
+sha2_pbkdf2 = { package = "sha2", version = "0.10" }
 
 # Constant-time equality for API-key digest comparison (Issue #3350).
 subtle = "2.6"
@@ -163,6 +226,36 @@ libc = "0.2"
 # Chosen over HMAC so third parties verify offline with ONLY the signer's public
 # key. Pure-Rust, RFC 8032 deterministic signatures → reproducible artifacts.
 ed25519-dalek = { version = "2", optional = true }
+
+# WASM compatibility (Issue: wasm Phase-1 dependency surgery).
+# These dependencies are wasm-hostile: usearch (C++/cxx FFI), zstd (zstd-sys C),
+# memmap2 (mmap syscalls), redb (fs/mmap), rayon (OS threads), crossterm +
+# comfy-table (terminal I/O). Gating them to `cfg(not(target_arch = "wasm32"))`
+# means they remain fully present for EVERY native build (any feature set,
+# including `--no-default-features`) — native compiles unchanged — and are only
+# absent under wasm32. This is native-safe by construction: nothing is removed
+# from native.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+usearch = "2.25.2"
+zstd = "0.13"
+memmap2 = "0.9"
+# Redb for tiered cold storage (pure Rust, ADR-0025)
+redb = "4.1"
+# Parallel iteration for sharded vector index
+rayon = "1.12"
+comfy-table = "7.2.2"
+crossterm = "0.29.0"
+
+# WASM-only: enable the JS backend for the transitive getrandom users via
+# feature unification, so getrandom resolves on wasm32-unknown-unknown (which
+# has no OS RNG). getrandom 0.2 uses the `js` feature; getrandom 0.3 uses the
+# `wasm_js` feature AND additionally requires the rustflag
+# `--cfg getrandom_backend="wasm_js"` (see .cargo/config.toml note / the
+# 0.3 webassembly-support docs). Both major versions appear in the tree via
+# different transitive users, so both shims are declared.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 criterion = "0.8"
@@ -225,11 +318,31 @@ semantic-diagnostics = []
 # Depends on semantic-temporal (graph_context uses temporal_narrative).
 semantic-characterization = ["semantic-temporal"]
 
+# Experimental: provenance-weighted retrieval (Issue #3372).
+# Fuses vector similarity, provenance confidence, and temporal recency into a
+# single tunable, monotone, explainable ranking. Empty deps: fusion needs only
+# always-compiled `core::provenance` + the vector path. Graduates INTO
+# `semantic-search` (the retrieval cohort) once the #3366 eval-harness
+# precision@10 gate and latency/explainability targets are met -- see
+# docs/plans/2026-07-18-3372-provenance-weighted-retrieval.md. NOT folded into
+# the stable `semantic-search` flag on day one (ADR-0050 graduation pattern).
+semantic-retrieval-fusion = []
+
+# Experimental: durable workflow execution — DBOS-style journal (Phase 3a).
+# Adds a workflow-run / step schema convention plus exactly-once step recording
+# on top of the existing bi-temporal store. Empty deps: builds only on the
+# always-compiled write-transaction + unique-constraint primitives. Standalone
+# experimental flag (NOT folded into `nova`), mirroring `semantic-retrieval-fusion`
+# per the ADR-0050 graduation pattern.
+durable-execution = []
+
 # Experimental "Nova" R&D umbrella.
 # Enables every semantic-* cohort that is still marked experimental. Removing a
 # cohort from this list is how we "graduate" it — the flag itself stays, so
 # downstream callers opting into the cohort directly keep working.
-# The graduated `semantic-search` cohort is NOT included.
+# The graduated `semantic-search` cohort is NOT included. `semantic-retrieval-fusion`
+# is also deliberately excluded: it graduates INTO `semantic-search` (the retrieval
+# cohort), not into any of the experimental Nova cohorts, so it does not belong here.
 nova = [
     "semantic-reasoning",
     "semantic-temporal",
@@ -302,7 +415,21 @@ embeddings = [
 embeddings-onnx = ["embeddings", "embed_anything/ort"]
 
 # MCP server support (exposes the audit_export tool, so it implies audit-export)
-mcp-server = ["dep:rmcp", "dep:tokio", "serde", "dep:base64", "audit-export"]
+# `dep:reqwest` powers the daemon-client (proxy) mode of `aletheia-mcp`
+# (Issue #2905): with `ALETHEIADB_DAEMON_URL` set, the binary relays JSON-RPC to
+# a daemon's `/mcp` endpoint instead of opening local storage. Bundled into
+# `mcp-server` (rather than a separate flag) so every shipped `aletheia-mcp`
+# can be pointed at a daemon — a mode that exists only in some builds would be
+# worse than none, since MCP client configs are copy-pasted between machines.
+mcp-server = [
+    "dep:rmcp",
+    "dep:tokio",
+    "serde",
+    "dep:base64",
+    "audit-export",
+    "dep:reqwest",
+    "dep:futures-util",
+]
 
 # Sharding RPC client support (uses blocking reqwest)
 sharding-rpc = ["dep:reqwest", "serde", "dep:native-tls"]
@@ -344,10 +471,24 @@ mvcc-snapshots-tdd = []
 encryption = ["serde"]
 
 # AWS KMS key provider (optional)
-encryption-aws-kms = ["encryption", "dep:tokio"]
+# `aws-sdk-kms/test-util` supplies the `with_test_defaults_v2` config hook the
+# `mock_client!` macro needs for the #3587 Decrypt success-path test; it is only
+# pulled in when this feature is enabled and is referenced solely from
+# `#[cfg(test)]` code.
+encryption-aws-kms = [
+    "encryption",
+    "dep:tokio",
+    "aws-sdk-kms",
+    "aws-sdk-kms/test-util",
+    "dep:base64",
+    "dep:aws-smithy-mocks",
+]
 
-# HashiCorp Vault key provider (optional)
-encryption-vault = ["encryption", "dep:tokio", "dep:reqwest", "dep:native-tls"]
+# HashiCorp Vault key provider (optional). Uses blocking reqwest, so no async
+# runtime bridge (and no `dep:tokio`) is required. The vault path is TLS-backend
+# agnostic — reqwest's `rustls-tls` plus `reqwest::Certificate::from_pem` — so no
+# `native-tls`/OpenSSL dependency is pulled in.
+encryption-vault = ["encryption", "dep:reqwest", "dep:base64"]
 aws-sdk-kms = ["dep:aws-sdk-kms"]
 
 [profile.dev]
@@ -400,6 +541,22 @@ path = "tests/lost_write_persist_race.rs"
 required-features = ["testing"]
 
 # Examples with required features
+# Bolt profiling workload for the Cypher string-in execution path.
+[[example]]
+name = "bolt_cypher_workload"
+required-features = ["cypher"]
+
+# Bolt profiling workload for the MCP apply_batch write path.
+[[example]]
+name = "bolt_batch_workload"
+required-features = ["mcp-server"]
+
+# Bolt profiling workload quantifying the dispatch_read_tool_limited
+# thread-spawn wrapper overhead on a cheap read (Issue #3368 residue).
+[[example]]
+name = "bolt_mcp_read_overhead_workload"
+required-features = ["mcp-server"]
+
 # Embedding examples require their respective feature flags
 [[example]]
 name = "embedding_openai"
@@ -437,6 +594,58 @@ harness = false
 path = "benches/performance_targets.rs"
 required-features = []
 
+# Schema-constraint write-path overhead gate (Issue #3378).
+[[bench]]
+name = "schema_constraints"
+harness = false
+path = "benches/schema_constraints.rs"
+required-features = []
+
+# Provenance-weighted fusion scoring micro-bench (Issue #3372): the pure
+# `FusionPolicy::fuse()` core over a synthetic candidate pool. The full
+# p99<20ms @ 1M-vector gate rides with the #3366 eval harness (not in-tree yet).
+[[bench]]
+name = "fusion_scoring"
+harness = false
+path = "benches/fusion_scoring.rs"
+required-features = ["semantic-retrieval-fusion"]
+
+# Trust propagation (Issue #3382, AC8): quantifies the opt-in on-cost of
+# `computed_confidence` + `trust_breakdown` over a fixed lineage fixture.
+# Zero-overhead-when-disabled is guaranteed by construction (the trust module is
+# entirely feature-gated) and verified via `cargo build --no-default-features`.
+[[bench]]
+name = "trust_propagation"
+harness = false
+path = "benches/trust_propagation.rs"
+required-features = ["semantic-reasoning"]
+
+# Workflow journal (DBOS Phase 3a, Issue #3577): §7 OQ9 baseline harness for the
+# exactly-once step-recording primitive. Measures `record_step` throughput and
+# the fresh vs adopt-winner (dedup) paths; write amplification is 1 node + 1 edge
+# per recorded step. Targets are TBD (OQ9 leaves the target set open).
+[[bench]]
+name = "workflow_journal"
+harness = false
+path = "benches/workflow_journal.rs"
+required-features = ["durable-execution"]
+
+# Temporal aggregation windows (Issue #3363): 12-window monthly aggregation
+# over ~1,000 historical versions, targeting < 50ms end-to-end.
+[[bench]]
+name = "temporal_window"
+harness = false
+path = "benches/temporal_window.rs"
+required-features = []
+
+# Temporal joins (Issue #3379): event-aligned join over ~100 alignment instants
+# across 2 entities, targeting < 50ms p99 end-to-end.
+[[bench]]
+name = "temporal_join"
+harness = false
+path = "benches/temporal_join.rs"
+required-features = []
+
 # OpenTelemetry tracing overhead gate (Issue #3376): disabled vs enabled.
 [[bench]]
 name = "otel_overhead"
@@ -453,6 +662,16 @@ harness = false
 path = "benches/mcp_round_trip.rs"
 required-features = ["mcp-server", "config-toml"]
 
+# Crypto-shred designation overhead + non-designated zero-regression (Issue #3665, AC8).
+# Quantifies sealed-write latency/throughput vs plain writes and the <2us
+# non-designated single-hop guarantee. Requires the audit-export feature that
+# gates the crypto-shred designation subsystem.
+[[bench]]
+name = "crypto_shred_overhead"
+harness = false
+path = "benches/crypto_shred_overhead.rs"
+required-features = ["audit-export"]
+
 # Storage layer - raw storage primitives and fast path
 [[bench]]
 name = "current_state"
@@ -465,6 +684,54 @@ name = "historical_storage"
 harness = false
 path = "benches/historical_storage.rs"
 required-features = []
+
+# Named snapshots / reproducible reads (Issue #3370)
+[[bench]]
+name = "snapshot_pin"
+harness = false
+path = "benches/snapshot_pin.rs"
+required-features = []
+
+# Belief-revision audit (Issue #3362): full audit over a ~100-version history,
+# targeting < 10ms (temporal-reconstruction target). Gated on semantic-temporal.
+[[bench]]
+name = "belief_revision"
+harness = false
+path = "benches/belief_revision.rs"
+required-features = ["semantic-temporal"]
+
+# Contradiction-genealogy reconstruction (Issue #3352): building a genealogy over
+# a ≤1K-version entity, targeting p99 < 50ms (temporal-reconstruction budget).
+# Gated on semantic-temporal.
+[[bench]]
+name = "contradiction_genealogy"
+harness = false
+path = "benches/contradiction_genealogy.rs"
+required-features = ["semantic-temporal"]
+
+[[bench]]
+name = "counterfactual_replay"
+harness = false
+path = "benches/counterfactual_replay.rs"
+required-features = ["semantic-temporal"]
+
+# Knowledge half-life analytics (Issue #3377, Fix-B): a cold cohort scan +
+# Kaplan-Meier over a sizeable synthetic cohort (SM3 < 10s / 1M versions,
+# extrapolated) and the warm fact_freshness cache path (SM3 < 1ms warm).
+# Bench-reported, not CI-gated. Gated on semantic-temporal.
+[[bench]]
+name = "half_life"
+harness = false
+path = "benches/half_life.rs"
+required-features = ["semantic-temporal"]
+
+# Drift-alarm write-path overhead (Issue #3367): GroupCommit commit throughput
+# baseline vs 10 active on-write monitors + engine (target: <10% reduction).
+[[bench]]
+name = "drift_alarm_overhead"
+harness = false
+path = "benches/drift_alarm_overhead.rs"
+required-features = ["semantic-temporal"]
 
 # High-level API - includes transaction overhead and API layer
 [[bench]]
@@ -498,6 +765,12 @@ name = "provenance_write_throughput"
 harness = false
 path = "benches/provenance_write_throughput.rs"
 required-features = []
+
+# Append-only valid-time supersession on update (ADR-0061)
+[[bench]]
+name = "update_supersession"
+harness = false
+path = "benches/update_supersession.rs"
 
 [[bench]]
 name = "checkpoints"
@@ -538,6 +811,13 @@ harness = false
 path = "benches/derivation_lineage.rs"
 required-features = []
 
+# Replica apply gate (Issue #3788) - read-path cost of torn-read isolation
+[[bench]]
+name = "replication_apply_gate"
+harness = false
+path = "benches/replication_apply_gate.rs"
+required-features = []
+
 # Point-in-time restore (Issue #3374) - end-to-end PITR wall-clock (<30s metric)
 [[bench]]
 name = "pitr"
@@ -549,6 +829,12 @@ required-features = []
 name = "changefeed"
 harness = false
 path = "benches/changefeed.rs"
+required-features = []
+
+[[bench]]
+name = "changefeed_subscribe"
+harness = false
+path = "benches/changefeed_subscribe.rs"
 required-features = []
 
 [[bench]]
@@ -685,3 +971,19 @@ required-features = ["parquet"]
 name = "node_scan"
 harness = false
 path = "benches/node_scan.rs"
+
+# Secondary property (equality) index: scan vs indexed selective lookup over a
+# 100K-node store. Demonstrates the O(N) -> O(matches) speedup.
+[[bench]]
+name = "property_index"
+harness = false
+path = "benches/property_index.rs"
+required-features = []
+
+# Per-query resource limits (Issue #3368, AC6): fast-path overhead of the
+# engine-lane resource guard on under-limit queries (guard enabled-default vs
+# disabled, head-to-head on identical queries).
+[[bench]]
+name = "query_resource_limits"
+harness = false
+path = "benches/query_resource_limits.rs"

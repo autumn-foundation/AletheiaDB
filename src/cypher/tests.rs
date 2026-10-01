@@ -100,6 +100,7 @@ fn test_cypher_ast_basic_match() {
             limit: None,
         },
         temporal: None,
+        namespace: None,
         with_clauses: vec![],
         optional_matches: vec![],
     };
@@ -3666,9 +3667,23 @@ fn sorted_names(rows: &[crate::query::executor::QueryRow]) -> Vec<String> {
 
 /// Count of distinct node ids across a row set -- used to assert a range scan
 /// emits no duplicate rows independent of whether a version carries a `name`.
-fn distinct_node_count(rows: &[crate::query::executor::QueryRow]) -> usize {
+/// Distinct `(node, name)` states among `rows`. A node legitimately appears
+/// once per distinct believed state across a range (ADR-0061: an update keeps
+/// the superseded value believed over its own valid prefix); a duplicate row is
+/// the SAME state twice.
+fn distinct_node_state_count(rows: &[crate::query::executor::QueryRow]) -> usize {
     rows.iter()
-        .filter_map(|r| r.entity.as_node().map(|n| n.id))
+        .filter_map(|r| {
+            r.entity.as_node().map(|n| {
+                (
+                    n.id,
+                    n.properties
+                        .get("name")
+                        .and_then(|p| p.as_str())
+                        .map(str::to_owned),
+                )
+            })
+        })
         .collect::<std::collections::BTreeSet<_>>()
         .len()
 }
@@ -3683,9 +3698,10 @@ fn time_now() -> crate::core::Timestamp {
 
 /// Oracle ground truth for a `BETWEEN`-style range query: the sorted, unique
 /// `name` values obtained by taking `find_nodes_at_time(label, v, tt)` for each
-/// sampled valid instant `v` and unioning the results (deduplicated by node).
-/// This is the "union over valid instants of AS OF (v, tt)" the range operator
-/// must equal.
+/// sampled valid instant `v` and unioning the results (deduplicated by
+/// `(node, name)` state: one node may hold different believed values over
+/// different valid sub-ranges, ADR-0061). This is the "union over valid
+/// instants of AS OF (v, tt)" the range operator must equal.
 fn oracle_union_names_at(
     db: &AletheiaDB,
     label: &str,
@@ -3693,15 +3709,15 @@ fn oracle_union_names_at(
     tt: crate::core::Timestamp,
 ) -> Vec<String> {
     use std::collections::BTreeMap;
-    let mut by_node: BTreeMap<crate::core::NodeId, String> = BTreeMap::new();
+    let mut states: BTreeMap<(crate::core::NodeId, String), ()> = BTreeMap::new();
     for &v in valid_instants {
         for node in db.find_nodes_at_time(label, v, tt).unwrap().nodes {
             if let Some(name) = node.properties.get("name").and_then(|p| p.as_str()) {
-                by_node.insert(node.id, name.to_string());
+                states.insert((node.id, name.to_string()), ());
             }
         }
     }
-    let mut names: Vec<String> = by_node.into_values().collect();
+    let mut names: Vec<String> = states.into_keys().map(|(_, name)| name).collect();
     names.sort();
     names
 }
@@ -3860,11 +3876,13 @@ fn test_e2e_for_system_time_as_of_honored_by_label_scan() {
 /// equals the union, over sampled valid instants in the range, of
 /// `AS OF (v, now)`, and excludes transaction-time-superseded beliefs.
 ///
-/// Here `A@[v1,v2)` is superseded (both its valid AND transaction intervals are
-/// closed by the forward update to `B@[v2,MAX)`), so at tx=now only `B` is
-/// believed. BETWEEN therefore returns `["B"]`, NOT `["A","B"]`: a stale,
-/// no-longer-believed value must never leak. This is cross-checked against the
-/// oracle union over sampled instants.
+/// A forward update to `B` at `v2` keeps `A` believed over `[v1, v2)` (ADR-0061:
+/// the update carries the superseded valid-time prefix forward), so as of now
+/// BETWEEN returns both `A` and `B` -- each a distinct believed state over its
+/// own sub-range, not a duplicate. A *correction* (an update at the same
+/// `valid_from`) genuinely supersedes the old value at every valid instant, and
+/// that stale, no-longer-believed value must never leak. Both are
+/// cross-checked against the oracle union over sampled instants.
 #[test]
 fn test_e2e_between_is_as_of_now_snapshot_excludes_superseded() {
     let db = AletheiaDB::new().unwrap();
@@ -3893,10 +3911,41 @@ fn test_e2e_between_is_as_of_now_snapshot_excludes_superseded() {
     );
     assert_eq!(
         names,
-        vec!["B".to_string()],
-        "the tx-superseded value 'A' must be excluded; only the believed 'B' remains"
+        vec!["A".to_string(), "B".to_string()],
+        "A is still believed over [v1, v2) and B over [v2, ..)"
     );
-    // No duplicate rows.
+    // No duplicate rows: one row per distinct believed state.
+    assert_eq!(
+        rows.len(),
+        distinct_node_state_count(&rows),
+        "BETWEEN must not emit duplicate rows"
+    );
+
+    // A correction at the same valid_from supersedes 'C' everywhere: it must
+    // not leak into the range result.
+    let w1 = temporal_anchor(&db);
+    let fixed = db
+        .create_node_with_valid_time("Fixed", person("C"), Some(w1))
+        .unwrap();
+    db.update_node_with_valid_time(fixed, person("D"), Some(w1))
+        .unwrap();
+    let wend = temporal_anchor(&db);
+    let q = format!(
+        "MATCH (n:Fixed) BETWEEN '{}' AND '{}' RETURN n",
+        anchor_micros(w1),
+        anchor_micros(wend)
+    );
+    let rows = collect_rows(db.execute_cypher(&q).unwrap());
+    let names = sorted_names(&rows);
+    assert_eq!(
+        names,
+        oracle_union_names_at(&db, "Fixed", &[w1, wend], time_now())
+    );
+    assert_eq!(
+        names,
+        vec!["D".to_string()],
+        "the corrected value 'C' is superseded at every valid instant and must be excluded"
+    );
     assert_eq!(rows.len(), 1, "BETWEEN must not emit duplicate rows");
 }
 
@@ -3992,9 +4041,10 @@ fn test_e2e_between_excludes_out_of_range_versions() {
     );
 }
 
-/// #552 correctness: the Paris -> London -> retract topology. `BETWEEN` must NOT
-/// return the transaction-time-superseded "Paris" and must NOT emit duplicate
-/// rows; it equals the oracle union over sampled instants.
+/// #552 correctness: the Paris -> London -> retract topology. As of now Paris is
+/// still believed over `[t_create, t_update)` (ADR-0061) and London over
+/// `[t_update, t_retract)`, so `BETWEEN` returns both, never duplicates a
+/// state, and equals the oracle union over sampled instants.
 #[test]
 fn test_e2e_between_excludes_superseded_and_no_duplicates() {
     let db = AletheiaDB::new().unwrap();
@@ -4027,16 +4077,16 @@ fn test_e2e_between_excludes_superseded_and_no_duplicates() {
         names, oracle,
         "BETWEEN must equal the oracle union of AS OF over the range"
     );
-    assert!(
-        !names.contains(&"Paris".to_string()),
-        "the tx-superseded 'Paris' must be excluded, got {names:?}"
+    assert_eq!(
+        names,
+        vec!["London".to_string(), "Paris".to_string()],
+        "Paris is believed over [t_create, t_update), London until the retraction"
     );
-    // No duplicate rows: at most one row per node (name-independent, so a
-    // tombstone/retraction version without a `name` still counts).
+    // No duplicate rows: at most one row per distinct (node, state).
     assert_eq!(
         rows.len(),
-        distinct_node_count(&rows),
-        "BETWEEN must not emit duplicate rows per node"
+        distinct_node_state_count(&rows),
+        "BETWEEN must not emit duplicate rows per node state"
     );
 }
 
@@ -5499,6 +5549,141 @@ mod explain_profile {
         assert!(
             text.contains("NodeScan"),
             "EXPLAIN of a single-variable MATCH should still produce a plan: {text}"
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Namespace-scoped EXPLAIN / PROFILE (Issue #3349, PR3d — adversarial
+    // review BLOCKER: a scoped PROFILE must profile the SCOPED query, never
+    // execute across ALL namespaces; a scoped EXPLAIN must honor the
+    // NOT_FOUND error contract).
+    // ------------------------------------------------------------------------
+
+    use crate::core::namespace::{Namespace, NamespaceScope};
+
+    /// Run a scoped Cypher `EXPLAIN`/`PROFILE` expected to return exactly one
+    /// `plan` string row, and return the plan text.
+    fn plan_text_scoped(db: &AletheiaDB, query: &str, scope: NamespaceScope) -> String {
+        let results = db
+            .execute_cypher_scoped(query, scope)
+            .unwrap_or_else(|e| panic!("`{query}` should execute scoped, got error: {e:?}"));
+        let rows: Vec<_> = results.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(rows.len(), 1, "EXPLAIN/PROFILE must return exactly one row");
+        let cols = rows[0]
+            .columns
+            .as_ref()
+            .expect("plan row must carry computed columns");
+        match &cols[0].1 {
+            PropertyValue::String(s) => s.to_string(),
+            other => panic!("plan column must be a string, got {other:?}"),
+        }
+    }
+
+    /// The largest `actual rows: N` count reported anywhere in a PROFILE plan.
+    fn max_actual_rows(plan: &str) -> u64 {
+        plan.split("actual rows: ")
+            .skip(1)
+            .filter_map(|tail| {
+                let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+                digits.parse::<u64>().ok()
+            })
+            .max()
+            .unwrap_or_else(|| panic!("PROFILE plan carried no `actual rows:` stats: {plan}"))
+    }
+
+    /// BLOCKER (Finding 1): a scoped `PROFILE` must profile the SCOPED query.
+    /// With 3 nodes in `agent:a` and 2 in `agent:b` (same label), profiling
+    /// `PROFILE MATCH (n:Widget) RETURN n` under `{agent:a}` must report the
+    /// in-scope row count (3), never the global total (5). Pre-fix the PROFILE
+    /// helper never applied the scope, so the scan ran unscoped and reported 5.
+    #[test]
+    fn profile_scoped_row_count_reflects_scope_not_global() {
+        let db = AletheiaDB::new().unwrap();
+        for i in 0..3 {
+            let props = PropertyMapBuilder::new()
+                .insert("name", format!("a{i}"))
+                .build();
+            db.create_node_in_namespace("Widget", props, "agent:a")
+                .unwrap();
+        }
+        for i in 0..2 {
+            let props = PropertyMapBuilder::new()
+                .insert("name", format!("b{i}"))
+                .build();
+            db.create_node_in_namespace("Widget", props, "agent:b")
+                .unwrap();
+        }
+
+        let scope_a = NamespaceScope::single(Namespace::new("agent:a").unwrap());
+        let plan = plan_text_scoped(&db, "PROFILE MATCH (n:Widget) RETURN n", scope_a);
+
+        assert_eq!(
+            max_actual_rows(&plan),
+            3,
+            "scoped PROFILE must count ONLY agent:a's 3 nodes, not the 5 global: {plan}"
+        );
+        assert!(
+            !plan.contains("actual rows: 5"),
+            "scoped PROFILE must never expose the global (unscoped) count of 5: {plan}"
+        );
+    }
+
+    /// Sanity companion: an unscoped (`All`) PROFILE still sees every namespace.
+    #[test]
+    fn profile_all_scope_sees_every_namespace() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Widget", CorePropertyMap::new(), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Widget", CorePropertyMap::new(), "agent:b")
+            .unwrap();
+        let plan = plan_text_scoped(
+            &db,
+            "PROFILE MATCH (n:Widget) RETURN n",
+            NamespaceScope::All,
+        );
+        assert_eq!(
+            max_actual_rows(&plan),
+            2,
+            "an `All` scope profiles across both namespaces: {plan}"
+        );
+    }
+
+    /// MINOR (Finding 2): a scoped `EXPLAIN` against an UNKNOWN namespace must
+    /// return the `NOT_FOUND` error contract (with the offending namespace),
+    /// not a silently-accepted plan. Pre-fix EXPLAIN skipped `validate_scope`.
+    #[test]
+    fn explain_unknown_namespace_is_not_found() {
+        use crate::core::error::Error;
+        use crate::core::namespace::NamespaceError;
+
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", CorePropertyMap::new(), "agent:a")
+            .unwrap();
+
+        let bad = NamespaceScope::single(Namespace::new("agent:nope").unwrap());
+        match db.execute_cypher_scoped("EXPLAIN MATCH (n:Person) RETURN n", bad) {
+            Err(Error::Namespace(NamespaceError::NotFound { namespace })) => {
+                assert_eq!(namespace, "agent:nope");
+            }
+            Err(other) => panic!("unknown-namespace EXPLAIN must be NOT_FOUND, got {other:?}"),
+            Ok(_) => {
+                panic!("unknown-namespace EXPLAIN must be NOT_FOUND, not a silently-accepted plan")
+            }
+        }
+    }
+
+    /// Companion: a VALID scoped EXPLAIN still returns a plan (validation does
+    /// not break the happy path).
+    #[test]
+    fn explain_known_namespace_still_returns_plan() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", CorePropertyMap::new(), "agent:a")
+            .unwrap();
+        let scope_a = NamespaceScope::single(Namespace::new("agent:a").unwrap());
+        let plan = plan_text_scoped(&db, "EXPLAIN MATCH (n:Person) RETURN n", scope_a);
+        assert!(
+            plan.contains("NodeScan"),
+            "a valid scoped EXPLAIN still produces a plan: {plan}"
         );
     }
 }
@@ -7398,11 +7583,24 @@ mod multi_pattern {
 
     #[test]
     fn test_multi_pattern_binding_cap_enforced() {
-        use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder};
+        use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
+        use crate::test_utils::unique_wal_dir;
         // Cap the materialized binding count low via the configurable
         // `max_schema_as_of_entities` limit, then build enough nodes that the
         // (a),(b) product exceeds it. Must return a structured error, not OOM.
+        //
+        // Isolate the WAL dir (Issue #3500): this test builds its own config,
+        // so without an explicit `wal_dir` it would fall back to the shared
+        // CWD-relative `aletheiadb/wal` default and cross-pollute other
+        // default-config tests (a stray segment replayed at open hard-errors
+        // with `CorruptedData("Unknown WAL operation type: ...")`).
+        let wal_home = unique_wal_dir();
         let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(wal_home.path().join("wal"))
+                    .build(),
+            )
             .historical(
                 HistoricalConfigBuilder::new()
                     .max_schema_as_of_entities(5)
@@ -7828,16 +8026,898 @@ mod mutations {
         }
     }
 
+    // ---- MERGE (Issue #3548) ---------------------------------------------
+
+    /// #1 Create-when-absent: on an empty db, MERGE creates the node, RETURN
+    /// binds it, and exactly one node exists.
     #[test]
-    fn merge_is_rejected() {
+    fn merge_creates_when_absent() {
         let db = AletheiaDB::new().unwrap();
-        // MERGE is deferred to a follow-up; it must reject cleanly (parse error),
-        // never partially apply.
+        let rows = run(&db, "MERGE (n:Person {name: 'Zed'}) RETURN n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(str_prop(&rows[0].entity, "name").unwrap(), "Zed");
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1);
+    }
+
+    /// #2 Match-when-present: MERGE of an existing node creates no duplicate and
+    /// records NO new version (a bare match is not a write).
+    #[test]
+    fn merge_matches_when_present_no_new_version() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        let id = node_id_by_name(&db, "Person", "Alice");
+        let before_versions = db.get_node_history(id).unwrap().version_count();
+        let before_count = db.node_count();
+
+        run(&db, "MERGE (n:Person {name: 'Alice'})");
+
+        assert_eq!(db.node_count(), before_count, "no duplicate node created");
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1);
+        assert_eq!(
+            db.get_node_history(id).unwrap().version_count(),
+            before_versions,
+            "a bare MERGE match must record no new version"
+        );
+    }
+
+    /// #3 `ON CREATE SET` fires only on the create branch; a second identical
+    /// MERGE (which now matches) does not re-apply it.
+    #[test]
+    fn merge_on_create_set_fires_only_on_create() {
+        let db = AletheiaDB::new().unwrap();
+        run(
+            &db,
+            "MERGE (n:Person {name: 'Zed'}) ON CREATE SET n.created = 1",
+        );
+        assert_eq!(int_prop_node(&db, "Person", "Zed", "created"), Some(1));
+
+        // A second identical MERGE matches; ON CREATE SET must not fire again.
+        run(
+            &db,
+            "MERGE (n:Person {name: 'Zed'}) ON CREATE SET n.created = 99",
+        );
+        assert_eq!(
+            int_prop_node(&db, "Person", "Zed", "created"),
+            Some(1),
+            "ON CREATE SET must not re-apply on the match branch"
+        );
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1);
+    }
+
+    /// #4 `ON MATCH SET` fires only on the match branch AND records a new
+    /// version (it is an update); it does not fire on the create branch. This
+    /// test carries NO `ON CREATE SET` clause -- it asserts only ON MATCH SET
+    /// behavior on both branches; the on_create/on_match interaction is covered
+    /// by #5 (`merge_both_on_create_and_on_match`).
+    #[test]
+    fn merge_on_match_set_fires_only_on_match_and_records_version() {
+        let db = AletheiaDB::new().unwrap();
+        let (id, t0) = db
+            .write_with_timestamp(|tx| {
+                tx.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Alice").build(),
+                )
+            })
+            .unwrap();
+        let before_versions = db.get_node_history(id).unwrap().version_count();
+
+        run(
+            &db,
+            "MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.seen = 1",
+        );
+
+        assert_eq!(int_prop_node(&db, "Person", "Alice", "seen"), Some(1));
+        assert_eq!(
+            db.get_node_history(id).unwrap().version_count(),
+            before_versions + 1,
+            "ON MATCH SET on a matched node must record a new version"
+        );
+        // The pre-update version had no `seen` property.
+        let old = db.get_node_at_time(id, t0, t0).unwrap();
+        assert_eq!(old.get_property("seen"), None);
+
+        // On the create branch, ON MATCH SET must NOT fire.
+        run(
+            &db,
+            "MERGE (n:Person {name: 'Zed'}) ON MATCH SET n.seen = 7",
+        );
+        assert_eq!(
+            int_prop_node(&db, "Person", "Zed", "seen"),
+            None,
+            "ON MATCH SET must not fire on the create branch"
+        );
+    }
+
+    /// #5 A statement carrying both `ON CREATE SET` and `ON MATCH SET`: the
+    /// create path applies only on_create; the match path applies only on_match.
+    #[test]
+    fn merge_both_on_create_and_on_match() {
+        let db = AletheiaDB::new().unwrap();
+        let stmt = "MERGE (n:Person {name: 'Zed'}) \
+                    ON CREATE SET n.origin = 1 ON MATCH SET n.touched = 1";
+
+        // Create path.
+        run(&db, stmt);
+        assert_eq!(int_prop_node(&db, "Person", "Zed", "origin"), Some(1));
+        assert_eq!(int_prop_node(&db, "Person", "Zed", "touched"), None);
+
+        // Match path.
+        run(&db, stmt);
+        assert_eq!(int_prop_node(&db, "Person", "Zed", "touched"), Some(1));
+        // origin is unchanged (on_create did not fire again).
+        assert_eq!(int_prop_node(&db, "Person", "Zed", "origin"), Some(1));
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1);
+    }
+
+    /// #6 Relationship MERGE creates the whole pattern (both nodes + edge) when
+    /// absent.
+    #[test]
+    fn merge_relationship_creates_whole_pattern() {
+        let db = AletheiaDB::new().unwrap();
+        run(
+            &db,
+            "MERGE (a:Person {name: 'A'})-[:KNOWS]->(b:Person {name: 'B'})",
+        );
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 2);
+        assert_eq!(db.edge_count(), 1);
+        let a = node_id_by_name(&db, "Person", "A");
+        let b = node_id_by_name(&db, "Person", "B");
+        let out = db.get_outgoing_edges(a);
+        assert_eq!(out.len(), 1);
+        assert_eq!(db.get_edge(out[0]).unwrap().target, b);
+    }
+
+    /// #7 Relationship MERGE matches the whole pattern the second time: running
+    /// the same MERGE twice yields exactly one A, one B, one KNOWS edge.
+    #[test]
+    fn merge_relationship_matches_whole_pattern_no_duplicate() {
+        let db = AletheiaDB::new().unwrap();
+        let stmt = "MERGE (a:Person {name: 'A'})-[:KNOWS]->(b:Person {name: 'B'})";
+        run(&db, stmt);
+        run(&db, stmt);
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 2);
+        assert_eq!(db.edge_count(), 1);
+    }
+
+    /// #8 Relationship MERGE with a bound leading variable: the `MATCH` binds
+    /// `a`, MERGE reuses it and creates only the unbound remainder (b + edge).
+    #[test]
+    fn merge_relationship_with_bound_leading_var() {
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        run(
+            &db,
+            "MATCH (a:Person {name: 'A'}) MERGE (a)-[:KNOWS]->(b:Person {name: 'C'})",
+        );
+        // Exactly one new node (C) was created; A was reused.
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 2);
+        assert_eq!(db.edge_count(), 1);
+        let out = db.get_outgoing_edges(a);
+        assert_eq!(out.len(), 1);
+        let c = node_id_by_name(&db, "Person", "C");
+        assert_eq!(db.get_edge(out[0]).unwrap().target, c);
+    }
+
+    /// #9 Whole-pattern (not element-by-element) semantics: when a node exists
+    /// but the full path does not, MERGE creates the ENTIRE pattern including a
+    /// duplicate of the existing node. This is the documented openCypher
+    /// whole-pattern rule (constraint (a) of Issue #3548).
+    #[test]
+    fn merge_whole_pattern_creates_duplicate_node() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "A").build(),
+        )
+        .unwrap();
+        // A exists, but there is no (A)-[:KNOWS]->(B:name=B) path, so the WHOLE
+        // pattern is created: a NEW A, a new B, and the edge.
+        run(
+            &db,
+            "MERGE (a:Person {name: 'A'})-[:KNOWS]->(b:Person {name: 'B'})",
+        );
+        assert_eq!(
+            db.scan_nodes_by_label("Person").count(),
+            3,
+            "whole-pattern create duplicates the pre-existing A (openCypher rule)"
+        );
+        assert_eq!(
+            db.scan_nodes_by_label("Person")
+                .filter(|id| db.get_node(*id).unwrap().get_property("name")
+                    == Some(&PropertyValue::from("A")))
+                .count(),
+            2,
+            "two nodes named A: the original and the whole-pattern duplicate"
+        );
+        assert_eq!(db.edge_count(), 1);
+    }
+
+    /// #10 Parsing: a well-formed MERGE now parses (no longer a ParseError); a
+    /// malformed MERGE is a clean ParseError with no partial write.
+    #[test]
+    fn merge_parses_and_malformed_is_clean_parse_error() {
+        let db = AletheiaDB::new().unwrap();
         assert!(
             db.execute_cypher("MERGE (n:Person {name: 'Zed'}) RETURN n")
+                .is_ok(),
+            "a well-formed MERGE must parse and execute"
+        );
+
+        let db2 = AletheiaDB::new().unwrap();
+        // `ON CREATE` without `SET` is malformed.
+        assert!(
+            db2.execute_cypher("MERGE (n:Person {name: 'Zed'}) ON CREATE n.x = 1")
                 .is_err()
         );
-        assert_eq!(db.node_count(), 0);
+        assert_eq!(db2.node_count(), 0, "no partial write on a parse error");
+    }
+
+    /// #11 Unsupported MERGE shapes are rejected statically (before any
+    /// transaction) with no partial write.
+    #[test]
+    fn merge_rejects_unsupported_shapes() {
+        // Multi-label node.
+        let db = AletheiaDB::new().unwrap();
+        assert_query_error(&db, "MERGE (n:Person:Admin {name: 'x'})");
+        assert_eq!(db.node_count(), 0, "no partial write (multi-label)");
+
+        // Variable-length relationship.
+        let db2 = AletheiaDB::new().unwrap();
+        assert_query_error(&db2, "MERGE (a:Person)-[:KNOWS*1..2]->(b:Person)");
+        assert_eq!(db2.node_count(), 0, "no partial write (var-length rel)");
+    }
+
+    /// #12 Uniqueness/concurrency: with a unique constraint, two sequential
+    /// MERGE-creates of the same name do not duplicate (the second matches);
+    /// and a genuine duplicate CREATE of the constrained property aborts.
+    #[test]
+    fn merge_uniqueness_constraint_prevents_duplicate() {
+        let db = AletheiaDB::new().unwrap();
+        db.unique_constraint("Person", "name").enable().unwrap();
+
+        run(&db, "MERGE (n:Person {name: 'Alice'})");
+        run(&db, "MERGE (n:Person {name: 'Alice'})");
+        assert_eq!(
+            db.scan_nodes_by_label("Person").count(),
+            1,
+            "the second MERGE matches; no duplicate"
+        );
+
+        // A genuine duplicate CREATE of the constrained (label, property) aborts
+        // at commit (constraint-abort path), leaving the single node intact.
+        assert!(
+            db.execute_cypher("CREATE (n:Person {name: 'Alice'})")
+                .is_err(),
+            "a duplicate CREATE under the unique constraint must abort"
+        );
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1);
+    }
+
+    /// #13 Read-only guard regression: the MCP `query` / HTTP surface still
+    /// rejects MERGE before parsing (it stays in the mutating-keyword list).
+    #[test]
+    fn merge_still_rejected_on_read_only_surface() {
+        assert_eq!(
+            crate::query::read_only::detect_mutating_clause(
+                "MERGE (n:Person {name: 'Zed'}) RETURN n"
+            ),
+            Some("MERGE"),
+            "MERGE must remain a rejected mutating clause on the read-only surface"
+        );
+    }
+
+    /// #14 Single-node MERGE dedups across MULTIPLE reading-clause rows within
+    /// one statement: `MATCH (p:Person) MERGE (c:City {name:'NYC'})` over N
+    /// persons must create exactly ONE NYC (openCypher), not N. The committed
+    /// pre-transaction match cannot see the buffered create, so this relies on
+    /// the statement-local created-node ledger (the core bug fix).
+    #[test]
+    fn merge_single_node_dedups_across_reading_rows() {
+        let db = AletheiaDB::new().unwrap();
+        for name in ["A", "B", "C"] {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", name).build(),
+            )
+            .unwrap();
+        }
+        run(&db, "MATCH (p:Person) MERGE (c:City {name: 'NYC'})");
+        assert_eq!(
+            db.scan_nodes_by_label("City").count(),
+            1,
+            "single-node MERGE over 3 persons must yield exactly ONE NYC"
+        );
+    }
+
+    /// #15 Two single-node MERGE clauses with the same key in ONE statement
+    /// dedup to a single node (the second MERGE sees the first's buffered
+    /// create via the ledger).
+    #[test]
+    fn merge_two_single_node_clauses_same_key_dedup() {
+        let db = AletheiaDB::new().unwrap();
+        run(
+            &db,
+            "MERGE (a:City {name: 'NYC'}) MERGE (b:City {name: 'NYC'})",
+        );
+        assert_eq!(
+            db.scan_nodes_by_label("City").count(),
+            1,
+            "two single-node MERGE clauses of the same key must yield ONE node"
+        );
+    }
+
+    /// #16 A ledger-bound single-node MERGE applies `ON MATCH SET` to the
+    /// buffered-created node (the second clause matches the first clause's
+    /// create), updating it sanely without a duplicate or error.
+    #[test]
+    fn merge_ledger_match_applies_on_match_set() {
+        let db = AletheiaDB::new().unwrap();
+        run(
+            &db,
+            "MERGE (a:City {name: 'NYC'}) MERGE (b:City {name: 'NYC'}) ON MATCH SET b.touched = 1",
+        );
+        assert_eq!(db.scan_nodes_by_label("City").count(), 1, "one NYC only");
+        assert_eq!(
+            int_prop_node(&db, "City", "NYC", "touched"),
+            Some(1),
+            "ON MATCH SET on the ledger-bound node must apply"
+        );
+    }
+
+    /// #17 Relationship/path MERGE is NOT deduped by the ledger: the whole path
+    /// is matched, so `MATCH (p:Person) MERGE (p)-[:LIVES_IN]->(c:City)` creates
+    /// one City PER person (the openCypher MERGE-on-a-path gotcha), distinct
+    /// from the single-node case in #14.
+    #[test]
+    fn merge_relationship_path_creates_end_node_per_row() {
+        let db = AletheiaDB::new().unwrap();
+        for name in ["A", "B", "C"] {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", name).build(),
+            )
+            .unwrap();
+        }
+        run(
+            &db,
+            "MATCH (p:Person) MERGE (p)-[:LIVES_IN]->(c:City {name: 'NYC'})",
+        );
+        assert_eq!(
+            db.scan_nodes_by_label("City").count(),
+            3,
+            "relationship-path MERGE creates one City per person (openCypher gotcha)"
+        );
+        assert_eq!(db.edge_count(), 3);
+    }
+
+    /// #18 (Issue #3623) A MERGE whose pattern matches MORE THAN ONE committed
+    /// entity now binds ALL matches (openCypher whole-pattern MATCH semantics)
+    /// and applies `ON MATCH SET` to every one -- no create, no rejection.
+    #[test]
+    fn merge_multi_match_binds_all_and_sets_each() {
+        let db = AletheiaDB::new().unwrap();
+        // Two Persons named 'Dup': a bare `MERGE (n:Person {name:'Dup'})` matches
+        // both and fans into two rows.
+        for _ in 0..2 {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dup").build(),
+            )
+            .unwrap();
+        }
+        let before = db.node_count();
+        run(
+            &db,
+            "MERGE (n:Person {name: 'Dup'}) ON MATCH SET n.touched = 1",
+        );
+        assert_eq!(db.node_count(), before, "no create on multi-match");
+        // ON MATCH SET applied to BOTH matched nodes.
+        for id in db.scan_nodes_by_label("Person") {
+            let node = db.get_node(id).unwrap();
+            assert_eq!(
+                node.get_property("touched"),
+                Some(&PropertyValue::Int(1)),
+                "ON MATCH SET must apply to every matched node"
+            );
+        }
+    }
+
+    /// #18b (Issue #3623) A multi-match MERGE with RETURN fans into one row per
+    /// matched entity.
+    #[test]
+    fn merge_multi_match_returns_row_per_match() {
+        let db = AletheiaDB::new().unwrap();
+        for _ in 0..3 {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dup").build(),
+            )
+            .unwrap();
+        }
+        let rows = run(&db, "MERGE (n:Person {name: 'Dup'}) RETURN n");
+        assert_eq!(rows.len(), 3, "one RETURN row per matched entity");
+        for row in &rows {
+            assert_eq!(str_prop(&row.entity, "name").unwrap(), "Dup");
+        }
+    }
+
+    /// #18c (Issue #3623) A bare multi-match MERGE (no ON MATCH SET) records NO
+    /// new versions -- it is a pure match -- and creates nothing.
+    #[test]
+    fn merge_multi_match_bare_records_no_versions() {
+        let db = AletheiaDB::new().unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            ids.push(
+                db.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Dup").build(),
+                )
+                .unwrap(),
+            );
+        }
+        let before: Vec<usize> = ids
+            .iter()
+            .map(|id| db.get_node_history(*id).unwrap().version_count())
+            .collect();
+        let before_count = db.node_count();
+        let rows = run(&db, "MERGE (n:Person {name: 'Dup'}) RETURN n");
+        assert_eq!(rows.len(), 2, "one row per match");
+        assert_eq!(db.node_count(), before_count, "no create");
+        for (id, was) in ids.iter().zip(before) {
+            assert_eq!(
+                db.get_node_history(*id).unwrap().version_count(),
+                was,
+                "a bare match must record no new version"
+            );
+        }
+    }
+
+    /// #18d (Issue #3623) A clause AFTER a multi-match MERGE runs per fanned row:
+    /// `SET n.x = 1` must apply to EVERY matched node (composition correctness).
+    #[test]
+    fn merge_multi_match_composes_with_following_clause() {
+        let db = AletheiaDB::new().unwrap();
+        for _ in 0..2 {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dup").build(),
+            )
+            .unwrap();
+        }
+        run(&db, "MERGE (n:Person {name: 'Dup'}) SET n.x = 1");
+        for id in db.scan_nodes_by_label("Person") {
+            assert_eq!(
+                db.get_node(id).unwrap().get_property("x"),
+                Some(&PropertyValue::Int(1)),
+                "a SET after a multi-match MERGE must apply to every fanned row"
+            );
+        }
+    }
+
+    /// #18e (Issue #3623) The create branch still yields exactly ONE row / ONE
+    /// node when no committed match exists (no accidental fan-out).
+    #[test]
+    fn merge_no_match_creates_exactly_one_row() {
+        let db = AletheiaDB::new().unwrap();
+        let rows = run(&db, "MERGE (n:City {name: 'NYC'}) RETURN n");
+        assert_eq!(rows.len(), 1, "create branch yields exactly one row");
+        assert_eq!(db.scan_nodes_by_label("City").count(), 1);
+        assert_eq!(str_prop(&rows[0].entity, "name").unwrap(), "NYC");
+    }
+
+    /// #18f (Issue #3623 review) The fan-out working set is bounded by the same
+    /// configurable `max_schema_as_of_entities` cap the read matcher uses. Two
+    /// chained MERGEs each matching N committed 'Dup' persons multiply the
+    /// working set to N*N; exceeding the cap returns a structured
+    /// `UnsupportedFeature` rejection (never an OOM/panic) with the whole
+    /// transaction aborted. Each individual match (3) stays under the cap, so
+    /// this exercises the *fan-out* bound, not the read matcher's per-pattern one.
+    #[test]
+    fn merge_fanout_exceeding_cap_is_structured_error() {
+        use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
+        use crate::core::error::QueryError;
+        use crate::test_utils::unique_wal_dir;
+
+        // Isolate the WAL dir (Issue #3500) since this test builds its own config.
+        let wal_home = unique_wal_dir();
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(wal_home.path().join("wal"))
+                    .build(),
+            )
+            .historical(
+                HistoricalConfigBuilder::new()
+                    .max_schema_as_of_entities(5)
+                    .build(),
+            )
+            .build();
+        let db = AletheiaDB::with_unified_config(config).unwrap();
+        for _ in 0..3 {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dup").build(),
+            )
+            .unwrap();
+        }
+        let before = db.node_count();
+        // 3 matches x 3 matches = 9 working-set bindings > cap of 5.
+        match db.execute_cypher("MERGE (n:Person {name: 'Dup'}) MERGE (m:Person {name: 'Dup'})") {
+            Ok(_) => panic!("expected a structured fan-out cap error, got Ok"),
+            Err(Error::Query(QueryError::UnsupportedFeature { .. })) => {}
+            Err(other) => panic!("expected UnsupportedFeature cap error, got {other:?}"),
+        }
+        assert_eq!(
+            db.node_count(),
+            before,
+            "no partial write on a capped fan-out"
+        );
+    }
+
+    /// #18g (Issue #3623) Relationship-pattern multi-match: a MERGE relationship
+    /// pattern matching multiple committed paths binds ALL of them -- one fanned
+    /// row per matched path, `ON MATCH SET` applied to every far node, and
+    /// nothing created.
+    #[test]
+    fn merge_relationship_multi_match_binds_all_paths() {
+        use crate::core::property::PropertyMap;
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
+        let c = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "C").build(),
+            )
+            .unwrap();
+        let d = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "D").build(),
+            )
+            .unwrap();
+        // Two committed KNOWS paths: (A)->(B), (C)->(D).
+        db.create_edge(a, b, "KNOWS", PropertyMap::new()).unwrap();
+        db.create_edge(c, d, "KNOWS", PropertyMap::new()).unwrap();
+        let before_nodes = db.node_count();
+        let before_edges = db.edge_count();
+
+        let rows = run(
+            &db,
+            "MERGE (x:Person)-[:KNOWS]->(y:Person) ON MATCH SET y.touched = 1 RETURN x, y",
+        );
+
+        // (a) one row per matched path.
+        assert_eq!(rows.len(), 2, "one RETURN row per matched KNOWS path");
+        // (b) ON MATCH SET on the far node applied to EVERY matched path.
+        assert_eq!(
+            db.get_node(b).unwrap().get_property("touched"),
+            Some(&PropertyValue::Int(1))
+        );
+        assert_eq!(
+            db.get_node(d).unwrap().get_property("touched"),
+            Some(&PropertyValue::Int(1))
+        );
+        // Near nodes are untouched (only the far endpoint `y` was SET).
+        assert_eq!(db.get_node(a).unwrap().get_property("touched"), None);
+        assert_eq!(db.get_node(c).unwrap().get_property("touched"), None);
+        // (c) counts unchanged -- pure match, no create.
+        assert_eq!(
+            db.node_count(),
+            before_nodes,
+            "no node created on relationship multi-match"
+        );
+        assert_eq!(
+            db.edge_count(),
+            before_edges,
+            "no edge created on relationship multi-match"
+        );
+    }
+
+    /// #18h (Issue #3623) Same-entity multi-versioning finding: when one node is
+    /// the far endpoint of TWO matched paths, `ON MATCH SET` runs once per fanned
+    /// row, so the shared node is versioned ONCE PER binding -- a documented
+    /// deviation from openCypher's set-once semantics (see the `apply_merge`
+    /// docstring). This asserts the current double-bump so it stays visible.
+    #[test]
+    fn merge_shared_target_versioned_once_per_matched_path() {
+        use crate::core::property::PropertyMap;
+        let db = AletheiaDB::new().unwrap();
+        let a = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
+        let hub = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Hub").build(),
+            )
+            .unwrap();
+        // Two paths share the far node `hub`: (A)->(Hub), (B)->(Hub).
+        db.create_edge(a, hub, "KNOWS", PropertyMap::new()).unwrap();
+        db.create_edge(b, hub, "KNOWS", PropertyMap::new()).unwrap();
+        let hub_versions_before = db.get_node_history(hub).unwrap().version_count();
+
+        run(
+            &db,
+            "MERGE (x:Person)-[:KNOWS]->(y:Person) ON MATCH SET y.seen = 1",
+        );
+
+        // `hub` is bound by two matched paths -> two per-row updates -> two new
+        // versions (the same-entity double-bump this finding surfaces).
+        assert_eq!(
+            db.get_node_history(hub).unwrap().version_count(),
+            hub_versions_before + 2,
+            "shared far node is versioned once per matched path (documented double-bump)"
+        );
+        assert_eq!(
+            db.get_node(hub).unwrap().get_property("seen"),
+            Some(&PropertyValue::Int(1))
+        );
+    }
+
+    /// #18i (Issue #3623) Atomicity on mid-fan-out failure: a multi-match MERGE
+    /// whose `ON MATCH SET` succeeds on an early fanned row but violates a unique
+    /// constraint on a later one aborts the WHOLE transaction -- NO node is
+    /// mutated (all version counts unchanged), proving all-or-nothing across the
+    /// fan-out.
+    #[test]
+    fn merge_multi_match_mid_fanout_failure_is_atomic() {
+        let db = AletheiaDB::new().unwrap();
+        db.unique_constraint("Person", "tag").enable().unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            ids.push(
+                db.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Dup").build(),
+                )
+                .unwrap(),
+            );
+        }
+        let before: Vec<usize> = ids
+            .iter()
+            .map(|id| db.get_node_history(*id).unwrap().version_count())
+            .collect();
+
+        // Both matched 'Dup' nodes fan out; `ON MATCH SET tag='X'` on the first
+        // reserves the unique value, the second collides -> commit-time abort.
+        let result = db.execute_cypher("MERGE (n:Person {name: 'Dup'}) ON MATCH SET n.tag = 'X'");
+        assert!(
+            result.is_err(),
+            "the colliding multi-match MERGE must abort"
+        );
+
+        // No node mutated: every version count is unchanged, no `tag` persisted.
+        for (id, was) in ids.iter().zip(before) {
+            assert_eq!(
+                db.get_node_history(*id).unwrap().version_count(),
+                was,
+                "no partial mutation on abort"
+            );
+            assert_eq!(
+                db.get_node(*id).unwrap().get_property("tag"),
+                None,
+                "no tag persisted on abort"
+            );
+        }
+    }
+
+    /// #18j (Issue #3623) `ON CREATE SET` does NOT fire on the multi-match
+    /// branch: two committed 'Dup' nodes matched by a MERGE apply only
+    /// `ON MATCH SET`; none receives the `ON CREATE SET` property.
+    #[test]
+    fn merge_multi_match_on_create_set_does_not_fire() {
+        let db = AletheiaDB::new().unwrap();
+        for _ in 0..2 {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dup").build(),
+            )
+            .unwrap();
+        }
+        run(
+            &db,
+            "MERGE (n:Person {name: 'Dup'}) ON CREATE SET n.created = 1 ON MATCH SET n.touched = 1",
+        );
+        for id in db.scan_nodes_by_label("Person") {
+            let node = db.get_node(id).unwrap();
+            assert_eq!(
+                node.get_property("touched"),
+                Some(&PropertyValue::Int(1)),
+                "ON MATCH SET fires on every matched node"
+            );
+            assert_eq!(
+                node.get_property("created"),
+                None,
+                "ON CREATE SET must not fire on the multi-match branch"
+            );
+        }
+    }
+
+    /// #18k (Issue #3623) A write clause AFTER a multi-match MERGE composes per
+    /// fanned row: `MERGE (...) CREATE (n)-[:HAS]->(t:Tag)` over two matched
+    /// nodes creates one Tag + one edge PER fanned row (two of each).
+    #[test]
+    fn merge_multi_match_following_create_composes_per_row() {
+        let db = AletheiaDB::new().unwrap();
+        for _ in 0..2 {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Dup").build(),
+            )
+            .unwrap();
+        }
+        run(
+            &db,
+            "MERGE (n:Person {name: 'Dup'}) CREATE (n)-[:HAS]->(t:Tag)",
+        );
+        assert_eq!(
+            db.scan_nodes_by_label("Tag").count(),
+            2,
+            "one Tag per fanned row"
+        );
+        assert_eq!(db.edge_count(), 2, "one HAS edge per fanned row");
+    }
+
+    /// #18l (Issue #3623) M base rows x N matches: a leading MATCH yielding 2
+    /// rows followed by a MERGE multi-matching 2 each yields the full 2x2=4
+    /// cross-product -- RETURN emits 4 rows and a following CREATE fires once per
+    /// cross-product row (4 edges), with no new match-target created.
+    #[test]
+    fn merge_base_by_match_cross_product() {
+        let db = AletheiaDB::new().unwrap();
+        for _ in 0..2 {
+            db.create_node(
+                "Base",
+                PropertyMapBuilder::new().insert("name", "P").build(),
+            )
+            .unwrap();
+        }
+        for _ in 0..2 {
+            db.create_node(
+                "Widget",
+                PropertyMapBuilder::new().insert("name", "Dup").build(),
+            )
+            .unwrap();
+        }
+        let rows = run(
+            &db,
+            "MATCH (p:Base {name: 'P'}) MERGE (n:Widget {name: 'Dup'}) \
+             CREATE (p)-[:SAW]->(n) RETURN p, n",
+        );
+        assert_eq!(
+            rows.len(),
+            4,
+            "2 base rows x 2 matches = 4 cross-product rows"
+        );
+        assert_eq!(db.edge_count(), 4, "one SAW edge per cross-product row");
+        assert_eq!(
+            db.scan_nodes_by_label("Widget").count(),
+            2,
+            "no new Widget created (pure match)"
+        );
+    }
+
+    /// #19 A pre-bound variable re-matched by the MERGE candidate scan exercises
+    /// the `consistent_with` true-branch and `entity_same` node path:
+    /// `MATCH (a:Person {name:'A'}) MERGE (a:Person {name:'A'})` binds `a`, the
+    /// scan re-finds it, and it is kept (same id) -- no duplicate, no new
+    /// version (bare match).
+    #[test]
+    fn merge_prebound_variable_rematched_is_consistent() {
+        let db = AletheiaDB::new().unwrap();
+        let id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let before_versions = db.get_node_history(id).unwrap().version_count();
+        run(
+            &db,
+            "MATCH (a:Person {name: 'A'}) MERGE (a:Person {name: 'A'})",
+        );
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1, "no duplicate");
+        assert_eq!(
+            db.get_node_history(id).unwrap().version_count(),
+            before_versions,
+            "a consistent re-match records no new version"
+        );
+    }
+
+    /// #20 Variant of #19 where the pre-bound variable's candidate does NOT
+    /// match (different property), so `consistent_with` filters it out and the
+    /// MERGE takes the create branch (whole-pattern create of a NEW node).
+    #[test]
+    fn merge_prebound_variable_inconsistent_takes_create_branch() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "A").build(),
+        )
+        .unwrap();
+        // `a` is bound to the existing A, but the MERGE pattern requires name 'B'
+        // on the same variable: no committed candidate is consistent, so a new
+        // node is created (whole-pattern create).
+        run(
+            &db,
+            "MATCH (a:Person {name: 'A'}) MERGE (b:Person {name: 'B'})",
+        );
+        assert_eq!(
+            db.scan_nodes_by_label("Person").count(),
+            2,
+            "the inconsistent MERGE creates a new node"
+        );
+    }
+
+    /// #21 RETURN of the bound variable on the MATCH branch of a MERGE: an
+    /// existing node is matched and returned (not recreated).
+    #[test]
+    fn merge_match_branch_returns_bound_variable() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .build(),
+        )
+        .unwrap();
+        let rows = run(&db, "MERGE (n:Person {name: 'Alice'}) RETURN n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(str_prop(&rows[0].entity, "name").unwrap(), "Alice");
+        assert_eq!(db.scan_nodes_by_label("Person").count(), 1, "no duplicate");
+    }
+
+    /// #22 Parser error arms: `ON` followed by neither CREATE nor MATCH is a
+    /// clean ParseError with no partial write; and a statement opening with
+    /// `ON CREATE SET ...` (no MERGE) is likewise a clean error.
+    #[test]
+    fn merge_on_error_arms_are_clean_parse_errors() {
+        let db = AletheiaDB::new().unwrap();
+        assert!(
+            db.execute_cypher("MERGE (n:Person {name: 'Zed'}) ON FOO SET n.x = 1")
+                .is_err(),
+            "ON not followed by CREATE/MATCH must be a parse error"
+        );
+        assert_eq!(db.node_count(), 0, "no partial write (ON FOO)");
+
+        let db2 = AletheiaDB::new().unwrap();
+        assert!(
+            db2.execute_cypher("ON CREATE SET n.x = 1").is_err(),
+            "a statement starting with ON (no MERGE) must be a clean error"
+        );
+        assert_eq!(db2.node_count(), 0, "no partial write (leading ON)");
     }
 
     #[test]
@@ -8137,5 +9217,864 @@ mod mutations {
             .unwrap();
         // v1: the key is present with an explicit Null (NOT removed).
         assert_eq!(node.get_property("age"), Some(&PropertyValue::Null));
+    }
+}
+
+// ============================================================================
+// Namespace read-scope grammar: `USE / IN NAMESPACE ...` (Issue #3349)
+//
+// Cypher parity with the AQL `USE NAMESPACE` grammar (PR #3736). These prove:
+// the prefix clause parses (single / union / ALL / IN synonym / bare id name),
+// composes with `AS OF` in either order, lowers to the right `NamespaceScope`
+// on the query IR (and stays `None` when omitted -- never `All`), is threaded
+// into execution to isolate results, and -- the security crux -- FAILS CLOSED
+// on every path that cannot thread the scope (mutations, the multi-variable
+// evaluator, and a programmatic-scope collision) rather than silently widening
+// results across namespaces. Contextual-keyword non-breakage is also pinned:
+// `use` / `namespace` / `namespaces` / `all` remain ordinary identifiers.
+// ============================================================================
+mod namespace_grammar {
+    use crate::AletheiaDB;
+    use crate::core::error::Error;
+    use crate::core::error::QueryError;
+    use crate::core::namespace::{Namespace, NamespaceError, NamespaceScope};
+    use crate::core::property::{PropertyMapBuilder, PropertyValue};
+    use crate::cypher::ast::{CypherNamespaceClause, CypherStatement};
+    use crate::cypher::{CypherConverter, CypherParser};
+
+    // ---- helpers ----------------------------------------------------------
+
+    fn person(name: &str) -> crate::core::property::PropertyMap {
+        PropertyMapBuilder::new().insert("name", name).build()
+    }
+
+    /// Sorted `name` property of every node in a result set.
+    fn returned_names(results: crate::query::QueryResults) -> Vec<String> {
+        let mut names: Vec<String> = results
+            .collect_all()
+            .expect("collect rows")
+            .iter()
+            .filter_map(|r| r.entity.as_node())
+            .filter_map(|n| match n.get_property("name") {
+                Some(PropertyValue::String(s)) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Set of every `name` property across a result set, following BOTH the
+    /// single-entity `entity` field and the multi-variable `bindings` field, so
+    /// it works for multi-pattern (`MATCH (a),(b)`) rows too.
+    fn multivar_names(results: crate::query::QueryResults) -> std::collections::BTreeSet<String> {
+        let mut names = std::collections::BTreeSet::new();
+        let mut push = |ent: &crate::query::executor::EntityResult| {
+            if let Some(n) = ent.as_node()
+                && let Some(PropertyValue::String(s)) = n.get_property("name")
+            {
+                names.insert(s.to_string());
+            }
+        };
+        for r in results.collect_all().expect("collect rows") {
+            push(&r.entity);
+            if let Some(bindings) = &r.bindings {
+                for (_var, ent) in bindings {
+                    push(ent);
+                }
+            }
+        }
+        names
+    }
+
+    /// Parse to the AST and return the namespace clause on a `MATCH` statement.
+    fn match_namespace(query: &str) -> Option<CypherNamespaceClause> {
+        match CypherParser::parse(query).expect("should parse") {
+            CypherStatement::Match { namespace, .. } => namespace,
+            other => panic!("expected a MATCH statement, got {other:?}"),
+        }
+    }
+
+    /// Parse + convert a single-pattern query, returning the lowered scope.
+    fn lowered_scope(query: &str) -> Option<NamespaceScope> {
+        let stmt = CypherParser::parse(query).expect("should parse");
+        let q = CypherConverter::new()
+            .convert(stmt)
+            .expect("should convert");
+        q.scope
+    }
+
+    // ---- Case 1: USE NAMESPACE '<name>' isolates -------------------------
+
+    #[test]
+    fn use_namespace_single_isolates() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+
+        let names = returned_names(
+            db.execute_cypher("USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n")
+                .unwrap(),
+        );
+        assert_eq!(names, vec!["Alice".to_string()], "scoped to agent:a only");
+    }
+
+    // ---- Case 2: USE NAMESPACE a, b union --------------------------------
+
+    #[test]
+    fn use_namespace_union_spans_exactly_listed() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Carol"), "agent:c")
+            .unwrap();
+
+        let names = returned_names(
+            db.execute_cypher("USE NAMESPACE 'agent:a', 'agent:b' MATCH (n:Person) RETURN n")
+                .unwrap(),
+        );
+        assert_eq!(
+            names,
+            vec!["Alice".to_string(), "Bob".to_string()],
+            "union of exactly the two listed namespaces (never agent:c)"
+        );
+    }
+
+    // ---- Case 3: USE ALL NAMESPACES sees everything ----------------------
+
+    #[test]
+    fn use_all_namespaces_sees_everything() {
+        let db = AletheiaDB::new().unwrap();
+        // Span the DEFAULT namespace too (a plain `create_node`) alongside two
+        // agent namespaces, so `USE ALL NAMESPACES` is proven to include the
+        // default namespace, not just the explicit agent ones (review T-8).
+        db.create_node("Person", person("Legacy")).unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+
+        let names = returned_names(
+            db.execute_cypher("USE ALL NAMESPACES MATCH (n:Person) RETURN n")
+                .unwrap(),
+        );
+        assert_eq!(
+            names,
+            vec!["Alice".to_string(), "Bob".to_string(), "Legacy".to_string()],
+            "USE ALL NAMESPACES spans default + every agent namespace"
+        );
+    }
+
+    // ---- Case 4: IN NAMESPACE synonym == USE NAMESPACE -------------------
+
+    #[test]
+    fn in_namespace_synonym_isolates_like_use() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+
+        let names = returned_names(
+            db.execute_cypher("IN NAMESPACE 'agent:a' MATCH (n:Person) RETURN n")
+                .unwrap(),
+        );
+        assert_eq!(names, vec!["Alice".to_string()]);
+    }
+
+    // ---- Case 5: IN ALL NAMESPACES ---------------------------------------
+
+    #[test]
+    fn in_all_namespaces_is_all_scope() {
+        assert_eq!(
+            lowered_scope("IN ALL NAMESPACES MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::All)
+        );
+    }
+
+    // ---- Case 6: omitted clause is None (never All) ----------------------
+
+    /// FAIL-CLOSED INVARIANT: an omitted namespace clause lowers to `None`, NOT
+    /// `Some(All)`. `None` preserves the MCP layer's `default`-namespace
+    /// resolution for an omitted scope; a "convenience" default to `All` here
+    /// would bypass that resolution and leak every namespace. This test fails if
+    /// anyone reverts the omitted case to `Some(NamespaceScope::All)`.
+    #[test]
+    fn omitted_namespace_clause_lowers_to_none_not_all() {
+        let scope = lowered_scope("MATCH (n:Person) RETURN n");
+        assert_eq!(scope, None, "omitted clause must be None, never Some(All)");
+        assert_ne!(
+            scope,
+            Some(NamespaceScope::All),
+            "omitted clause must NOT silently default to All"
+        );
+    }
+
+    /// Execution companion: with no clause, behavior is byte-for-byte unchanged
+    /// (namespace-agnostic -- every current node is returned, exactly as before
+    /// the feature), mirroring AQL's `aql_no_clause_is_unchanged_default_only`.
+    #[test]
+    fn no_clause_is_unchanged_agnostic_behavior() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("Person", person("Legacy")).unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+
+        let names = returned_names(db.execute_cypher("MATCH (n:Person) RETURN n").unwrap());
+        assert_eq!(
+            names,
+            vec!["Alice".to_string(), "Legacy".to_string()],
+            "omitted clause (scope None) is agnostic -- returns every node"
+        );
+    }
+
+    // ---- Case 7: composes with AS OF in either order ---------------------
+
+    #[test]
+    fn namespace_before_temporal_parses_both() {
+        let stmt = CypherParser::parse(
+            "USE NAMESPACE 'agent:a' AS OF TIMESTAMP '2024-01-01T00:00:00Z' MATCH (n:Person) RETURN n",
+        )
+        .expect("should parse");
+        match stmt {
+            CypherStatement::Match {
+                namespace,
+                temporal,
+                ..
+            } => {
+                assert!(namespace.is_some(), "namespace clause present");
+                assert!(temporal.is_some(), "temporal clause present");
+            }
+            other => panic!("expected MATCH, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn temporal_before_namespace_parses_both() {
+        let stmt = CypherParser::parse(
+            "AS OF TIMESTAMP '2024-01-01T00:00:00Z' USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+        )
+        .expect("should parse");
+        match stmt {
+            CypherStatement::Match {
+                namespace,
+                temporal,
+                ..
+            } => {
+                assert!(namespace.is_some(), "namespace clause present");
+                assert!(temporal.is_some(), "temporal clause present");
+            }
+            other => panic!("expected MATCH, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn namespace_and_temporal_both_lower_onto_one_query() {
+        let stmt = CypherParser::parse(
+            "AS OF TIMESTAMP '2024-01-01T00:00:00Z' USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+        )
+        .expect("should parse");
+        let q = CypherConverter::new()
+            .convert(stmt)
+            .expect("should convert");
+        assert_eq!(
+            q.scope,
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap())),
+            "namespace lowers onto the same query as the temporal context"
+        );
+        assert!(
+            q.temporal_context.is_some(),
+            "temporal context lowers onto the same query as the namespace scope"
+        );
+    }
+
+    // ---- Case 8: duplicate clause is a parse error -----------------------
+
+    #[test]
+    fn duplicate_namespace_clause_is_parse_error() {
+        assert!(
+            CypherParser::parse(
+                "USE NAMESPACE 'agent:a' USE NAMESPACE 'agent:b' MATCH (n:Person) RETURN n"
+            )
+            .is_err(),
+            "two USE NAMESPACE clauses must be rejected"
+        );
+        assert!(
+            CypherParser::parse(
+                "USE NAMESPACE 'agent:a' IN NAMESPACE 'agent:b' MATCH (n:Person) RETURN n"
+            )
+            .is_err(),
+            "USE then IN (both namespace clauses) must be rejected"
+        );
+    }
+
+    // ---- Case 9: malformed clause is a parse error -----------------------
+
+    #[test]
+    fn malformed_namespace_clause_is_parse_error() {
+        // Missing name after NAMESPACE.
+        assert!(
+            CypherParser::parse("USE NAMESPACE MATCH (n:Person) RETURN n").is_err(),
+            "USE NAMESPACE with no name must be a parse error"
+        );
+        // Trailing comma / empty trailing element.
+        assert!(
+            CypherParser::parse("USE NAMESPACE 'agent:a', MATCH (n:Person) RETURN n").is_err(),
+            "trailing comma must be a parse error"
+        );
+        // Missing NAMESPACE keyword after USE.
+        assert!(
+            CypherParser::parse("USE 'agent:a' MATCH (n:Person) RETURN n").is_err(),
+            "USE without NAMESPACE/ALL must be a parse error"
+        );
+    }
+
+    // ---- Case 10: unknown namespace -> NOT_FOUND at execution ------------
+
+    #[test]
+    fn unknown_namespace_is_not_found_at_execution() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        match db.execute_cypher("USE NAMESPACE 'agent:missing' MATCH (n:Person) RETURN n") {
+            Err(Error::Namespace(NamespaceError::NotFound { namespace })) => {
+                assert_eq!(namespace, "agent:missing");
+            }
+            Err(other) => panic!("unknown namespace must be NOT_FOUND, got {other:?}"),
+            Ok(_) => panic!("unknown namespace must error, got Ok"),
+        }
+    }
+
+    // ---- Case 11: contextual-keyword non-breakage ------------------------
+
+    #[test]
+    fn use_is_usable_as_a_variable() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("Thing", person("t1")).unwrap();
+        // `use` names the node variable; must NOT be read as the prefix keyword.
+        let names = returned_names(db.execute_cypher("MATCH (use:Thing) RETURN use").unwrap());
+        assert_eq!(names, vec!["t1".to_string()]);
+    }
+
+    #[test]
+    fn namespace_is_usable_as_a_property_key() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Thing",
+            PropertyMapBuilder::new()
+                .insert("name", "t1")
+                .insert("namespace", 1i64)
+                .build(),
+        )
+        .unwrap();
+        let names = returned_names(
+            db.execute_cypher("MATCH (n:Thing) WHERE n.namespace = 1 RETURN n")
+                .unwrap(),
+        );
+        assert_eq!(names, vec!["t1".to_string()]);
+    }
+
+    #[test]
+    fn all_and_namespaces_are_usable_as_variables_and_labels() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("all", person("v1")).unwrap();
+        db.create_node("Thing", person("v2")).unwrap();
+        // `all` as a label.
+        let by_label = returned_names(db.execute_cypher("MATCH (n:all) RETURN n").unwrap());
+        assert_eq!(by_label, vec!["v1".to_string()]);
+        // `all` and `namespaces` as variables.
+        let as_var = returned_names(db.execute_cypher("MATCH (all:Thing) RETURN all").unwrap());
+        assert_eq!(as_var, vec!["v2".to_string()]);
+        let ns_var = returned_names(
+            db.execute_cypher("MATCH (namespaces:Thing) RETURN namespaces")
+                .unwrap(),
+        );
+        assert_eq!(ns_var, vec!["v2".to_string()]);
+    }
+
+    #[test]
+    fn in_operator_in_where_still_parses() {
+        // The reserved `IN` used as a WHERE operator must be unaffected by the
+        // statement-prefix `IN NAMESPACE` synonym.
+        let db = AletheiaDB::new().unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .build(),
+        )
+        .unwrap();
+        let names = returned_names(
+            db.execute_cypher("MATCH (n:Person) WHERE n.age IN [30, 40] RETURN n")
+                .unwrap(),
+        );
+        assert_eq!(names, vec!["Alice".to_string()]);
+    }
+
+    #[test]
+    fn bare_identifier_name_parses_as_single() {
+        // A bare (unquoted) identifier is a valid namespace name.
+        assert_eq!(
+            match_namespace("USE NAMESPACE shared MATCH (n:Person) RETURN n"),
+            Some(CypherNamespaceClause::Names(vec!["shared".to_string()]))
+        );
+    }
+
+    // ---- Case 12: scope-threading regression -----------------------------
+
+    /// This FAILS if the converter ever reverts `converter.rs` to `scope: None`
+    /// for a restricting clause: it pins that a `USE NAMESPACE 'x'` actually
+    /// carries `Single(x)` onto the query IR.
+    #[test]
+    fn restricting_clause_threads_single_scope_onto_query() {
+        assert_eq!(
+            lowered_scope("USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap())),
+        );
+        assert_eq!(
+            lowered_scope("USE NAMESPACE 'agent:a', 'agent:b' MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::List(vec![
+                Namespace::new("agent:a").unwrap(),
+                Namespace::new("agent:b").unwrap(),
+            ])),
+        );
+    }
+
+    // ---- Case 13: restricting clause on a multi-pattern -> error ---------
+
+    #[test]
+    fn restricting_clause_on_multi_pattern_is_structured_error() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        // Two comma-separated patterns bind multiple variables -> the
+        // multi-variable evaluator, which cannot thread the scope. A restricting
+        // clause must be rejected, not silently run unscoped.
+        match db.execute_cypher(
+            "USE NAMESPACE 'agent:a' MATCH (a:Person)-[:KNOWS]->(b), (c:Person) RETURN a, b",
+        ) {
+            Err(Error::Query(QueryError::UnsupportedFeature { .. })) => {}
+            Err(other) => panic!("expected UnsupportedFeature, got {other:?}"),
+            Ok(_) => panic!("a restricting clause on a multi-pattern MATCH must not run unscoped"),
+        }
+    }
+
+    // ---- Case 14: restricting clause on a mutation -> error --------------
+
+    #[test]
+    fn restricting_clause_on_direct_create_is_structured_error() {
+        let db = AletheiaDB::new().unwrap();
+        match db.execute_cypher("USE NAMESPACE 'agent:a' CREATE (n:Person {name: 'Z'})") {
+            Err(Error::Query(QueryError::UnsupportedFeature { .. })) => {}
+            Err(other) => panic!("expected UnsupportedFeature, got {other:?}"),
+            Ok(_) => panic!("a restricting clause on a CREATE must be rejected"),
+        }
+    }
+
+    #[test]
+    fn restricting_clause_on_match_delete_is_structured_error() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("Person", person("Alice")).unwrap();
+        match db.execute_cypher("USE NAMESPACE 'agent:a' MATCH (n:Person) DELETE n") {
+            Err(Error::Query(QueryError::UnsupportedFeature { .. })) => {}
+            Err(other) => panic!("expected UnsupportedFeature, got {other:?}"),
+            Ok(_) => panic!("a restricting clause on a MATCH ... DELETE must be rejected"),
+        }
+    }
+
+    // ---- Case 15: programmatic scope + conflicting in-query clause -> reject
+
+    /// Landed rule (Issue #3349 follow-up): a programmatic scope is a hard
+    /// ceiling reconciled with any in-query `USE / IN NAMESPACE` clause. When the
+    /// two are NOT semantically identical the combination is refused with a
+    /// structured [`NamespaceError::ScopeConflict`] (`INVALID_ARGUMENT`) rather
+    /// than silently picking a winner (which could widen an intended
+    /// restriction). Here `All` (programmatic) vs `agent:a` (in-query) are
+    /// disjoint, so the call is refused. This aligns AQL and Cypher on the SAME
+    /// reconcile decision (previously AQL last-wins-overwrote and Cypher raised
+    /// `UnsupportedFeature`).
+    #[test]
+    fn programmatic_scope_plus_conflicting_in_query_clause_is_rejected() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        match db.execute_cypher_scoped(
+            "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+            NamespaceScope::All,
+        ) {
+            Err(Error::Namespace(NamespaceError::ScopeConflict)) => {}
+            Err(other) => panic!("expected ScopeConflict, got {other:?}"),
+            Ok(_) => panic!("programmatic scope + conflicting in-query clause must be rejected"),
+        }
+    }
+
+    /// Companion: a programmatic scope combined with an in-query clause that is
+    /// SEMANTICALLY IDENTICAL is allowed (not a conflict) and still isolates.
+    #[test]
+    fn programmatic_scope_plus_identical_in_query_clause_is_allowed() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+        let scope = NamespaceScope::single(Namespace::new("agent:a").unwrap());
+        let names = returned_names(
+            db.execute_cypher_scoped("USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n", scope)
+                .unwrap(),
+        );
+        assert_eq!(names, vec!["Alice".to_string()]);
+    }
+
+    /// Companion: with NO in-query clause, the programmatic scoped path is
+    /// unchanged (still isolates), proving the collision guard is additive.
+    #[test]
+    fn programmatic_scope_without_clause_still_isolates() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+        let scope = NamespaceScope::single(Namespace::new("agent:a").unwrap());
+        let names = returned_names(
+            db.execute_cypher_scoped("MATCH (n:Person) RETURN n", scope)
+                .unwrap(),
+        );
+        assert_eq!(names, vec!["Alice".to_string()]);
+    }
+
+    // ---- Case 16: USE ALL NAMESPACES on multi-pattern / EXPLAIN allowed --
+
+    #[test]
+    fn all_namespaces_on_multi_pattern_is_allowed() {
+        let db = AletheiaDB::new().unwrap();
+        // `All` imposes no restriction, so the multi-variable evaluator runs
+        // unchanged. Seed Person nodes across THREE namespaces (including the
+        // DEFAULT namespace via a plain `create_node`) and prove `USE ALL
+        // NAMESPACES` actually returns rows spanning all of them through the
+        // multi-pattern evaluator -- not merely `is_ok()` on an empty db.
+        db.create_node("Person", person("Legacy")).unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+
+        let result = db
+            .execute_cypher("USE ALL NAMESPACES MATCH (a:Person), (b:Person) RETURN a, b")
+            .expect("USE ALL NAMESPACES on a multi-pattern must be allowed");
+        let names = multivar_names(result);
+        assert!(
+            names.contains("Alice") && names.contains("Bob") && names.contains("Legacy"),
+            "USE ALL NAMESPACES spans every namespace through the multi-pattern \
+             evaluator (default + both agents); got {names:?}"
+        );
+    }
+
+    #[test]
+    fn all_namespaces_on_explain_is_allowed() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node("Person", person("Alice")).unwrap();
+        let results = db
+            .execute_cypher("EXPLAIN USE ALL NAMESPACES MATCH (n:Person) RETURN n")
+            .expect("EXPLAIN USE ALL NAMESPACES should be allowed");
+        let rows: Vec<_> = results.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(rows.len(), 1, "EXPLAIN returns exactly one plan row");
+        let plan = match &rows[0].columns.as_ref().unwrap()[0].1 {
+            PropertyValue::String(s) => s.to_string(),
+            other => panic!("plan column must be a string, got {other:?}"),
+        };
+        assert!(plan.contains("NodeScan"), "EXPLAIN produced a plan: {plan}");
+    }
+
+    /// Threading proof for EXPLAIN: a restricting in-query clause naming an
+    /// UNKNOWN namespace is caught by `validate_scope` as NOT_FOUND (rather than
+    /// silently planning against the hardcoded `All`).
+    #[test]
+    fn explain_restricting_unknown_namespace_is_not_found() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        match db.execute_cypher("EXPLAIN USE NAMESPACE 'agent:nope' MATCH (n:Person) RETURN n") {
+            Err(Error::Namespace(NamespaceError::NotFound { namespace })) => {
+                assert_eq!(namespace, "agent:nope");
+            }
+            Err(other) => panic!("expected NOT_FOUND, got {other:?}"),
+            Ok(_) => panic!("unknown-namespace EXPLAIN must be NOT_FOUND"),
+        }
+    }
+
+    // ---- T-1: bare / quoted `all` name lowers to the All (no-filter) scope ----
+
+    /// Mirrors AQL's `convert_bare_all_name_sets_all_scope`: a lone `all` in the
+    /// NAME position (bare OR quoted, via `USE` OR the `IN` synonym) is the
+    /// no-filter selector, lowering to `NamespaceScope::All` rather than a scope
+    /// to a namespace literally named `all`.
+    ///
+    /// FOOTGUN pinned here on purpose: `Namespace::new("all")` is rejected as an
+    /// uncreatable reserved selector, so no data can ever live in a namespace
+    /// named `all`; `USE NAMESPACE all` therefore has exactly one sensible
+    /// meaning (all namespaces). But it means the single-name form can never
+    /// address a namespace *spelled* `all` -- there is none. This is documented
+    /// AQL parity, not an accident.
+    #[test]
+    fn bare_and_quoted_all_name_lowers_to_all_scope() {
+        assert_eq!(
+            lowered_scope("USE NAMESPACE all MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::All),
+            "bare `all` name is the no-filter selector"
+        );
+        assert_eq!(
+            lowered_scope("USE NAMESPACE 'all' MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::All),
+            "quoted 'all' behaves identically to bare all (parser keeps no quote flag)"
+        );
+        assert_eq!(
+            lowered_scope("IN NAMESPACE all MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::All),
+            "the IN synonym maps bare `all` to All as well"
+        );
+    }
+
+    // ---- T-2: PROFILE threads the in-query scope --------------------------
+
+    /// PROFILE (like EXPLAIN) must thread the in-query namespace scope. An
+    /// UNKNOWN restricting namespace is caught by `validate_scope` as NOT_FOUND
+    /// -- proving the scope reaches the PROFILE path rather than being dropped
+    /// (mirror of `explain_restricting_unknown_namespace_is_not_found`).
+    #[test]
+    fn profile_restricting_unknown_namespace_is_not_found() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        match db.execute_cypher("PROFILE USE NAMESPACE 'agent:nope' MATCH (n:Person) RETURN n") {
+            Err(Error::Namespace(NamespaceError::NotFound { namespace })) => {
+                assert_eq!(namespace, "agent:nope");
+            }
+            Err(other) => panic!("expected NOT_FOUND, got {other:?}"),
+            Ok(_) => panic!("unknown-namespace PROFILE must be NOT_FOUND"),
+        }
+    }
+
+    /// PROFILE *executes* under the scope, so its per-operator "actual rows"
+    /// counters must reflect the scoped cardinality, never the unscoped total --
+    /// otherwise the counters would be a cross-namespace cardinality side
+    /// channel. Seed 1 node in `agent:a` and 2 in `agent:b` (unscoped total 3),
+    /// scope to `agent:a`, and assert the annotated plan reports the scoped
+    /// count and never the unscoped 3.
+    #[test]
+    fn profile_over_scoped_namespace_reports_scoped_row_counts() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Carol"), "agent:b")
+            .unwrap();
+
+        let results = db
+            .execute_cypher("PROFILE USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n")
+            .expect("scoped PROFILE should execute");
+        let rows: Vec<_> = results.collect::<Result<Vec<_>, _>>().unwrap();
+        let plan = match &rows[0].columns.as_ref().unwrap()[0].1 {
+            PropertyValue::String(s) => s.to_string(),
+            other => panic!("plan column must be a string, got {other:?}"),
+        };
+        assert!(
+            plan.contains("actual rows: 1"),
+            "scoped PROFILE reports the scoped count: {plan}"
+        );
+        assert!(
+            !plan.contains("actual rows: 3"),
+            "scoped PROFILE must NOT report the unscoped total (3): {plan}"
+        );
+    }
+
+    // ---- T-3: explicit programmatic scope + conflicting clause -> reject --
+
+    /// An EXPLICIT programmatic `default` scope (as if a caller passed
+    /// `namespace: "default"`) combined with a conflicting in-query clause is
+    /// refused with [`NamespaceError::ScopeConflict`] (`INVALID_ARGUMENT`).
+    ///
+    /// This encodes the Issue #3349 follow-up contract: the MCP `query` tool no
+    /// longer injects a `default` scope for an OMITTED `namespace` arg (it passes
+    /// `None`, letting an in-query clause govern); a `default` scope reaching
+    /// `execute_cypher_scoped` is now an *explicit* ceiling. `default` vs
+    /// `agent:a` and `default` vs `ALL` are both non-identical, so both are
+    /// refused as conflicts (never silently picking a winner).
+    #[test]
+    fn explicit_default_scope_plus_conflicting_clause_is_rejected() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        // Explicit `default` ceiling vs a disjoint in-query `agent:a` clause.
+        match db.execute_cypher_scoped(
+            "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+            NamespaceScope::default(),
+        ) {
+            Err(Error::Namespace(NamespaceError::ScopeConflict)) => {}
+            Err(other) => panic!("expected ScopeConflict, got {other:?}"),
+            Ok(_) => panic!("explicit default scope + conflicting clause must be rejected"),
+        }
+        // Explicit `default` ceiling vs a wider `USE ALL NAMESPACES` clause: also
+        // non-identical, so also refused (never widen past the ceiling).
+        match db.execute_cypher_scoped(
+            "USE ALL NAMESPACES MATCH (n:Person) RETURN n",
+            NamespaceScope::default(),
+        ) {
+            Err(Error::Namespace(NamespaceError::ScopeConflict)) => {}
+            Err(other) => panic!("expected ScopeConflict, got {other:?}"),
+            Ok(_) => panic!("USE ALL NAMESPACES + explicit default scope must be rejected"),
+        }
+    }
+
+    // ---- T-4: union order-independence + un-deduped duplicate names ------
+
+    /// A union scope is a set-membership test, so listing the same namespaces in
+    /// a different order returns the identical result set.
+    #[test]
+    fn union_scope_is_order_independent() {
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Carol"), "agent:c")
+            .unwrap();
+
+        let ab = returned_names(
+            db.execute_cypher("USE NAMESPACE 'agent:a', 'agent:b' MATCH (n:Person) RETURN n")
+                .unwrap(),
+        );
+        let ba = returned_names(
+            db.execute_cypher("USE NAMESPACE 'agent:b', 'agent:a' MATCH (n:Person) RETURN n")
+                .unwrap(),
+        );
+        assert_eq!(ab, ba, "union result set is independent of listing order");
+        assert_eq!(ab, vec!["Alice".to_string(), "Bob".to_string()]);
+    }
+
+    /// A duplicate name in a union is accepted un-deduped: it lowers to
+    /// `List([a, a])` (`NamespaceScope::list` does not dedup, mirroring
+    /// `namespace.rs`), and membership still resolves correctly. Pins current
+    /// behavior so a future dedup is a deliberate, tested change.
+    #[test]
+    fn duplicate_name_in_union_is_accepted_undeduped() {
+        assert_eq!(
+            lowered_scope("USE NAMESPACE 'agent:a', 'agent:a' MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::List(vec![
+                Namespace::new("agent:a").unwrap(),
+                Namespace::new("agent:a").unwrap(),
+            ])),
+            "duplicate names are kept un-deduped in the lowered List scope"
+        );
+
+        let db = AletheiaDB::new().unwrap();
+        db.create_node_in_namespace("Person", person("Alice"), "agent:a")
+            .unwrap();
+        db.create_node_in_namespace("Person", person("Bob"), "agent:b")
+            .unwrap();
+        let names = returned_names(
+            db.execute_cypher("USE NAMESPACE 'agent:a', 'agent:a' MATCH (n:Person) RETURN n")
+                .unwrap(),
+        );
+        assert_eq!(
+            names,
+            vec!["Alice".to_string()],
+            "a duplicated name still resolves to that one namespace's rows"
+        );
+    }
+
+    // ---- T-5: contextual keywords are case-insensitive -------------------
+
+    /// The prefix keywords (`use`/`in`/`namespace`/`namespaces`/`all`) are
+    /// matched case-insensitively (`eq_ignore_ascii_case`), so any casing parses
+    /// and lowers to the same scope. (Namespace *names* stay case-sensitive; the
+    /// bare-`all` selector only fires for lowercase `all` -- covered elsewhere.)
+    #[test]
+    fn contextual_keywords_are_case_insensitive() {
+        assert_eq!(
+            lowered_scope("use namespace 'agent:a' MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap())),
+            "lowercase `use namespace` parses"
+        );
+        assert_eq!(
+            lowered_scope("Use Namespace 'agent:a' MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap())),
+            "mixed-case `Use Namespace` parses"
+        );
+        assert_eq!(
+            lowered_scope("In All Namespaces MATCH (n:Person) RETURN n"),
+            Some(NamespaceScope::All),
+            "mixed-case `In All Namespaces` parses to All"
+        );
+    }
+
+    // ---- T-6: composes with BETWEEN and FOR SYSTEM_TIME, either order ----
+
+    /// The namespace prefix composes with EVERY temporal form in either source
+    /// order, not just `AS OF TIMESTAMP`. Cover `BETWEEN ... AND ...` and
+    /// `FOR SYSTEM_TIME AS OF ...` in both orders.
+    #[test]
+    fn namespace_composes_with_between_and_system_time_either_order() {
+        for query in [
+            "USE NAMESPACE 'agent:a' BETWEEN '2024-01-01T00:00:00Z' AND '2024-12-31T00:00:00Z' \
+             MATCH (n:Person) RETURN n",
+            "BETWEEN '2024-01-01T00:00:00Z' AND '2024-12-31T00:00:00Z' USE NAMESPACE 'agent:a' \
+             MATCH (n:Person) RETURN n",
+            "USE NAMESPACE 'agent:a' FOR SYSTEM_TIME AS OF '2024-01-01T00:00:00Z' \
+             MATCH (n:Person) RETURN n",
+            "FOR SYSTEM_TIME AS OF '2024-01-01T00:00:00Z' USE NAMESPACE 'agent:a' \
+             MATCH (n:Person) RETURN n",
+        ] {
+            let stmt = CypherParser::parse(query).expect("should parse");
+            match stmt {
+                CypherStatement::Match {
+                    namespace,
+                    temporal,
+                    ..
+                } => {
+                    assert!(namespace.is_some(), "namespace clause present in `{query}`");
+                    assert!(temporal.is_some(), "temporal clause present in `{query}`");
+                }
+                other => panic!("expected MATCH for `{query}`, got {other:?}"),
+            }
+            // The namespace still lowers onto the query alongside the temporal.
+            let q = CypherConverter::new()
+                .convert(CypherParser::parse(query).unwrap())
+                .expect("should convert");
+            assert_eq!(
+                q.scope,
+                Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap())),
+                "namespace lowers onto the query for `{query}`"
+            );
+            assert!(
+                q.temporal_context.is_some(),
+                "temporal lowers for `{query}`"
+            );
+        }
+    }
+
+    // ---- T-7: `USE ALL` and plural `USE NAMESPACES` are parse errors -----
+
+    /// `USE ALL` without the required `NAMESPACES` keyword, and `USE NAMESPACES`
+    /// (plural, without `ALL`), are both parse errors.
+    #[test]
+    fn use_all_without_namespaces_and_plural_without_all_are_parse_errors() {
+        assert!(
+            CypherParser::parse("USE ALL MATCH (n:Person) RETURN n").is_err(),
+            "USE ALL without NAMESPACES must be a parse error"
+        );
+        assert!(
+            CypherParser::parse("USE NAMESPACES 'agent:a' MATCH (n:Person) RETURN n").is_err(),
+            "USE NAMESPACES (plural, no ALL) must be a parse error"
+        );
+        assert!(
+            CypherParser::parse("USE NAMESPACES MATCH (n:Person) RETURN n").is_err(),
+            "bare USE NAMESPACES (plural) must be a parse error"
+        );
     }
 }

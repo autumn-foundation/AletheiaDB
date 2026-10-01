@@ -146,6 +146,187 @@ impl BackpressureConfig {
     }
 }
 
+/// Why a blocking append gave up without placing its entry (Issue #3798).
+///
+/// A writer that blocks forever on a full ring buffer is indistinguishable
+/// from a hung process, so the blocking append reports *why* it stopped
+/// waiting instead of never returning.
+#[derive(Debug)]
+pub enum AppendBlockedKind {
+    /// The buffer was closed (shutdown); waiting longer would never help.
+    Closed,
+    /// The caller's deadline elapsed while the buffer stayed full.
+    TimedOut {
+        /// How long the caller actually waited before giving up.
+        waited: std::time::Duration,
+    },
+}
+
+/// The bound on how long a blocking append may wait **without making
+/// progress** (Issue #3798).
+///
+/// Three properties the plain `Option<Instant>` it replaces could not express:
+///
+/// - **Lazy**: the clock is read only when an append actually has to wait, so
+///   the steady-state append -- which places its entry on the first
+///   `try_append` and never sleeps -- pays no clock read at all.
+/// - **Shared across a batch**: one value is created by the top-level append
+///   and threaded through every entry, so consecutive blocked entries with no
+///   room appearing between them are ONE stall window, not one each.
+/// - **Reset by progress**: [`Self::note_progress`] disarms it, so the window
+///   is re-armed from scratch the next time an entry actually blocks.
+///
+/// # What this bound is, and is not (Issue #3798 review round 2)
+///
+/// It is a **stall detector**: "nothing has drained this buffer for
+/// `bound`". It is deliberately **not** a cap on total call time. A batch
+/// that keeps getting room -- a large bulk import against a healthy but slow
+/// flusher -- takes as long as it takes and COMPLETES; only an interval of
+/// `bound` with no progress at all is a stall. The earlier per-call cap failed
+/// such a batch mid-flight and blamed a flusher that was draining the whole
+/// time, which is both a false alarm and a regression against the legacy
+/// unbounded backpressure that completed.
+///
+/// A single entry's semantics are unchanged: it can only ever arm once.
+///
+/// Construct one per top-level append, then hand `&mut` down the stack.
+#[derive(Debug)]
+pub struct AppendDeadline {
+    /// How long the call may wait without progress; `None` = unbounded.
+    bound: Option<std::time::Duration>,
+    /// When the current stall began (armed on first blocked turn, cleared by
+    /// [`Self::note_progress`]).
+    armed: Option<std::time::Instant>,
+    /// How many times this deadline has been armed. Test-only: it is how the
+    /// "one stall window per uninterrupted stall" property is asserted without
+    /// a flaky wall-clock ceiling.
+    #[cfg(test)]
+    arms: u32,
+}
+
+impl AppendDeadline {
+    /// A bound of `ms` milliseconds; `0` means unbounded (legacy blocking).
+    #[inline]
+    pub fn from_millis(ms: u64) -> Self {
+        Self {
+            bound: (ms != 0).then(|| std::time::Duration::from_millis(ms)),
+            armed: None,
+            #[cfg(test)]
+            arms: 0,
+        }
+    }
+
+    /// No bound: wait for as long as it takes, exactly as before #3798.
+    #[inline]
+    pub fn unbounded() -> Self {
+        Self {
+            bound: None,
+            armed: None,
+            #[cfg(test)]
+            arms: 0,
+        }
+    }
+
+    /// A bound that has already run out, for tests that need to discriminate
+    /// the deadline check against another exit (see the Closed-beats-TimedOut
+    /// precedence on [`WalRingBuffer::append_blocking_until`]).
+    #[cfg(test)]
+    pub(crate) fn already_elapsed() -> Self {
+        Self {
+            bound: Some(std::time::Duration::ZERO),
+            armed: Some(std::time::Instant::now()),
+            arms: 1,
+        }
+    }
+
+    /// Record that the caller placed an entry, ending the current stall window.
+    ///
+    /// The next entry that has to block starts a fresh window. This is what
+    /// makes the bound measure time WITHOUT progress rather than total call
+    /// time (Issue #3798 review round 2); a caller that never calls it gets
+    /// exactly the single-window behavior a single entry has always had.
+    #[inline]
+    pub(crate) fn note_progress(&mut self) {
+        self.armed = None;
+    }
+
+    /// When the CURRENT stall window began, or `None` if the caller is not
+    /// stalled right now.
+    ///
+    /// Read between an append returning `Ok` and the matching
+    /// [`Self::note_progress`], this answers "did that entry actually have to
+    /// wait?" -- and if so hands back the instant it started waiting, so a
+    /// caller can charge the wait to the whole call without reading the clock
+    /// again. Entries that sail straight through never armed, so they return
+    /// `None` and cost nothing (Issue #3798 review round 3).
+    #[inline]
+    pub(crate) fn armed_at(&self) -> Option<std::time::Instant> {
+        self.armed
+    }
+
+    /// The instant this stall must give up by, arming the clock on first use.
+    ///
+    /// `None` for an unbounded deadline -- and in that case no clock is read,
+    /// ever -- and also for a bound so large that `Instant + bound` is not
+    /// representable. Adding unchecked would PANIC on the write path for an
+    /// absurd-but-accepted configured value (`u64::MAX` ms); a misconfigured
+    /// number must degrade to "unbounded", never crash a writer.
+    #[inline]
+    fn limit(&mut self) -> Option<std::time::Instant> {
+        let bound = self.bound?;
+        let armed = match self.armed {
+            Some(at) => at,
+            None => {
+                let now = std::time::Instant::now();
+                self.armed = Some(now);
+                #[cfg(test)]
+                {
+                    self.arms += 1;
+                }
+                now
+            }
+        };
+        armed.checked_add(bound)
+    }
+
+    /// How long the current stall has lasted, measured from the arm instant.
+    ///
+    /// Zero for a call that never waited (and therefore never armed). After a
+    /// [`Self::note_progress`], this measures the CURRENT stall, not the whole
+    /// call -- which is exactly what the timeout message should report.
+    fn waited(&self) -> std::time::Duration {
+        self.armed
+            .map(|armed| armed.elapsed())
+            .unwrap_or(std::time::Duration::ZERO)
+    }
+
+    /// Whether a stall window is currently open, i.e. whether the caller has
+    /// blocked since the last progress. Test-only: it is how the *absence* of
+    /// a clock read on the success fast path is asserted.
+    #[cfg(test)]
+    pub(crate) fn is_armed(&self) -> bool {
+        self.armed.is_some()
+    }
+
+    /// How many stall windows this deadline has opened. Test-only.
+    #[cfg(test)]
+    pub(crate) fn arm_count(&self) -> u32 {
+        self.arms
+    }
+}
+
+/// A blocking append that did not place its entry.
+///
+/// The entry is handed back intact (exactly like the legacy `Err(entry)`
+/// return) so the caller can retry it, report it, or drop it.
+#[derive(Debug)]
+pub struct AppendBlocked {
+    /// The entry that was *not* appended, returned to its owner.
+    pub entry: PendingEntry,
+    /// Why the append gave up.
+    pub kind: AppendBlockedKind,
+}
+
 /// A pending WAL entry waiting to be flushed to disk.
 #[derive(Debug)]
 pub struct PendingEntry {
@@ -656,6 +837,46 @@ impl WalRingBuffer {
     /// exponential backoff: starts at `base_sleep_us`, doubling each
     /// iteration until `max_sleep_us` is reached.
     pub fn append_blocking(&self, entry: PendingEntry) -> Result<(), PendingEntry> {
+        // Unbounded wait, unmapped back to the legacy return value so this
+        // method's contract is byte-for-byte what it always was.
+        self.append_blocking_until(entry, &mut AppendDeadline::unbounded())
+            .map_err(|blocked| blocked.entry)
+    }
+
+    /// Append an entry, blocking until space is available or `deadline` runs
+    /// out.
+    ///
+    /// This is the bounded counterpart of [`Self::append_blocking`]: an
+    /// [`AppendDeadline::unbounded`] reproduces the legacy unbounded wait
+    /// exactly, while a bounded one guarantees a return within its bound even
+    /// when the consumer (the background flush thread) has stopped draining.
+    ///
+    /// The deadline is taken by `&mut` and belongs to the whole top-level
+    /// append: it arms itself the first time *any* entry has to wait, and an
+    /// N-entry batch that threads one deadline through every entry shares that
+    /// one stall window across consecutive blocked entries. A batch caller
+    /// that reports each placed entry with [`AppendDeadline::note_progress`]
+    /// restarts the window, so the bound measures time WITHOUT progress rather
+    /// than total call time (Issue #3798 review round 2).
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` if the entry was successfully appended
+    /// - `Err(AppendBlocked)` carrying the entry back, with `kind` telling the
+    ///   caller whether the buffer was closed or the deadline elapsed
+    ///
+    /// # Closed takes precedence over TimedOut (Issue #3798)
+    ///
+    /// A closed buffer is checked *before* the deadline on every retry, even
+    /// once the deadline is already in the past: "shut down" is a permanent,
+    /// actionable answer while "timed out" only says *keep waiting did not
+    /// help*. Reporting the timeout first would turn an orderly shutdown into
+    /// a spurious stall alarm.
+    pub fn append_blocking_until(
+        &self,
+        entry: PendingEntry,
+        deadline: &mut AppendDeadline,
+    ) -> Result<(), AppendBlocked> {
         let mut current_entry = entry;
         let mut sleep_us = self.backpressure.base_sleep_us;
 
@@ -664,12 +885,42 @@ impl WalRingBuffer {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     if self.is_closed() {
-                        return Err(e);
+                        return Err(AppendBlocked {
+                            entry: e,
+                            kind: AppendBlockedKind::Closed,
+                        });
                     }
 
+                    // First blocked turn arms the deadline; an append that
+                    // never blocks reads no clock at all.
+                    let limit = deadline.limit();
+
                     // Buffer is full - sleep with exponential backoff
+                    let mut nap = std::time::Duration::from_micros(sleep_us);
+                    if let Some(d) = limit {
+                        let now = std::time::Instant::now();
+                        // Bounded wait: give the entry back rather than
+                        // parking a writer forever behind a consumer that
+                        // stopped draining.
+                        if now >= d {
+                            return Err(AppendBlocked {
+                                entry: e,
+                                kind: AppendBlockedKind::TimedOut {
+                                    waited: deadline.waited(),
+                                },
+                            });
+                        }
+                        // Never sleep clean past the deadline: clamp the last
+                        // nap to what is left so the caller is answered at its
+                        // deadline instead of one full quantum after it.
+                        let remaining = d - now;
+                        if remaining < nap {
+                            nap = remaining;
+                        }
+                    }
+
                     if sleep_us > 0 {
-                        std::thread::sleep(std::time::Duration::from_micros(sleep_us));
+                        std::thread::sleep(nap);
                         // Double sleep time up to max
                         sleep_us = (sleep_us.saturating_mul(2)).min(self.backpressure.max_sleep_us);
                     } else {
@@ -1450,6 +1701,270 @@ mod tests {
             max_sleep_us: 10,
         };
         let _ = WalRingBuffer::with_config(1024, config);
+    }
+
+    // ── Issue #3798: bounded blocking append ─────────────────────────────
+    //
+    // A writer that blocks forever on a full ring buffer (because the flush
+    // thread died) is indistinguishable from a hung process. These two tests
+    // pin the contract: the deadline is honored, and the closed-buffer
+    // semantics of BOTH entry points are unchanged.
+
+    /// A full buffer with no consumer must hand the entry back once the
+    /// caller's deadline elapses -- never block the writer forever.
+    #[test]
+    fn test_append_blocking_until_times_out_on_full_buffer() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        // Capacity 2, filled to the brim, and deliberately never drained.
+        let buf = Arc::new(WalRingBuffer::new(2));
+        for i in 0..2 {
+            buf.try_append(PendingEntry::new_async(LSN(i), vec![i as u8]))
+                .expect("filling a fresh capacity-2 buffer must succeed");
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let worker_buf = Arc::clone(&buf);
+        // Detached on purpose: while the deadline is unenforced this worker
+        // never returns, so the TEST must never join it -- the watchdog
+        // recv_timeout below is what decides pass/fail.
+        thread::spawn(move || {
+            let entry = PendingEntry::new_async(LSN(99), vec![7, 7, 7]);
+            let mut deadline = AppendDeadline::from_millis(100);
+            let _ = tx.send(worker_buf.append_blocking_until(entry, &mut deadline));
+        });
+
+        let result = rx.recv_timeout(Duration::from_secs(5)).expect(
+            "append_blocking_until(bounded deadline) never returned within 5s: a full ring \
+             buffer with no consumer still blocks the writer forever (Issue #3798)",
+        );
+
+        let blocked = result.expect_err("append must not succeed against a full, undrained buffer");
+        let AppendBlocked { entry, kind } = blocked;
+        match kind {
+            AppendBlockedKind::TimedOut { waited } => assert!(
+                waited >= Duration::from_millis(100),
+                "reported wait ({:?}) must cover the requested 100ms deadline",
+                waited
+            ),
+            other => panic!("expected AppendBlockedKind::TimedOut, got {:?}", other),
+        }
+        assert_eq!(entry.lsn, LSN(99), "the entry must be handed back intact");
+        assert_eq!(
+            entry.data,
+            vec![7, 7, 7],
+            "the payload must be handed back intact"
+        );
+    }
+
+    /// Regression guard (passes before AND after the bounded-append fix):
+    /// a closed buffer is reported as `Closed` on the bounded entry point, and
+    /// the legacy `append_blocking` keeps returning its legacy `Err(entry)`.
+    #[test]
+    fn test_append_blocking_preserves_closed_semantics() {
+        let buf = WalRingBuffer::new(2);
+        for i in 0..2 {
+            buf.try_append(PendingEntry::new_async(LSN(i), vec![i as u8]))
+                .expect("filling a fresh capacity-2 buffer must succeed");
+        }
+        buf.close();
+
+        let mut deadline = AppendDeadline::from_millis(100);
+        let blocked = buf
+            .append_blocking_until(PendingEntry::new_async(LSN(50), vec![1, 2]), &mut deadline)
+            .expect_err("a closed buffer must refuse the append");
+        assert!(
+            matches!(blocked.kind, AppendBlockedKind::Closed),
+            "a closed buffer must report Closed, not a timeout: {:?}",
+            blocked.kind
+        );
+        assert_eq!(blocked.entry.lsn, LSN(50));
+        assert_eq!(blocked.entry.data, vec![1, 2]);
+
+        // Legacy entry point: unchanged signature, unchanged return value.
+        let returned = buf
+            .append_blocking(PendingEntry::new_async(LSN(51), vec![3]))
+            .expect_err("a closed buffer must return the entry to the caller");
+        assert_eq!(returned.lsn, LSN(51));
+        assert_eq!(returned.data, vec![3]);
+    }
+
+    /// Closed beats TimedOut even when the deadline is ALREADY in the past.
+    ///
+    /// The precedence is only really discriminated by this case: with a
+    /// deadline still in the future, a "check the cheap deadline first"
+    /// refactor would pass the test above unchanged while turning every
+    /// orderly shutdown into a spurious stall alarm.
+    #[test]
+    fn test_closed_beats_an_already_elapsed_deadline() {
+        let buf = WalRingBuffer::new(2);
+        for i in 0..2 {
+            buf.try_append(PendingEntry::new_async(LSN(i), vec![i as u8]))
+                .expect("filling a fresh capacity-2 buffer must succeed");
+        }
+        buf.close();
+
+        let mut spent = AppendDeadline::already_elapsed();
+        let blocked = buf
+            .append_blocking_until(PendingEntry::new_async(LSN(60), vec![9]), &mut spent)
+            .expect_err("a closed buffer must refuse the append");
+        assert!(
+            matches!(blocked.kind, AppendBlockedKind::Closed),
+            "shutdown is the permanent, actionable answer and must be reported even once the \
+             deadline has run out, got: {:?}",
+            blocked.kind
+        );
+        assert_eq!(blocked.entry.lsn, LSN(60));
+    }
+
+    /// An append that never has to wait must not read the clock.
+    ///
+    /// The deadline arms itself on the first blocked turn, so "did it arm?" is
+    /// the observable proxy for "did the steady-state append pay for a bound
+    /// it never used?" (Issue #3798 review round).
+    #[test]
+    fn test_deadline_is_not_armed_by_an_append_that_never_blocks() {
+        let buf = WalRingBuffer::new(4);
+
+        let mut deadline = AppendDeadline::from_millis(30_000);
+        buf.append_blocking_until(PendingEntry::new_async(LSN(1), vec![1]), &mut deadline)
+            .expect("an append into a buffer with room must succeed");
+        assert!(
+            !deadline.is_armed(),
+            "the success fast path armed the deadline: it is paying for clock reads it never \
+             uses"
+        );
+
+        // ...and it does arm once an append actually has to wait.
+        let full = WalRingBuffer::new(2);
+        for i in 0..2 {
+            full.try_append(PendingEntry::new_async(LSN(10 + i), vec![i as u8]))
+                .expect("filling a fresh capacity-2 buffer must succeed");
+        }
+        let mut bounded = AppendDeadline::from_millis(20);
+        let _ = full.append_blocking_until(PendingEntry::new_async(LSN(3), vec![3]), &mut bounded);
+        assert!(
+            bounded.is_armed(),
+            "a blocked append must arm the deadline, otherwise the reported wait is meaningless"
+        );
+    }
+
+    /// Consecutive blocked entries sharing one deadline are ONE stall window.
+    ///
+    /// The structural form of the "shared across the batch" property: no
+    /// wall-clock ceiling, just the arm count (Issue #3798 review round 2).
+    #[test]
+    fn test_shared_deadline_arms_once_across_a_no_progress_sequence() {
+        let full = WalRingBuffer::new(2);
+        for i in 0..2 {
+            full.try_append(PendingEntry::new_async(LSN(i), vec![i as u8]))
+                .expect("filling a fresh capacity-2 buffer must succeed");
+        }
+
+        let mut deadline = AppendDeadline::from_millis(20);
+        for i in 0..4u64 {
+            let blocked = full
+                .append_blocking_until(
+                    PendingEntry::new_async(LSN(100 + i), vec![9]),
+                    &mut deadline,
+                )
+                .expect_err("nothing drains this buffer, so every attempt must be refused");
+            assert!(matches!(blocked.kind, AppendBlockedKind::TimedOut { .. }));
+        }
+
+        assert_eq!(
+            deadline.arm_count(),
+            1,
+            "a sequence with no progress between attempts must share one stall window, not \
+             re-arm per entry"
+        );
+    }
+
+    /// Progress restarts the stall window, so a slow-but-draining consumer
+    /// never trips the bound.
+    ///
+    /// This is the semantic the bound exists for: it detects "nothing drained
+    /// this for `bound`", not "this call took longer than `bound`".
+    #[test]
+    fn test_note_progress_restarts_the_stall_window() {
+        let buf = WalRingBuffer::new(2);
+        let mut deadline = AppendDeadline::from_millis(20);
+
+        // Fill it, then block once so the window is armed.
+        for i in 0..2 {
+            buf.try_append(PendingEntry::new_async(LSN(i), vec![i as u8]))
+                .expect("filling a fresh capacity-2 buffer must succeed");
+        }
+        let _ = buf.append_blocking_until(PendingEntry::new_async(LSN(70), vec![7]), &mut deadline);
+        assert_eq!(deadline.arm_count(), 1, "the first stall must arm once");
+        assert!(deadline.is_armed());
+
+        // A placed entry ends the window...
+        drop(buf.drain());
+        buf.append_blocking_until(PendingEntry::new_async(LSN(71), vec![7]), &mut deadline)
+            .expect("a drained buffer has room");
+        deadline.note_progress();
+        assert!(
+            !deadline.is_armed(),
+            "progress must close the stall window, otherwise a slow bulk import is judged \
+             against the clock of its very first stall"
+        );
+
+        // ...and the next stall opens a fresh one.
+        buf.try_append(PendingEntry::new_async(LSN(72), vec![7]))
+            .expect("one slot is still free");
+        let _ = buf.append_blocking_until(PendingEntry::new_async(LSN(73), vec![7]), &mut deadline);
+        assert_eq!(
+            deadline.arm_count(),
+            2,
+            "the stall after progress must be measured from its own start"
+        );
+    }
+
+    /// An absurd configured bound must never panic the write path.
+    ///
+    /// `Instant + Duration` PANICS on overflow, and `max_append_block_ms` is a
+    /// `u64` an operator can set to anything. A misconfigured number crashing
+    /// a writer would be strictly worse than the stall it guards against
+    /// (Issue #3798 review round 2).
+    ///
+    /// Whether `u64::MAX` ms actually overflows is platform-dependent (a
+    /// Linux `Instant` has decades of headroom past it; a tick-counter one
+    /// does not), so the portable contract is asserted instead: asking for the
+    /// limit must not panic, and the answer must be either "unbounded" or a
+    /// limit far enough out to behave as one.
+    #[test]
+    fn test_absurd_bound_is_treated_as_unbounded_instead_of_panicking() {
+        let mut absurd = AppendDeadline::from_millis(u64::MAX);
+        if let Some(limit) = absurd.limit() {
+            assert!(
+                limit
+                    > std::time::Instant::now()
+                        .checked_add(std::time::Duration::from_secs(3600))
+                        .expect("an hour of headroom is representable everywhere"),
+                "a representable absurd bound must still be effectively unbounded"
+            );
+        }
+
+        // ...and it behaves that way against a real buffer: the append waits
+        // for the drain rather than dying on an overflowing add.
+        let buf = Arc::new(WalRingBuffer::new(2));
+        for i in 0..2 {
+            buf.try_append(PendingEntry::new_async(LSN(i), vec![i as u8]))
+                .expect("filling a fresh capacity-2 buffer must succeed");
+        }
+
+        let drainer = Arc::clone(&buf);
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(drainer.drain());
+        });
+
+        let mut deadline = AppendDeadline::from_millis(u64::MAX);
+        buf.append_blocking_until(PendingEntry::new_async(LSN(80), vec![8]), &mut deadline)
+            .expect("an absurd bound must block until room appears, not panic or time out");
+        handle.join().expect("drainer panicked");
     }
 
     #[test]

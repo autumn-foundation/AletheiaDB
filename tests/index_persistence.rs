@@ -569,6 +569,7 @@ fn test_automatic_persistence_integration() {
             },
         },
         use_mmap: false,
+        ..Default::default()
     };
 
     let config = AletheiaDBConfig::builder()
@@ -648,6 +649,7 @@ fn test_automatic_persistence_integration() {
         load_on_startup: true,
         policies: PersistencePolicies::default(),
         use_mmap: false,
+        ..Default::default()
     };
 
     let config = AletheiaDBConfig::builder()
@@ -693,6 +695,7 @@ fn test_automatic_persistence_integration() {
         load_on_startup: true,
         policies: PersistencePolicies::default(),
         use_mmap: false,
+        ..Default::default()
     };
 
     let config = AletheiaDBConfig::builder()

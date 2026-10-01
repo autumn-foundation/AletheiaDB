@@ -40,10 +40,23 @@
 
 use crate::AletheiaDB;
 use crate::api::transaction::ReadOps;
-use crate::core::error::{Error, Result};
+use crate::core::error::{Error, Result, StorageError};
 use crate::core::id::NodeId;
 use crate::core::vector::ops::cosine_similarity;
 use std::collections::{HashSet, VecDeque};
+
+/// DoS-protection cap on the number of distinct nodes a single
+/// [`HorizonEngine::map_horizon`] call may visit.
+///
+/// `map_horizon` runs a bidirectional BFS bounded only by `max_depth` (clamped
+/// to 20 at the MCP surface) and a visited set. On a dense component even a
+/// modest depth can touch an enormous fraction of the graph, so an untrusted
+/// caller could force an expensive traversal. Once the visited set exceeds this
+/// generous cap the search aborts with a [`StorageError::CapacityExceeded`]
+/// resource-limit error rather than continuing. The cap is deliberately large
+/// so it never trips on realistic concept-boundary queries; it exists purely to
+/// bound adversarial worst cases.
+pub const MAX_HORIZON_VISITED_NODES: usize = 100_000;
 
 /// The result of mapping the Semantic Event Horizon.
 #[derive(Debug, Clone, PartialEq)]
@@ -130,6 +143,18 @@ impl<'a> HorizonEngine<'a> {
                     }
 
                     visited.insert(neighbor_id);
+
+                    // DoS protection: abort if the traversal has touched more
+                    // than the visited-node cap (a dense component can otherwise
+                    // reach a huge fraction of the graph within max_depth).
+                    if visited.len() > MAX_HORIZON_VISITED_NODES {
+                        return Err(StorageError::CapacityExceeded {
+                            resource: "semantic_horizon visited nodes".to_string(),
+                            current: visited.len(),
+                            limit: MAX_HORIZON_VISITED_NODES,
+                        }
+                        .into());
+                    }
 
                     if let Ok(neighbor_node) = tx.get_node(neighbor_id) {
                         if let Some(neighbor_vec) = neighbor_node

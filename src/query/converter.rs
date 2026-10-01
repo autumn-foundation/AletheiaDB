@@ -167,7 +167,7 @@
 //! - **Avoid large IN lists**: Large `IN [...]` clauses are converted to sequential
 //!   value checks; consider using joins for very large lists
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::core::NodeId;
@@ -176,16 +176,21 @@ use crate::core::temporal::{TimeRange, Timestamp, time};
 use crate::index::vector::DistanceMetric;
 
 use super::ast::{
-    ComparisonOp, DepthSpec, EmbeddingRef, Expression, NodePattern, NodeRef, OrderClause, Pattern,
-    PatternElement, PredicateExpr, PropertyValue, QueryAst, RelationshipDirection,
-    RelationshipPattern, ReturnClause, SourceClause, TemporalClause, TimestampLiteral,
+    AlignClause, AlignMode as AstAlignMode, ComparisonOp, DepthSpec, EmbeddingRef, Expression,
+    NodePattern, NodeRef, OrderClause, Pattern, PatternElement, PredicateExpr, PropertyValue,
+    QueryAst, RelationshipDirection, RelationshipPattern, ReturnClause, SourceClause,
+    TemporalClause, TimestampLiteral, WindowClause, WindowReturnItem,
 };
 use super::builder::Query;
 use super::ir::{
-    Predicate, PredicateValue, ProvenanceCmp, ProvenanceField, ProvenanceOperand,
-    ProvenancePredicate, QueryOp, SortKey, TraversalDepth,
+    AlignNodeSource, AlignOutputItem, AlignParticipant, Predicate, PredicateValue, ProvenanceCmp,
+    ProvenanceField, ProvenanceOperand, ProvenancePredicate, ProvenanceProjection,
+    ProvenanceProjectionItem, QueryOp, SortKey, TemporalAlignSpec, TemporalWindowSpec,
+    TraversalDepth, WindowAggFunc, WindowAggregateSpec,
 };
 use super::plan::{QueryHints, TemporalContext};
+use super::temporal_join::AlignMode as JoinAlignMode;
+use super::temporal_window::{self, WindowError, WindowGranularity, WindowUnit};
 
 /// Map a provenance accessor function name to its [`ProvenanceField`]
 /// (case-insensitive), or `None` if the name is not a provenance accessor
@@ -486,6 +491,157 @@ pub enum ParameterValue {
     Value(PredicateValue),
 }
 
+/// Whether a relationship's depth spec denotes a single, fixed-length hop
+/// (exactly one edge), the only shape whose relationship variable can bind a
+/// single traversed edge for edge-property WHERE / ORDER BY (Issue #3622).
+fn is_simple_hop_depth(depth: &Option<DepthSpec>) -> bool {
+    matches!(depth, None | Some(DepthSpec::Exact(1)))
+}
+
+/// Per-query classification of a MATCH pattern's variables, used to scope AQL
+/// `WHERE` / `ORDER BY` leaves that reference the **relationship** variable to
+/// the row's traversed edge side channel (Issue #3622). Node-variable leaves are
+/// left untouched (node-scoped, byte-identical to prior behavior); a
+/// relationship-variable leaf in a shape that cannot bind a single edge
+/// (multi-hop or variable-length) is rejected with a structured error rather
+/// than silently applied to the wrong entity.
+///
+/// Lane scope / AQL-vs-Cypher differences (Issue #3622):
+/// - AQL rejects a cross-entity property-to-property comparison such as
+///   `r.since = b.age` (see [`AstConverter::convert_comparison`]); Cypher's
+///   multi-variable evaluator supports it.
+/// - The edge channel is wired only into `WHERE` / `ORDER BY`. AQL `RETURN r`
+///   still projects the traversal **target node**, not the edge (returning the
+///   edge as an entity is a deliberate follow-up); the edge is available to
+///   filtering and ordering only.
+#[derive(Default)]
+struct EdgeScope {
+    /// All relationship variable names declared across the MATCH patterns.
+    rel_vars: HashSet<String>,
+    /// All node variable names declared across the MATCH patterns.
+    node_vars: HashSet<String>,
+    /// The single relationship variable, iff the MATCH has exactly one
+    /// relationship and it is a simple single hop; `None` otherwise.
+    single_hop_rel: Option<String>,
+    /// True iff the MATCH declares more than one relationship (multi-hop).
+    multi_hop: bool,
+    /// True iff any relationship is variable-length / non-unit depth.
+    variable_depth: bool,
+    /// Whether variable classification is authoritative. `true` for a `MATCH`
+    /// source (every legitimate WHERE/ORDER BY variable is a declared node or
+    /// relationship variable, so an unrecognized one is a typo/unbound
+    /// reference and is rejected -- Issue #3622 F15). `false` for non-`MATCH`
+    /// sources (vector search), where the leaf-scoping machinery does not run.
+    match_source: bool,
+}
+
+impl EdgeScope {
+    /// Build the scope from a query's source clause. Non-`MATCH` sources (vector
+    /// search) carry no relationship variables (empty scope).
+    fn from_source(source: &SourceClause) -> Self {
+        let SourceClause::Match(patterns) = source else {
+            return Self::default();
+        };
+        let mut rel_vars = HashSet::new();
+        let mut node_vars = HashSet::new();
+        let mut rels: Vec<&RelationshipPattern> = Vec::new();
+        for pattern in patterns {
+            for el in &pattern.elements {
+                match el {
+                    PatternElement::Relationship(rel) => {
+                        rels.push(rel);
+                        if let Some(v) = &rel.variable {
+                            rel_vars.insert(v.clone());
+                        }
+                    }
+                    PatternElement::Node(node) => {
+                        if let Some(v) = &node.variable {
+                            node_vars.insert(v.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let multi_hop = rels.len() > 1;
+        let variable_depth = rels.iter().any(|r| !is_simple_hop_depth(&r.depth));
+        let single_hop_rel = if rels.len() == 1 && is_simple_hop_depth(&rels[0].depth) {
+            rels[0].variable.clone()
+        } else {
+            None
+        };
+        EdgeScope {
+            rel_vars,
+            node_vars,
+            single_hop_rel,
+            multi_hop,
+            variable_depth,
+            match_source: true,
+        }
+    }
+
+    /// Scope a WHERE leaf `leaf` (built for `var`.`prop`): wrap it in
+    /// [`Predicate::EdgeScoped`] when `var` is the single-hop relationship
+    /// variable, reject when `var` is a relationship variable in an unsupported
+    /// (multi-hop / variable-length) position, leave it unchanged (node-scoped,
+    /// prior behavior) for a declared node variable, and reject a genuinely
+    /// unknown variable (typo / unbound reference, Issue #3622 F15).
+    fn scope_leaf(&self, var: &str, leaf: Predicate) -> Result<Predicate> {
+        if self.is_edge_var(var)? {
+            Ok(Predicate::EdgeScoped(Box::new(leaf)))
+        } else {
+            Ok(leaf)
+        }
+    }
+
+    /// Whether `var` is a relationship variable that must be edge-scoped (a
+    /// single, fixed-length hop). Returns `Ok(true)` for the single-hop rel var,
+    /// `Ok(false)` for a declared node variable, and `Err` for a relationship
+    /// variable in an unsupported position or a genuinely unknown variable
+    /// (`ORDER BY` counterpart of [`scope_leaf`]).
+    fn is_edge_var(&self, var: &str) -> Result<bool> {
+        if self.rel_vars.contains(var) {
+            return match self.single_hop_rel.as_deref() {
+                Some(v) if v == var => Ok(true),
+                _ => Err(self.reject(var)),
+            };
+        }
+        self.check_known_node_var(var)?;
+        Ok(false)
+    }
+
+    /// Reject a WHERE/ORDER BY reference to a variable that is neither a declared
+    /// node nor relationship variable of the pattern (Issue #3622 F15). Known
+    /// node variables (including the non-terminal anchor) are left untouched to
+    /// preserve prior behavior.
+    fn check_known_node_var(&self, var: &str) -> Result<()> {
+        if !self.match_source || self.node_vars.contains(var) {
+            return Ok(());
+        }
+        Err(Error::Query(QueryError::SyntaxError {
+            message: format!(
+                "WHERE/ORDER BY references unknown variable '{var}' that is not bound by the \
+                 MATCH pattern"
+            ),
+        }))
+    }
+
+    fn reject(&self, var: &str) -> Error {
+        let reason = if self.variable_depth {
+            "a variable-length relationship"
+        } else if self.multi_hop {
+            "a multi-hop pattern"
+        } else {
+            "this relationship pattern"
+        };
+        Error::Query(QueryError::UnsupportedFeature {
+            feature: format!(
+                "predicate/ORDER BY on relationship variable '{var}' within {reason}: \
+                 edge-property WHERE/ORDER BY requires a single, fixed-length hop"
+            ),
+        })
+    }
+}
+
 impl AstConverter {
     /// Create a new converter with no parameter bindings.
     ///
@@ -585,12 +741,62 @@ impl AstConverter {
         // 1. Convert temporal clause to context
         let temporal_context = self.convert_temporal(&ast.temporal)?;
 
+        // 1b. Convert the namespace scope clause (Issue #3349, PR2b). `None`
+        //     (no clause) stays `None` — namespace-agnostic, exactly as before;
+        //     a present clause lowers to a `NamespaceScope` the executor applies.
+        let scope = self.convert_namespace_clause(&ast.namespace)?;
+
         // 2. Convert source clause (MATCH or vector search)
         self.convert_source(&ast.source, &mut ops)?;
 
+        // 2b. Temporal aggregation window (Issue #3363). A self-contained
+        //     terminal op: it consumes the matched-entity stream produced above
+        //     (scan + inline property filters) and emits per-window aggregate
+        //     rows. No further read clauses apply (the parser already rejects
+        //     trailing WHERE/ORDER/etc. after a WINDOW ... RETURN).
+        if let Some(ref window) = ast.window {
+            let spec = self.convert_window_clause(window, &ast.source)?;
+            ops.push(QueryOp::TemporalWindowAggregate(spec));
+            return Ok(Query {
+                ops,
+                temporal_context,
+                hints,
+                // Namespace scope (Issue #3349, PR2b): a self-contained
+                // terminal op still honors a `USE / IN NAMESPACE` prefix.
+                scope: scope.clone(),
+                // AQL/Cypher-parsed queries carry no per-call resource-limit
+                // override (Issue #3368 is a Rust `QueryBuilder`-only API in
+                // v1); the database's configured defaults apply.
+                limits: None,
+            });
+        }
+
+        // 2c. Temporal join / align (Issue #3379). Also a self-contained
+        //     terminal op: it consumes the matched-participant stream and emits
+        //     per-alignment-coordinate rows. The parser rejects trailing
+        //     read clauses after ALIGN ... RETURN.
+        if let Some(ref align) = ast.align {
+            let spec = self.convert_align_clause(align, &ast.source)?;
+            ops.push(QueryOp::TemporalAlign(spec));
+            return Ok(Query {
+                ops,
+                temporal_context,
+                hints,
+                // Namespace scope (Issue #3349, PR2b): a self-contained
+                // terminal op still honors a `USE / IN NAMESPACE` prefix.
+                scope: scope.clone(),
+                limits: None,
+            });
+        }
+
+        // Classify the MATCH pattern's variables so WHERE / ORDER BY leaves on
+        // the single-hop relationship variable scope to the traversed edge
+        // (Issue #3622). Empty for non-MATCH sources.
+        let edge_scope = EdgeScope::from_source(&ast.source);
+
         // 3. Convert WHERE clause to filter operations
         if let Some(ref where_clause) = ast.where_clause {
-            self.convert_where_clause(where_clause, &mut ops)?;
+            self.convert_where_clause(where_clause, &mut ops, &edge_scope)?;
         }
 
         // 4. Convert RANK BY SIMILARITY clause
@@ -605,16 +811,556 @@ impl AstConverter {
 
         // 6. Convert ORDER BY clause
         if let Some(ref order_clause) = ast.order {
-            self.convert_order_clause(order_clause, &mut ops)?;
+            self.convert_order_clause(order_clause, &mut ops, &edge_scope)?;
         }
 
         // 7. Convert SKIP and LIMIT
         self.convert_pagination(ast.skip, ast.limit, &mut ops);
 
+        // 8. Provenance accessor projection (Issue #3354). Emitted LAST so it
+        //    never perturbs entity-based ordering or pagination; it attaches the
+        //    projected provenance columns (and preserves a bare entity via the
+        //    bindings channel) as the final 1:1 step.
+        if let Some(ref return_clause) = ast.return_clause
+            && let Some(op) = self.build_provenance_projection(return_clause, &ast.source)?
+        {
+            ops.push(op);
+        }
+
         Ok(Query {
             ops,
             temporal_context,
             hints,
+            // Namespace scope (Issue #3349, PR2b): lowered from the optional
+            // `USE / IN NAMESPACE` prefix clause; `None` when omitted.
+            scope,
+            limits: None,
+        })
+    }
+
+    /// Detect provenance accessors (`source(x)`/`confidence(x)`/`reason(x)`) in
+    /// a `RETURN` clause and build a [`QueryOp::ProjectProvenance`] op
+    /// (Issue #3354), or `None` when the clause projects none. A
+    /// provenance-named accessor with a malformed argument is a structured error
+    /// (never silently dropped), mirroring the `WHERE`-clause accessor
+    /// recognition.
+    ///
+    /// v1 supports only the clean single-entity forms
+    /// (`RETURN <entity>, <accessor(s)>` and `RETURN <accessor(s)>` over a single
+    /// bound node). Building general property-projection-into-columns is out of
+    /// scope, so a `RETURN` that mixes an accessor with a property projection
+    /// (`RETURN n.name, source(n)`), or references a variable other than the
+    /// single bound MATCH entity (`RETURN a, source(b)`, or an accessor over an
+    /// edge/traversal variable), is **rejected** with a structured error rather
+    /// than silently dropping the property or resolving the wrong entity.
+    fn build_provenance_projection(
+        &self,
+        return_clause: &ReturnClause,
+        source: &SourceClause,
+    ) -> Result<Option<QueryOp>> {
+        let mut items = Vec::new();
+        let mut entity_binding: Option<String> = None;
+        // Distinct entity variables referenced across the bare entity and every
+        // accessor argument; the supported form references exactly one.
+        let mut referenced_vars: BTreeSet<String> = BTreeSet::new();
+        let mut has_property_projection = false;
+        for item in &return_clause.items {
+            match &item.expression {
+                // A bare variable returned alongside the accessors is preserved
+                // through the bindings channel so it stays observable.
+                Expression::Identifier(name) => {
+                    if entity_binding.is_none() {
+                        entity_binding = Some(name.clone());
+                    }
+                    referenced_vars.insert(name.clone());
+                }
+                // A property projection (`n.name`) alongside an accessor is the
+                // unsupported mix (rejected below once we know an accessor is
+                // present).
+                Expression::Property(_) => {
+                    has_property_projection = true;
+                }
+                Expression::FunctionCall { name, args } => {
+                    if let Some(field) = provenance_field_name(name) {
+                        let var = match args.as_slice() {
+                            [Expression::Identifier(v)] => v.clone(),
+                            _ => {
+                                return Err(Error::Query(QueryError::SyntaxError {
+                                    message: format!(
+                                        "{}(x) provenance accessor requires exactly one bound \
+                                         variable argument",
+                                        field.accessor_name()
+                                    ),
+                                }));
+                            }
+                        };
+                        referenced_vars.insert(var.clone());
+                        let output_name = item
+                            .alias
+                            .clone()
+                            .unwrap_or_else(|| format!("{}({})", field.accessor_name(), var));
+                        items.push(ProvenanceProjectionItem { output_name, field });
+                    }
+                }
+                _ => {}
+            }
+        }
+        if items.is_empty() {
+            return Ok(None);
+        }
+
+        // An accessor is projected: enforce the v1 single-entity contract.
+        if has_property_projection {
+            return Err(Error::Query(QueryError::SyntaxError {
+                message: "combining a property projection with a provenance accessor in RETURN \
+                          is not supported (v1); return the entity itself \
+                          (RETURN n, source(n)) or the accessors alone (RETURN source(n))"
+                    .to_string(),
+            }));
+        }
+        // The supported form binds exactly one entity: a single MATCH node with a
+        // variable. Every referenced variable (bare entity + accessor args) must
+        // be that node. This rejects the multi-variable mismatch
+        // (`RETURN a, source(b)`) and edge/traversal-variable accessors, which the
+        // single-entity positional pipeline would otherwise resolve against the
+        // wrong (or a nonexistent) entity.
+        let sole_entity = Self::sole_match_node_var(source);
+        let matches_sole = match &sole_entity {
+            Some(v) => referenced_vars.len() == 1 && referenced_vars.contains(v),
+            None => false,
+        };
+        if !matches_sole {
+            return Err(Error::Query(QueryError::SyntaxError {
+                message: "provenance projection in RETURN is supported only for a single bound \
+                          entity whose accessor variable matches the returned node \
+                          (RETURN n, source(n)); projecting an accessor over a different \
+                          variable, an edge/traversal variable, or a multi-entity match is not \
+                          supported (v1)"
+                    .to_string(),
+            }));
+        }
+
+        Ok(Some(QueryOp::ProjectProvenance(ProvenanceProjection {
+            entity_binding,
+            items,
+        })))
+    }
+
+    /// The variable of the single bound node when `source` is a `MATCH` of
+    /// exactly one node pattern with a variable and no relationships; `None`
+    /// otherwise (a traversal, multiple patterns, an unnamed node, or a
+    /// vector/similarity source). This is the one entity the single-entity
+    /// positional pipeline can correctly attribute a provenance accessor to.
+    fn sole_match_node_var(source: &SourceClause) -> Option<String> {
+        let SourceClause::Match(patterns) = source else {
+            return None;
+        };
+        let [pattern] = patterns.as_slice() else {
+            return None;
+        };
+        let [PatternElement::Node(node)] = pattern.elements.as_slice() else {
+            return None;
+        };
+        node.variable.clone()
+    }
+
+    /// Validate and lower a raw AST [`AlignClause`] into a resolved
+    /// [`TemporalAlignSpec`] (Issue #3379).
+    ///
+    /// v1 supports a single MATCH pattern that is either one bound node, or a
+    /// single-hop `(a)-[:R]->(b)` traversal (both directions). All caller-fault
+    /// failures are structured [`QueryError`]s (unsupported pattern, unknown
+    /// return/driver variable, unparseable/empty range).
+    fn convert_align_clause(
+        &self,
+        align: &AlignClause,
+        source: &SourceClause,
+    ) -> Result<TemporalAlignSpec> {
+        // Build the participant plan from the (supported) pattern shape.
+        let mut participants = Self::align_participants(source)?;
+        let index_of =
+            |var: &str| -> Option<usize> { participants.iter().position(|p| p.var == var) };
+
+        // Resolve range boundaries (reusing the RFC 3339 / micros boundary
+        // parser) and validate the range is non-empty.
+        let range_start_micros = self.window_timestamp_micros(&align.range_start)?;
+        let range_end_micros = self.window_timestamp_micros(&align.range_end)?;
+        if range_end_micros <= range_start_micros {
+            return Err(Error::Query(QueryError::InvalidParameter {
+                parameter: "temporal join range".to_string(),
+                reason: "the valid-time range end must be strictly after the start".to_string(),
+            }));
+        }
+
+        let as_of_system_time = match &align.as_of_system_time {
+            Some(ts) => Timestamp::from(self.window_timestamp_micros(ts)?),
+            None => time::now(),
+        };
+
+        // Resolve mode + driver.
+        let (mode, driver_index) = match align.mode {
+            AstAlignMode::Events => {
+                let driver = align.driver.as_deref().ok_or_else(|| {
+                    Error::Query(QueryError::InvalidParameter {
+                        parameter: "align driver".to_string(),
+                        reason: "event-aligned ALIGN requires DRIVER <var>".to_string(),
+                    })
+                })?;
+                let idx = index_of(driver).ok_or_else(|| {
+                    Error::Query(QueryError::InvalidParameter {
+                        parameter: "align driver".to_string(),
+                        reason: format!(
+                            "driver variable '{driver}' is not a bound participant in the pattern"
+                        ),
+                    })
+                })?;
+                (JoinAlignMode::Events, idx)
+            }
+            AstAlignMode::Overlap => (JoinAlignMode::Overlap, 0),
+        };
+
+        // Resolve the RETURN items against the participants.
+        if align.items.is_empty() {
+            return Err(Error::Query(QueryError::InvalidParameter {
+                parameter: "align return".to_string(),
+                reason: "ALIGN requires at least one RETURN item".to_string(),
+            }));
+        }
+        let output_items = align
+            .items
+            .iter()
+            .map(|item| {
+                let participant_index = index_of(&item.var).ok_or_else(|| {
+                    Error::Query(QueryError::InvalidParameter {
+                        parameter: "align return".to_string(),
+                        reason: format!(
+                            "RETURN references variable '{}' but it is not a bound participant \
+                             in the pattern",
+                            item.var
+                        ),
+                    })
+                })?;
+                let output_name = item.alias.clone().unwrap_or_else(|| match &item.key {
+                    Some(key) => format!("{}.{}", item.var, key),
+                    None => item.var.clone(),
+                });
+                Ok(AlignOutputItem {
+                    participant_index,
+                    key: item.key.clone(),
+                    output_name,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // The event-aligned driver must be **present at its own event** by
+        // definition, so it is ungated by construction: if the user names the
+        // FAR node of a traversal as DRIVER, the connecting edge would
+        // otherwise gate the driver and null the driver's OWN column at a
+        // change-point where the edge is not valid — contradicting the
+        // invariant (Issue #3379 review finding). Removing the driver's gate
+        // makes its events fire with the driver present regardless of the
+        // connecting edge's validity. (Done after `index_of` is no longer
+        // borrowed.)
+        if mode == JoinAlignMode::Events {
+            participants[driver_index].edge_gate_path_index = None;
+        }
+
+        Ok(TemporalAlignSpec {
+            mode,
+            driver_index,
+            range_start_micros,
+            range_end_micros,
+            as_of_system_time,
+            participants,
+            output_items,
+        })
+    }
+
+    /// Build the participant extraction plan from a MATCH source, enforcing the
+    /// v1 supported pattern shapes (one bound node, or a single-hop traversal).
+    fn align_participants(source: &SourceClause) -> Result<Vec<AlignParticipant>> {
+        let unsupported = || {
+            Error::Query(QueryError::UnsupportedFeature {
+                feature: "temporal joins require a single MATCH pattern that is either one bound \
+                          node (e.g. MATCH (v:Label)) or a single-hop traversal (e.g. \
+                          MATCH (a)-[:R]->(b)); multi-hop, variable-length, and comma-separated \
+                          patterns are not supported (v1)"
+                    .to_string(),
+            })
+        };
+
+        let SourceClause::Match(patterns) = source else {
+            return Err(unsupported());
+        };
+        let [pattern] = patterns.as_slice() else {
+            return Err(unsupported());
+        };
+
+        // Collect nodes (in order) and reject variable-length relationships.
+        let mut nodes: Vec<&NodePattern> = Vec::new();
+        let mut rel_count = 0usize;
+        for element in &pattern.elements {
+            match element {
+                PatternElement::Node(node) => nodes.push(node),
+                PatternElement::Relationship(rel) => {
+                    if rel.depth.is_some() {
+                        return Err(unsupported());
+                    }
+                    rel_count += 1;
+                }
+            }
+        }
+
+        // v1: exactly one node (no rel) or exactly two nodes (one rel).
+        match (nodes.len(), rel_count) {
+            (1, 0) => {}
+            (2, 1) => {}
+            _ => return Err(unsupported()),
+        }
+
+        let num_nodes = nodes.len();
+        let mut participants = Vec::with_capacity(num_nodes);
+        for (k, node) in nodes.iter().enumerate() {
+            let var = node.variable.clone().ok_or_else(|| {
+                Error::Query(QueryError::InvalidParameter {
+                    parameter: "align pattern".to_string(),
+                    reason: "every node in a temporal-join pattern must be named \
+                             (e.g. (a)-[:R]->(b))"
+                        .to_string(),
+                })
+            })?;
+            // The last node of the traversal is the row's primary entity; earlier
+            // nodes live at even path indices (node position k -> path[2k]).
+            let node_source = if k + 1 == num_nodes {
+                AlignNodeSource::Entity
+            } else {
+                AlignNodeSource::PathIndex(2 * k)
+            };
+            // A non-anchor node is reached via the relationship immediately
+            // before it (path[2k-1]); its validity gates the participant.
+            let edge_gate_path_index = if k == 0 { None } else { Some(2 * k - 1) };
+            participants.push(AlignParticipant {
+                var,
+                node_source,
+                edge_gate_path_index,
+            });
+        }
+        Ok(participants)
+    }
+
+    /// Validate and lower a raw AST [`WindowClause`] into a resolved
+    /// [`TemporalWindowSpec`] (Issue #3363).
+    ///
+    /// All caller-fault failures are structured [`QueryError`]s (the MCP `query`
+    /// tool renders them as `invalid_params` / `unsupported_construct`), never a
+    /// panic or silent success: an unknown unit or function, a non-positive
+    /// window size, an empty/backwards range, an unparseable boundary, or an
+    /// aggregate argument referencing a variable other than the single matched
+    /// node.
+    fn convert_window_clause(
+        &self,
+        window: &WindowClause,
+        source: &SourceClause,
+    ) -> Result<TemporalWindowSpec> {
+        // The windowed entity must be the single bound MATCH node (v1: nodes
+        // only; edge-history windows are a documented follow-up).
+        let match_var = Self::sole_match_node_var(source).ok_or_else(|| {
+            Error::Query(QueryError::UnsupportedFeature {
+                feature: "temporal aggregation windows require a single bound node pattern \
+                          (e.g. MATCH (v:Label) WINDOW ...); windowing edges, traversals, or \
+                          multi-pattern matches is not supported (v1)"
+                    .to_string(),
+            })
+        })?;
+
+        // Window size must be a positive integer that fits a u32 multiplier.
+        let count = u32::try_from(window.count)
+            .ok()
+            .filter(|c| *c > 0)
+            .ok_or_else(|| {
+                Error::Query(QueryError::InvalidParameter {
+                    parameter: "window size".to_string(),
+                    reason: format!(
+                        "window size must be a positive integer, got {}",
+                        window.count
+                    ),
+                })
+            })?;
+
+        let unit = WindowUnit::parse(&window.unit).ok_or_else(|| {
+            Error::Query(QueryError::InvalidParameter {
+                parameter: "window unit".to_string(),
+                reason: format!(
+                    "unknown window unit '{}' (expected minute/hour/day/week/month/quarter/year)",
+                    window.unit
+                ),
+            })
+        })?;
+        let granularity = WindowGranularity { count, unit };
+
+        let range_start_micros = self.window_timestamp_micros(&window.range_start)?;
+        let range_end_micros = self.window_timestamp_micros(&window.range_end)?;
+
+        // Validate the range/granularity now (empty range, too many windows)
+        // so a malformed spec fails at convert time with a structured error.
+        temporal_window::generate_windows(range_start_micros, range_end_micros, granularity)
+            .map_err(Self::window_error_to_query_error)?;
+
+        let as_of_system_time = match &window.as_of_system_time {
+            Some(ts) => Timestamp::from(self.window_timestamp_micros(ts)?),
+            None => time::now(),
+        };
+
+        let aggregates = window
+            .aggregates
+            .iter()
+            .map(|item| self.convert_window_agg_item(item, &match_var))
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(TemporalWindowSpec {
+            granularity,
+            range_start_micros,
+            range_end_micros,
+            as_of_system_time,
+            aggregates,
+        })
+    }
+
+    /// Resolve a window boundary [`TimestampLiteral`] to microseconds since
+    /// epoch, accepting RFC 3339 / ISO-8601 strings as well as the existing
+    /// integer/microsecond forms.
+    fn window_timestamp_micros(&self, ts: &TimestampLiteral) -> Result<i64> {
+        match ts {
+            TimestampLiteral::Integer(micros) => Ok(*micros),
+            TimestampLiteral::String(s) => {
+                temporal_window::parse_boundary_micros(s).map_err(Self::window_error_to_query_error)
+            }
+        }
+    }
+
+    /// Validate one window aggregate item, resolving its function and argument
+    /// and rejecting incompatible combinations with structured errors.
+    fn convert_window_agg_item(
+        &self,
+        item: &WindowReturnItem,
+        match_var: &str,
+    ) -> Result<WindowAggregateSpec> {
+        use crate::query::ast::WindowAggArg as AstArg;
+        use crate::query::ir::WindowAggArg as IrArg;
+
+        let func = match item.func.to_ascii_uppercase().as_str() {
+            "COUNT" => WindowAggFunc::Count,
+            "SUM" => WindowAggFunc::Sum,
+            "AVG" => WindowAggFunc::Avg,
+            "MIN" => WindowAggFunc::Min,
+            "MAX" => WindowAggFunc::Max,
+            "CHANGES" => WindowAggFunc::Changes,
+            other => {
+                return Err(Error::Query(QueryError::UnsupportedFeature {
+                    feature: format!(
+                        "temporal window aggregate function '{other}' (supported: \
+                         COUNT, SUM, AVG, MIN, MAX, CHANGES)"
+                    ),
+                }));
+            }
+        };
+
+        // Any variable named in the argument must be the single matched node.
+        let referenced_var = match &item.arg {
+            AstArg::Star => None,
+            AstArg::Entity { var } | AstArg::Property { var, .. } => Some(var.as_str()),
+        };
+        if let Some(var) = referenced_var
+            && var != match_var
+        {
+            return Err(Error::Query(QueryError::InvalidParameter {
+                parameter: "window aggregate argument".to_string(),
+                reason: format!(
+                    "aggregate references variable '{var}' but the matched entity is \
+                     '{match_var}'"
+                ),
+            }));
+        }
+
+        // Resolve the IR argument, enforcing per-function argument shapes.
+        let ir_arg = match (func, &item.arg) {
+            // Value aggregates require a numeric property argument.
+            (
+                WindowAggFunc::Sum | WindowAggFunc::Avg | WindowAggFunc::Min | WindowAggFunc::Max,
+                AstArg::Property { key, .. },
+            ) => IrArg::Property(key.clone()),
+            (
+                WindowAggFunc::Sum | WindowAggFunc::Avg | WindowAggFunc::Min | WindowAggFunc::Max,
+                _,
+            ) => {
+                return Err(Error::Query(QueryError::InvalidParameter {
+                    parameter: "window aggregate argument".to_string(),
+                    reason: format!(
+                        "{} requires a property argument (e.g. {}({}.price))",
+                        item.func.to_ascii_uppercase(),
+                        item.func.to_ascii_uppercase(),
+                        match_var
+                    ),
+                }));
+            }
+            // COUNT(*) / COUNT(v) count entities present; COUNT(v.prop) counts
+            // defined samples.
+            (WindowAggFunc::Count, AstArg::Property { key, .. }) => IrArg::Property(key.clone()),
+            (WindowAggFunc::Count, _) => IrArg::Star,
+            // CHANGES(*) / CHANGES(v) count entity versions; CHANGES(v.prop)
+            // counts genuine property changes.
+            (WindowAggFunc::Changes, AstArg::Property { key, .. }) => IrArg::Property(key.clone()),
+            (WindowAggFunc::Changes, _) => IrArg::Star,
+        };
+
+        let output_name = item
+            .alias
+            .clone()
+            .unwrap_or_else(|| Self::default_window_output_name(&item.func, &item.arg));
+
+        Ok(WindowAggregateSpec {
+            func,
+            arg: ir_arg,
+            output_name,
+        })
+    }
+
+    /// Default output column name for an unaliased window aggregate, e.g.
+    /// `avg(v.price)` or `count(*)`.
+    fn default_window_output_name(func: &str, arg: &crate::query::ast::WindowAggArg) -> String {
+        use crate::query::ast::WindowAggArg as AstArg;
+        let f = func.to_ascii_lowercase();
+        match arg {
+            AstArg::Star => format!("{f}(*)"),
+            AstArg::Entity { var } => format!("{f}({var})"),
+            AstArg::Property { var, key } => format!("{f}({var}.{key})"),
+        }
+    }
+
+    /// Map a [`WindowError`] to the structured [`QueryError`] the MCP surface
+    /// renders (`invalid_params`).
+    fn window_error_to_query_error(err: WindowError) -> Error {
+        let reason = match err {
+            WindowError::ZeroCount => "window size must be positive".to_string(),
+            WindowError::EmptyRange => {
+                "the valid-time range end must be strictly after the start".to_string()
+            }
+            WindowError::TooManyWindows(n) => format!(
+                "the window granularity and range would generate {n} windows, exceeding the \
+                 limit of {}",
+                temporal_window::MAX_WINDOWS
+            ),
+            WindowError::BadTimestamp(s) => format!(
+                "could not parse timestamp '{s}' (expected RFC 3339 / ISO-8601 or microseconds \
+                 since epoch)"
+            ),
+            WindowError::CalendarOverflow => {
+                "the window range overflowed the representable timestamp range".to_string()
+            }
+        };
+        Error::Query(QueryError::InvalidParameter {
+            parameter: "temporal window".to_string(),
+            reason,
         })
     }
 
@@ -622,8 +1368,9 @@ impl AstConverter {
         &self,
         where_clause: &super::ast::WhereClause,
         ops: &mut Vec<QueryOp>,
+        scope: &EdgeScope,
     ) -> Result<()> {
-        let predicate = self.convert_predicate(&where_clause.predicate)?;
+        let predicate = self.convert_predicate(&where_clause.predicate, scope)?;
         ops.push(QueryOp::Filter(predicate));
         Ok(())
     }
@@ -704,6 +1451,62 @@ impl AstConverter {
                 Ok(Some(TemporalContext::valid_time_between(range)))
             }
         }
+    }
+
+    /// Lower an optional AQL namespace scope clause (`USE / IN NAMESPACE ...`)
+    /// to a [`NamespaceScope`] on the query IR (Issue #3349, PR2b).
+    ///
+    /// `None` (no clause) stays `None` — namespace-agnostic, byte-identical to
+    /// prior behavior; `execute_query` treats it exactly as today. When the
+    /// clause is present it maps to the same [`NamespaceScope`] the MCP tools /
+    /// the Rust `QueryBuilder` produce, so it flows through the executor scope
+    /// PR2/PR3d already built (source-leaf filter + traversal boundary + ranked
+    /// filter).
+    ///
+    /// Namespace **name** validation (charset / length / reserved-prefix /
+    /// the reserved `all` selector) is delegated to
+    /// [`Namespace::new`](crate::core::namespace::Namespace::new), so a malformed
+    /// name surfaces as a structured `INVALID_ARGUMENT` — identical to the MCP
+    /// `namespace` param — never a silent unscoped result. A single bare `all`
+    /// name is treated as the no-filter selector (mirroring the MCP `"all"`
+    /// string), the same meaning as `USE ALL NAMESPACES`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Namespace`] with `InvalidName` for a malformed name (or an
+    ///   empty union — already rejected by the parser, guarded here too).
+    fn convert_namespace_clause(
+        &self,
+        clause: &Option<crate::query::ast::NamespaceClause>,
+    ) -> Result<Option<crate::core::namespace::NamespaceScope>> {
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        use crate::query::ast::NamespaceClause;
+
+        let Some(clause) = clause else {
+            return Ok(None);
+        };
+        let scope = match clause {
+            NamespaceClause::All => NamespaceScope::All,
+            // A lone `all` name is the no-filter selector, mirroring the MCP
+            // `namespace: "all"` string (exact match, like `parse_opt_scope`).
+            NamespaceClause::Names(names) if names.len() == 1 && names[0] == "all" => {
+                NamespaceScope::All
+            }
+            NamespaceClause::Names(names) => {
+                let mut namespaces = Vec::with_capacity(names.len());
+                for name in names {
+                    namespaces.push(Namespace::new(name.as_str()).map_err(Error::Namespace)?);
+                }
+                if namespaces.len() == 1 {
+                    NamespaceScope::Single(namespaces.into_iter().next().expect("len == 1"))
+                } else {
+                    // Empty is unreachable (the parser requires >= 1 name), but
+                    // `list` still guards it as `INVALID_ARGUMENT`.
+                    NamespaceScope::list(namespaces).map_err(Error::Namespace)?
+                }
+            }
+        };
+        Ok(Some(scope))
     }
 
     /// Convert a timestamp literal to a Timestamp.
@@ -898,14 +1701,24 @@ impl AstConverter {
     }
 
     /// Convert a predicate expression to IR Predicate.
-    fn convert_predicate(&self, expr: &PredicateExpr) -> Result<Predicate> {
+    ///
+    /// `scope` classifies the pattern's variables so a leaf on the single-hop
+    /// relationship variable scopes to the traversed edge (Issue #3622); node /
+    /// unknown variable leaves are unchanged.
+    fn convert_predicate(&self, expr: &PredicateExpr, scope: &EdgeScope) -> Result<Predicate> {
         match expr {
             PredicateExpr::Comparison { left, op, right } => {
-                self.convert_comparison(left, *op, right)
+                self.convert_comparison(left, *op, right, scope)
             }
-            PredicateExpr::Exists(prop) => Ok(Predicate::Exists(prop.property.clone())),
-            PredicateExpr::IsNull(prop) => Ok(Predicate::NotExists(prop.property.clone())),
-            PredicateExpr::IsNotNull(prop) => Ok(Predicate::Exists(prop.property.clone())),
+            PredicateExpr::Exists(prop) => {
+                scope.scope_leaf(&prop.variable, Predicate::Exists(prop.property.clone()))
+            }
+            PredicateExpr::IsNull(prop) => {
+                scope.scope_leaf(&prop.variable, Predicate::NotExists(prop.property.clone()))
+            }
+            PredicateExpr::IsNotNull(prop) => {
+                scope.scope_leaf(&prop.variable, Predicate::Exists(prop.property.clone()))
+            }
             PredicateExpr::ProvenanceIsNull { negated, .. } => {
                 Ok(Predicate::Provenance(ProvenancePredicate::IsNull {
                     negated: *negated,
@@ -913,30 +1726,36 @@ impl AstConverter {
             }
             PredicateExpr::Contains { .. }
             | PredicateExpr::StartsWith { .. }
-            | PredicateExpr::EndsWith { .. } => self.convert_string_predicate(expr),
-            PredicateExpr::In { property, values } => self.convert_in_predicate(property, values),
-            PredicateExpr::And(_, _) | PredicateExpr::Or(_, _) | PredicateExpr::Not(_) => {
-                self.convert_logic_predicate(expr)
+            | PredicateExpr::EndsWith { .. } => self.convert_string_predicate(expr, scope),
+            PredicateExpr::In { property, values } => {
+                self.convert_in_predicate(property, values, scope)
             }
-            PredicateExpr::Grouped(inner) => self.convert_predicate(inner),
+            PredicateExpr::And(_, _) | PredicateExpr::Or(_, _) | PredicateExpr::Not(_) => {
+                self.convert_logic_predicate(expr, scope)
+            }
+            PredicateExpr::Grouped(inner) => self.convert_predicate(inner, scope),
         }
     }
 
     /// Convert logic predicates (AND, OR, NOT).
-    fn convert_logic_predicate(&self, expr: &PredicateExpr) -> Result<Predicate> {
+    fn convert_logic_predicate(
+        &self,
+        expr: &PredicateExpr,
+        scope: &EdgeScope,
+    ) -> Result<Predicate> {
         match expr {
             PredicateExpr::And(left, right) => {
-                let l = self.convert_predicate(left)?;
-                let r = self.convert_predicate(right)?;
+                let l = self.convert_predicate(left, scope)?;
+                let r = self.convert_predicate(right, scope)?;
                 Ok(l.and(r))
             }
             PredicateExpr::Or(left, right) => {
-                let l = self.convert_predicate(left)?;
-                let r = self.convert_predicate(right)?;
+                let l = self.convert_predicate(left, scope)?;
+                let r = self.convert_predicate(right, scope)?;
                 Ok(l.or(r))
             }
             PredicateExpr::Not(inner) => {
-                let p = self.convert_predicate(inner)?;
+                let p = self.convert_predicate(inner, scope)?;
                 Ok(!p)
             }
             _ => unreachable!("convert_logic_predicate called on non-logic expr"),
@@ -944,23 +1763,36 @@ impl AstConverter {
     }
 
     /// Convert string predicates (CONTAINS, STARTS WITH, ENDS WITH).
-    fn convert_string_predicate(&self, expr: &PredicateExpr) -> Result<Predicate> {
+    fn convert_string_predicate(
+        &self,
+        expr: &PredicateExpr,
+        scope: &EdgeScope,
+    ) -> Result<Predicate> {
         match expr {
             PredicateExpr::Contains {
                 property,
                 substring,
-            } => Ok(Predicate::Contains {
-                key: property.property.clone(),
-                substring: substring.clone(),
-            }),
-            PredicateExpr::StartsWith { property, prefix } => Ok(Predicate::StartsWith {
-                key: property.property.clone(),
-                prefix: prefix.clone(),
-            }),
-            PredicateExpr::EndsWith { property, suffix } => Ok(Predicate::EndsWith {
-                key: property.property.clone(),
-                suffix: suffix.clone(),
-            }),
+            } => scope.scope_leaf(
+                &property.variable,
+                Predicate::Contains {
+                    key: property.property.clone(),
+                    substring: substring.clone(),
+                },
+            ),
+            PredicateExpr::StartsWith { property, prefix } => scope.scope_leaf(
+                &property.variable,
+                Predicate::StartsWith {
+                    key: property.property.clone(),
+                    prefix: prefix.clone(),
+                },
+            ),
+            PredicateExpr::EndsWith { property, suffix } => scope.scope_leaf(
+                &property.variable,
+                Predicate::EndsWith {
+                    key: property.property.clone(),
+                    suffix: suffix.clone(),
+                },
+            ),
             _ => unreachable!("convert_string_predicate called on non-string expr"),
         }
     }
@@ -970,15 +1802,19 @@ impl AstConverter {
         &self,
         property: &super::ast::PropertyAccess,
         values: &[PropertyValue],
+        scope: &EdgeScope,
     ) -> Result<Predicate> {
         let pred_values: Result<Vec<PredicateValue>> = values
             .iter()
             .map(|v| self.convert_property_value(v))
             .collect();
-        Ok(Predicate::In {
-            key: property.property.clone(),
-            values: pred_values?,
-        })
+        scope.scope_leaf(
+            &property.variable,
+            Predicate::In {
+                key: property.property.clone(),
+                values: pred_values?,
+            },
+        )
     }
 
     /// Convert a comparison expression.
@@ -987,6 +1823,7 @@ impl AstConverter {
         left: &Expression,
         op: ComparisonOp,
         right: &Expression,
+        scope: &EdgeScope,
     ) -> Result<Predicate> {
         // Provenance accessors (Issue #3354a): `source(x)`/`confidence(x)`/
         // `reason(x)` appear as function calls, never property accesses, so a
@@ -1012,19 +1849,34 @@ impl AstConverter {
             (None, None) => {}
         }
 
+        // Cross-entity property-to-property comparison, e.g. `r.since = b.age`
+        // (Issue #3622). AQL's single-entity + edge-channel model cannot join
+        // two live operands in one leaf (Cypher's multi-variable evaluator can),
+        // so reject it up front with a shape-naming structured error rather than
+        // the generic "expected literal or parameter" from the value path.
+        if matches!(left, Expression::Property(_)) && matches!(right, Expression::Property(_)) {
+            return Err(Error::Query(QueryError::UnsupportedFeature {
+                feature: "comparison between two property accesses (e.g. `r.since = b.age`) \
+                          is not supported in AQL WHERE; compare a property to a literal or \
+                          parameter (cross-entity comparison is a Cypher-only capability)"
+                    .to_string(),
+            }));
+        }
+
         // Try left side as property
         if let Expression::Property(prop) = left {
             let key = prop.property.clone();
             let value = self.expression_to_predicate_value(right)?;
 
-            return Ok(match op {
+            let leaf = match op {
                 ComparisonOp::Eq => Predicate::Eq { key, value },
                 ComparisonOp::Ne => Predicate::Ne { key, value },
                 ComparisonOp::Lt => Predicate::Lt { key, value },
                 ComparisonOp::Le => Predicate::Lte { key, value },
                 ComparisonOp::Gt => Predicate::Gt { key, value },
                 ComparisonOp::Ge => Predicate::Gte { key, value },
-            });
+            };
+            return scope.scope_leaf(&prop.variable, leaf);
         }
 
         // Try right side as property (swap operands)
@@ -1033,14 +1885,15 @@ impl AstConverter {
             let value = self.expression_to_predicate_value(left)?;
 
             // When swapping, we must flip inequalities
-            return Ok(match op {
+            let leaf = match op {
                 ComparisonOp::Eq => Predicate::Eq { key, value }, // Symmetric
                 ComparisonOp::Ne => Predicate::Ne { key, value }, // Symmetric
                 ComparisonOp::Lt => Predicate::Gt { key, value }, // < becomes >
                 ComparisonOp::Le => Predicate::Gte { key, value }, // <= becomes >=
                 ComparisonOp::Gt => Predicate::Lt { key, value }, // > becomes <
                 ComparisonOp::Ge => Predicate::Lte { key, value }, // >= becomes <=
-            });
+            };
+            return scope.scope_leaf(&prop.variable, leaf);
         }
 
         Err(Error::Query(QueryError::SyntaxError {
@@ -1247,9 +2100,17 @@ impl AstConverter {
         &self,
         order_clause: &OrderClause,
         ops: &mut Vec<QueryOp>,
+        scope: &EdgeScope,
     ) -> Result<()> {
         for item in &order_clause.items {
             let sort_key = match &item.expression {
+                // A property key on the single-hop relationship variable orders
+                // by the traversed edge (Issue #3622); a rel var in an
+                // unsupported position is rejected; node/unknown vars are
+                // node-scoped as before.
+                Expression::Property(prop) if scope.is_edge_var(&prop.variable)? => {
+                    SortKey::EdgeProperty(prop.property.clone())
+                }
                 Expression::Property(prop) => SortKey::Property(prop.property.clone()),
                 Expression::Identifier(name) => {
                     // Special identifiers for built-in sort keys
@@ -1257,6 +2118,30 @@ impl AstConverter {
                         "score" => SortKey::Score,
                         "timestamp" => SortKey::Timestamp,
                         _ => SortKey::Property(name.clone()),
+                    }
+                }
+                // ORDER BY a provenance accessor (Issue #3354): the value is
+                // resolved per row from the row entity's write-time provenance.
+                Expression::FunctionCall { name, args }
+                    if provenance_field_name(name).is_some() =>
+                {
+                    // The arm guard guarantees `Some`; bind it once.
+                    let Some(field) = provenance_field_name(name) else {
+                        return Err(Error::Query(QueryError::SyntaxError {
+                            message: "unrecognized provenance accessor in ORDER BY".to_string(),
+                        }));
+                    };
+                    match args.as_slice() {
+                        [Expression::Identifier(_)] => SortKey::Provenance(field),
+                        _ => {
+                            return Err(Error::Query(QueryError::SyntaxError {
+                                message: format!(
+                                    "{}(x) provenance accessor requires exactly one bound \
+                                     variable argument",
+                                    field.accessor_name()
+                                ),
+                            }));
+                        }
                     }
                 }
                 _ => {
@@ -1903,6 +2788,158 @@ mod tests {
     fn test_parse_query() {
         let query = super::parse_query("MATCH (n:Person) RETURN n").unwrap();
         assert!(!query.ops.is_empty());
+    }
+
+    // ========================================================================
+    // Namespace scope lowering (Issue #3349, PR2b): AQL clause -> Query.scope
+    // ========================================================================
+
+    #[test]
+    fn convert_namespace_single_sets_single_scope() {
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let query =
+            super::parse_query("USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(
+            query.scope,
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap()))
+        );
+    }
+
+    #[test]
+    fn convert_namespace_union_sets_list_scope() {
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let query =
+            super::parse_query("USE NAMESPACE 'agent:a', 'shared' MATCH (n:Person) RETURN n")
+                .unwrap();
+        assert_eq!(
+            query.scope,
+            Some(NamespaceScope::List(vec![
+                Namespace::new("agent:a").unwrap(),
+                Namespace::new("shared").unwrap(),
+            ]))
+        );
+    }
+
+    #[test]
+    fn convert_all_namespaces_sets_all_scope() {
+        use crate::core::namespace::NamespaceScope;
+        let query = super::parse_query("USE ALL NAMESPACES MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(query.scope, Some(NamespaceScope::All));
+    }
+
+    #[test]
+    fn convert_bare_all_name_sets_all_scope() {
+        use crate::core::namespace::NamespaceScope;
+        // A lone `all` name is the no-filter selector (mirrors MCP `"all"`).
+        let query = super::parse_query("USE NAMESPACE all MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(query.scope, Some(NamespaceScope::All));
+    }
+
+    #[test]
+    fn convert_no_namespace_clause_leaves_scope_none() {
+        let query = super::parse_query("MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(query.scope, None);
+    }
+
+    #[test]
+    fn convert_malformed_namespace_name_is_error() {
+        // A name outside the `[A-Za-z0-9._:/-]` charset is rejected at conversion
+        // (structured INVALID_ARGUMENT), never silently accepted.
+        let result = super::parse_query("USE NAMESPACE 'has space' MATCH (n:Person) RETURN n");
+        assert!(matches!(
+            result,
+            Err(crate::core::error::Error::Namespace(
+                crate::core::namespace::NamespaceError::InvalidName { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn convert_namespace_scope_carried_on_vector_source() {
+        // Regression pin (Issue #3349, PR2b): a non-MATCH source (vector
+        // SIMILAR search) must still lower the `USE NAMESPACE` prefix onto
+        // `Query.scope`. Flipping the general-path `Ok(Query { .., scope })`
+        // site to `scope: None` would silently drop the namespace filter on
+        // every vector query -- the lane's worst outcome -- and fail here.
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let query =
+            super::parse_query("USE NAMESPACE 'agent:a' SIMILAR TO [0.1, 0.2, 0.3] LIMIT 10")
+                .unwrap();
+        // Sanity: this really is the vector-source path, not a MATCH.
+        assert!(matches!(&query.ops[0], QueryOp::VectorSearch { k: 10, .. }));
+        assert_eq!(
+            query.scope,
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap()))
+        );
+    }
+
+    #[test]
+    fn convert_namespace_scope_carried_on_window() {
+        // Regression pin (Issue #3349, PR2b): the self-contained WINDOW
+        // terminal op has its own early `return Ok(Query { .., scope })`;
+        // flipping it to `scope: None` would silently drop the namespace
+        // filter on temporal-window aggregates and fail here.
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let query = super::parse_query(
+            "USE NAMESPACE 'agent:a' MATCH (p:Product) \
+             WINDOW 1 month OVER VALID_TIME \
+             FROM '2024-01-01T00:00:00Z' TO '2024-03-01T00:00:00Z' \
+             RETURN AVG(p.price) AS avg_price",
+        )
+        .unwrap();
+        assert!(matches!(
+            &query.ops[..],
+            [.., QueryOp::TemporalWindowAggregate(_)]
+        ));
+        assert_eq!(
+            query.scope,
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap()))
+        );
+    }
+
+    #[test]
+    fn convert_namespace_scope_carried_on_align() {
+        // Regression pin (Issue #3349, PR2b): the self-contained ALIGN
+        // terminal op has its own early `return Ok(Query { .., scope })`;
+        // flipping it to `scope: None` would silently drop the namespace
+        // filter on temporal-align queries and fail here.
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let query = super::parse_query(
+            "USE NAMESPACE 'agent:a' MATCH (p:Product) ALIGN OVERLAP \
+             OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2024-02-01T00:00:00Z' \
+             RETURN p.price",
+        )
+        .unwrap();
+        assert!(matches!(&query.ops[..], [.., QueryOp::TemporalAlign(_)]));
+        assert_eq!(
+            query.scope,
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap()))
+        );
+    }
+
+    #[test]
+    fn convert_namespace_and_temporal_both_lower_onto_one_query() {
+        // NIT (Issue #3349, PR2b): a namespace clause and an `AS OF` temporal
+        // clause on the same query lower independently -- both must land on the
+        // single resulting `Query` (scope AND temporal_context), neither
+        // clobbering the other.
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        // `AS OF` via the bare `parse_query` path takes microseconds since epoch
+        // (1704067200000000 == 2024-01-01T00:00:00Z), mirroring the existing
+        // `parse_query` temporal doc example.
+        let query = super::parse_query(
+            "USE NAMESPACE 'agent:a' AS OF 1704067200000000 MATCH (n:Person) RETURN n",
+        )
+        .unwrap();
+        assert_eq!(
+            query.scope,
+            Some(NamespaceScope::Single(Namespace::new("agent:a").unwrap()))
+        );
+        // The temporal clause lowered too (valid-time set), not dropped.
+        assert!(
+            query.temporal_context.is_some(),
+            "AS OF should lower onto temporal_context alongside the namespace scope"
+        );
     }
 
     #[test]
@@ -2575,7 +3612,7 @@ mod sentry_tests {
             variable: "n".to_string(),
             property: "prop".to_string(),
         });
-        let _ = converter.convert_logic_predicate(&expr);
+        let _ = converter.convert_logic_predicate(&expr, &EdgeScope::default());
     }
 
     #[test]
@@ -2586,6 +3623,6 @@ mod sentry_tests {
             variable: "n".to_string(),
             property: "prop".to_string(),
         });
-        let _ = converter.convert_string_predicate(&expr);
+        let _ = converter.convert_string_predicate(&expr, &EdgeScope::default());
     }
 }

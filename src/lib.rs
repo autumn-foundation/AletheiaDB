@@ -58,6 +58,7 @@
 pub mod api;
 pub mod config;
 pub mod core;
+pub mod daemon_lock;
 pub mod db;
 /// Encryption at rest (ADR-0028).
 pub mod encryption;
@@ -67,6 +68,10 @@ pub mod index;
 pub mod provenance_chain;
 pub mod query;
 pub mod storage;
+/// Multi-tenant isolation runtime (Issue #3365): one fully-separate
+/// [`AletheiaDB`](crate::db::AletheiaDB) per tenant, per-tenant resource
+/// quotas, and O(1) usage accounting, served from one process.
+pub mod tenant;
 // Semantic search cohort (graduated from "Nova" in 0.1).
 #[cfg(feature = "semantic-search")]
 pub mod semantic_search;
@@ -124,10 +129,11 @@ pub use config::{
 };
 pub use core::temporal::time;
 pub use core::{
-    BiTemporalInterval, ChangeFeedPage, ChangeFeedQuery, ChangeRecord, ChangeType, Edge, EdgeId,
-    EntityId, EntityKind, GLOBAL_INTERNER, InternedString, Node, NodeHeader, NodeId, PropertyKey,
-    PropertyMap, PropertyMapBuilder, PropertyValue, Provenance, StringInterner, TimeRange,
-    Timestamp, VersionId,
+    BiTemporalInterval, ChangeFeedPage, ChangeFeedQuery, ChangeFilter, ChangeRecord, ChangeType,
+    ChangefeedBroadcaster, ChangefeedConfig, Edge, EdgeId, EntityId, EntityKind, GLOBAL_INTERNER,
+    InternedString, NAMESPACE_KEY, Namespace, NamespaceError, NamespaceScope, Node, NodeHeader,
+    NodeId, PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue, Provenance, RecvError,
+    StringInterner, Subscription, TimeRange, Timestamp, VersionId,
 };
 
 pub use api::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};
@@ -135,18 +141,52 @@ pub use core::error::{
     ConstraintError, Error, QueryError, Result, StorageError, TemporalError, TransactionError,
 };
 pub use db::{
-    AletheiaDB, BackupSummary, ColdStorageDetails, ColdStorageTierStats, CurrentStateStats,
-    DatabaseStats, EdgeTypeSchema, FactStatus, GraphSchema, HistoricalDepthStats, LabelExtent,
-    LabelSchema, LineageView, LineageViewEntry, PitrCoord, PitrPlan, PitrTarget, SchemaInstant,
-    SimilarityQuery, SimilaritySource, TemporalExtent, TierAccessStats, TimeBounds,
-    UniqueConstraintBuilder, VectorIndexBuilder, WalStateStats,
+    AletheiaDB, ColdStorageDetails, ColdStorageTierStats, CurrentStateStats, DatabaseStats,
+    EdgeTypeSchema, FactStatus, GraphSchema, HistoricalDepthStats, LabelExtent, LabelSchema,
+    LineageView, LineageViewEntry, NamespaceCount, NamespaceInfo, NodeRole, PromotionReport,
+    PropertyIndexBuilder, ReplicaProgressStats, ReplicationStats, SchemaInstant, SimilarityQuery,
+    SimilaritySource, TemporalExtent, TierAccessStats, TimeBounds, UniqueConstraintBuilder,
+    VectorIndexBuilder, WalStateStats,
+};
+// Replication engine public API (Issue #3355, Slice B): native-only, like
+// backup/PITR (`db::replication`/`storage::replication` are both gated on
+// `not(target_arch = "wasm32")`).
+#[cfg(not(target_arch = "wasm32"))]
+pub use db::ReplicationOptions;
+#[cfg(not(target_arch = "wasm32"))]
+pub use storage::replication::{
+    FetchOutcome, InProcessSource, ReplicationFeed, ReplicationServer, ReplicationServerHandle,
+    ReplicationSource, TcpSource,
+};
+// Backup/restore and point-in-time-restore are durability features absent on
+// the wasm32 ephemeral profile (see `db::backup` / `db::pitr`).
+#[cfg(not(target_arch = "wasm32"))]
+pub use db::{BackupSummary, PitrCoord, PitrPlan, PitrTarget};
+// Issue #3349 (PR3d): re-export `TraverseDirection` at the crate root via its
+// owning `namespace_query` module path, deliberately WITHOUT adding it to the
+// `db` module's own re-export block (`src/db/mod.rs` is owned by the concurrent
+// GDPR crypto-shred lane and must not be edited here).
+pub use db::namespace_query::TraverseDirection;
+#[cfg(feature = "semantic-retrieval-fusion")]
+pub use db::{
+    FusedHit, FusionBreakdown, FusionError, FusionPolicy, FusionPolicyBuilder, FusionPolicyError,
+};
+// Durable workflow-execution journal (DBOS Phase 3a; design sketch
+// `docs/plans/2026-07-19-dbos-design-sketch.md`, Issue #3577).
+#[cfg(feature = "durable-execution")]
+pub use db::{
+    CreateRunSpec, StepExecError, StepOutcome, StepRecord, StepRecordSpec, StepStatus, StepValue,
+    WorkflowError, WorkflowJournal, WorkflowJournalExt, WorkflowRun, WorkflowStatus,
 };
 pub use index::{
-    AdjacencyIndex, CurrentIndexes, TemporalIndexes,
+    AdjacencyIndex, AdjacencyIndexStats, AdjacencyLayerStats, AdjacencyMaintenanceConfig,
+    CurrentIndexes, PropertyIndexInfo, TemporalIndexes,
     vector::{DistanceMetric, HnswConfig, TemporalVectorConfig},
 };
 pub use storage::CurrentStorage;
+#[cfg(not(target_arch = "wasm32"))]
 pub use storage::backup::BackupError;
+#[cfg(not(target_arch = "wasm32"))]
 pub use storage::index_persistence::PersistenceConfig;
 pub use storage::wal::{DurabilityMode, WriteOptions};
 

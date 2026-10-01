@@ -73,18 +73,28 @@ macro_rules! impl_edge_iter {
                 let delta_slice = self.guard.delta_slice();
 
                 while self.index < frozen_slice.len() + delta_slice.len() {
-                    let entry = if self.index < frozen_slice.len() {
-                        &frozen_slice[self.index]
-                    } else {
+                    let from_delta = self.index >= frozen_slice.len();
+                    let entry = if from_delta {
                         &delta_slice[self.index - frozen_slice.len()]
+                    } else {
+                        &frozen_slice[self.index]
                     };
 
                     self.index += 1;
 
                     // Filter tombstones
-                    if !self.guard.is_tombstoned(entry.edge_id) {
-                        return Some(entry.edge_id);
+                    if self.guard.is_tombstoned(entry.edge_id) {
+                        continue;
                     }
+                    // Filter the delta half against the frozen slice while a
+                    // compaction publish window is open, where an entry is
+                    // momentarily in both layers (Issue #3810). This walks the
+                    // layers directly instead of through `guard.iter()`, so it
+                    // has to apply the same de-duplication that does.
+                    if from_delta && self.guard.delta_entry_is_duplicate(entry) {
+                        continue;
+                    }
+                    return Some(entry.edge_id);
                 }
                 None
             }
@@ -169,16 +179,23 @@ macro_rules! impl_edge_iter_with_label {
                 let delta_slice = self.guard.delta_slice();
 
                 while self.index < frozen_slice.len() + delta_slice.len() {
-                    let entry = if self.index < frozen_slice.len() {
-                        &frozen_slice[self.index]
-                    } else {
+                    let from_delta = self.index >= frozen_slice.len();
+                    let entry = if from_delta {
                         &delta_slice[self.index - frozen_slice.len()]
+                    } else {
+                        &frozen_slice[self.index]
                     };
 
                     self.index += 1;
 
-                    // Filter by label AND tombstones
-                    if entry.label == label_id && !self.guard.is_tombstoned(entry.edge_id) {
+                    // Filter by label AND tombstones, and de-duplicate the
+                    // delta half against the frozen slice while a compaction
+                    // publish window is open (Issue #3810) -- see the unlabeled
+                    // iterator above.
+                    if entry.label == label_id
+                        && !self.guard.is_tombstoned(entry.edge_id)
+                        && !(from_delta && self.guard.delta_entry_is_duplicate(entry))
+                    {
                         return Some(entry.edge_id);
                     }
                 }

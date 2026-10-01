@@ -1,4 +1,4 @@
-# ADR-0026: Encryption-at-Rest Architecture
+# ADR-0028: Encryption-at-Rest Architecture
 
 **Status:** Accepted
 **Date:** 2026-01-27
@@ -404,6 +404,23 @@ pub struct TlsConfig {
 **Supported Backends:**
 - **KV v2**: Static secrets storage
 - **Transit**: Encryption-as-a-service (envelope encryption)
+
+> **Implementation status (Issue #3587).** The shipped `KeyProviderConfig` enum
+> now provides the `File`, `Env`, `PassphraseFile`, `Kms`, and `Vault` variants,
+> constructed through a single `KeyProviderConfig::build_provider` dispatch. The
+> implemented `KeyProvider` trait is **synchronous** (unlike the `async fn new`
+> sketched above): the KMS provider bridges the async `aws-sdk-kms` client with
+> an internal runtime, and the Vault provider uses `reqwest::blocking` (call it
+> from a synchronous context). `PassphraseFile` wraps the MEK in a self-describing
+> `AEKF` file (Argon2id/PBKDF2 KDF, AES-256-GCM seal binding the header as AAD,
+> KDF params clamped against a hostile file). `Kms` and `Vault` are gated behind
+> the `encryption-aws-kms` / `encryption-vault` features (a typed `Unavailable`
+> error when absent). Passphrase/token secrets are read from named environment
+> variables into zeroizing buffers, never stored in config, logged, or exposed
+> via `Debug` (the KMS wrapped-key blob and Vault token are redacted).
+> Index-key rotation _to_ a passphrase/KMS/Vault source is refused fail-closed
+> (the durable resume breadcrumb cannot round-trip their secret/multi-field
+> config); GCP Cloud KMS and Azure Key Vault below remain future work.
 
 #### 5. GCP Cloud KMS Provider
 

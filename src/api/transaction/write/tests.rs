@@ -5,6 +5,7 @@ use tempfile::TempDir;
 
 mod tombstone_tests {
     use super::*;
+    use crate::core::commit_clock::CommitClock;
 
     fn create_test_write_tx() -> (WriteTransaction, TempDir) {
         let current = Arc::new(CurrentStorage::new());
@@ -15,7 +16,7 @@ mod tombstone_tests {
         let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
-        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let current_timestamp = Arc::new(CommitClock::new(time::now()));
         let node_id_gen = Arc::new(IdGenerator::new());
         let edge_id_gen = Arc::new(IdGenerator::new());
         let version_id_gen = Arc::new(IdGenerator::new());
@@ -24,7 +25,7 @@ mod tombstone_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
 
         let tx = WriteTransaction::new(
@@ -83,9 +84,23 @@ mod tombstone_tests {
 mod general_tests {
     use super::*;
     use crate::core::property::PropertyMapBuilder;
+    use crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig;
 
     fn create_test_write_tx() -> (WriteTransaction, TempDir) {
-        let current = Arc::new(CurrentStorage::new());
+        create_test_write_tx_with(CurrentStorage::new())
+    }
+
+    /// Variant for tests that assert on which adjacency *layer* an edge landed
+    /// in: background maintenance (Issue #3810) would otherwise be free to
+    /// compact the delta away between the commit and the assertion.
+    fn create_test_write_tx_unmanaged() -> (WriteTransaction, TempDir) {
+        create_test_write_tx_with(CurrentStorage::with_adjacency_maintenance(
+            AdjacencyMaintenanceConfig::disabled(),
+        ))
+    }
+
+    fn create_test_write_tx_with(storage: CurrentStorage) -> (WriteTransaction, TempDir) {
+        let current = Arc::new(storage);
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let temporal_indexes = Arc::new(TemporalIndexes::new());
 
@@ -94,7 +109,7 @@ mod general_tests {
         let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
-        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let current_timestamp = Arc::new(CommitClock::new(time::now()));
         let node_id_gen = Arc::new(IdGenerator::new());
         let edge_id_gen = Arc::new(IdGenerator::new());
         let version_id_gen = Arc::new(IdGenerator::new());
@@ -104,7 +119,7 @@ mod general_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
 
         let tx = WriteTransaction::new(
@@ -1088,7 +1103,10 @@ mod general_tests {
 
     #[test]
     fn test_edge_commit_does_not_force_adjacency_compaction() {
-        let (mut tx, _temp_dir) = create_test_write_tx();
+        // Background maintenance disabled: this test asserts the edge is still
+        // in the *delta* layer after commit, which a background compaction is
+        // entitled to change moments later (Issue #3810).
+        let (mut tx, _temp_dir) = create_test_write_tx_unmanaged();
         let current = Arc::clone(&tx.current);
 
         let props = PropertyMapBuilder::new().build();
@@ -1123,7 +1141,7 @@ mod general_tests {
         let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
-        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let current_timestamp = Arc::new(CommitClock::new(time::now()));
         let node_id_gen = Arc::new(IdGenerator::new());
         let edge_id_gen = Arc::new(IdGenerator::new());
         let version_id_gen = Arc::new(IdGenerator::new());
@@ -1135,7 +1153,7 @@ mod general_tests {
         // Create initial transaction to set up nodes and one edge
         let snapshot1 = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
         let mut tx1 = WriteTransaction::new(
             tx_id_gen.next(),
@@ -1167,7 +1185,7 @@ mod general_tests {
         // Create second transaction with interleaved operations
         let snapshot2 = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
         let mut tx2 = WriteTransaction::new(
             tx_id_gen.next(),
@@ -1583,7 +1601,7 @@ mod general_tests {
         let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
-        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let current_timestamp = Arc::new(CommitClock::new(time::now()));
         let node_id_gen = Arc::new(IdGenerator::new());
         let edge_id_gen = Arc::new(IdGenerator::new());
         let version_id_gen = Arc::new(IdGenerator::new());
@@ -1593,7 +1611,7 @@ mod general_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
 
         let tx = WriteTransaction::new(
@@ -1630,7 +1648,7 @@ mod conflict_detection_tests {
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
-        current_timestamp: Arc<Mutex<Timestamp>>,
+        current_timestamp: Arc<CommitClock>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<IdGenerator>,
         edge_id_gen: Arc<IdGenerator>,
@@ -1650,7 +1668,7 @@ mod conflict_detection_tests {
             let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
             let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
-            let current_timestamp = Arc::new(Mutex::new(time::now()));
+            let current_timestamp = Arc::new(CommitClock::new(time::now()));
             let node_id_gen = Arc::new(IdGenerator::new());
             let edge_id_gen = Arc::new(IdGenerator::new());
             let version_id_gen = Arc::new(IdGenerator::new());
@@ -1675,8 +1693,8 @@ mod conflict_detection_tests {
         /// Create a new write transaction using the shared infrastructure.
         fn create_tx(&self) -> WriteTransaction {
             let snapshot = TransactionSnapshot {
-                snapshot_timestamp: *self.current_timestamp.lock().unwrap(),
-                active_transactions: Arc::new(std::collections::HashSet::new()),
+                snapshot_timestamp: self.current_timestamp.load(),
+                active_transactions: None,
             };
 
             WriteTransaction::new(
@@ -2695,7 +2713,7 @@ mod clock_skew_tests {
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
-        current_timestamp: Arc<Mutex<Timestamp>>,
+        current_timestamp: Arc<CommitClock>,
         commit_clock_observed_at: Arc<Mutex<Instant>>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<IdGenerator>,
@@ -2715,7 +2733,7 @@ mod clock_skew_tests {
             let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
             let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
-            let current_timestamp = Arc::new(Mutex::new(time::now()));
+            let current_timestamp = Arc::new(CommitClock::new(time::now()));
             let commit_clock_observed_at = Arc::new(Mutex::new(Instant::now()));
             let node_id_gen = Arc::new(IdGenerator::new());
             let edge_id_gen = Arc::new(IdGenerator::new());
@@ -2740,7 +2758,7 @@ mod clock_skew_tests {
         }
 
         fn create_tx(&self) -> WriteTransaction {
-            let snapshot_ts = *self.current_timestamp.lock().unwrap();
+            let snapshot_ts = self.current_timestamp.load();
             let snapshot = self.visibility_manager.capture_snapshot(snapshot_ts);
 
             WriteTransaction::new(
@@ -2759,7 +2777,7 @@ mod clock_skew_tests {
         }
 
         fn create_tx_with_shared_observation_clock(&self) -> WriteTransaction {
-            let snapshot_ts = *self.current_timestamp.lock().unwrap();
+            let snapshot_ts = self.current_timestamp.load();
             let snapshot = self.visibility_manager.capture_snapshot(snapshot_ts);
 
             WriteTransaction::new_with_clock_observed_at(
@@ -2791,9 +2809,11 @@ mod clock_skew_tests {
 
         // Simulate backward skew: previous commit timestamp is 10 mins in future
         {
-            let mut ts = harness.current_timestamp.lock().unwrap();
             let future_time = time::now().wallclock() + 10 * 60 * 1_000_000;
-            *ts = crate::core::hlc::HybridTimestamp::new(future_time, 0).unwrap();
+            harness
+                .current_timestamp
+                .reset_to(crate::core::hlc::HybridTimestamp::new(future_time, 0).unwrap())
+                .unwrap();
         }
 
         let result = tx.commit();
@@ -2824,9 +2844,11 @@ mod clock_skew_tests {
 
         // Simulate forward jump: previous commit timestamp is 2 hours in past
         {
-            let mut ts = harness.current_timestamp.lock().unwrap();
             let past_time = time::now().wallclock() - 2 * 60 * 60 * 1_000_000;
-            *ts = crate::core::hlc::HybridTimestamp::new(past_time, 0).unwrap();
+            harness
+                .current_timestamp
+                .reset_to(crate::core::hlc::HybridTimestamp::new(past_time, 0).unwrap())
+                .unwrap();
         }
 
         let result = tx.commit();
@@ -2854,9 +2876,11 @@ mod clock_skew_tests {
         tx.create_node("Test", props).unwrap();
 
         {
-            let mut ts = harness.current_timestamp.lock().unwrap();
             let old_frontier = time::now().wallclock() - (6 * 60 * 60 * 1_000_000);
-            *ts = crate::core::hlc::HybridTimestamp::new(old_frontier, 0).unwrap();
+            harness
+                .current_timestamp
+                .reset_to(crate::core::hlc::HybridTimestamp::new(old_frontier, 0).unwrap())
+                .unwrap();
         }
 
         let old_observed_at = {
@@ -2893,9 +2917,11 @@ mod clock_skew_tests {
 
         let idle_gap_us = super::MAX_FORWARD_JUMP_US + 2_000_000;
         {
-            let mut ts = harness.current_timestamp.lock().unwrap();
             let past_time = time::now().wallclock() - idle_gap_us;
-            *ts = crate::core::hlc::HybridTimestamp::new(past_time, 0).unwrap();
+            harness
+                .current_timestamp
+                .reset_to(crate::core::hlc::HybridTimestamp::new(past_time, 0).unwrap())
+                .unwrap();
         }
 
         {
@@ -2933,7 +2959,7 @@ mod timestamp_ordering_tests {
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
-        current_timestamp: Arc<Mutex<Timestamp>>,
+        current_timestamp: Arc<CommitClock>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<IdGenerator>,
         edge_id_gen: Arc<IdGenerator>,
@@ -2952,7 +2978,7 @@ mod timestamp_ordering_tests {
             let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
             let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
-            let current_timestamp = Arc::new(Mutex::new(time::now()));
+            let current_timestamp = Arc::new(CommitClock::new(time::now()));
             let node_id_gen = Arc::new(IdGenerator::new());
             let edge_id_gen = Arc::new(IdGenerator::new());
             let version_id_gen = Arc::new(IdGenerator::new());
@@ -2976,8 +3002,8 @@ mod timestamp_ordering_tests {
 
         fn create_tx(&self) -> WriteTransaction {
             let snapshot = TransactionSnapshot {
-                snapshot_timestamp: *self.current_timestamp.lock().unwrap(),
-                active_transactions: Arc::new(std::collections::HashSet::new()),
+                snapshot_timestamp: self.current_timestamp.load(),
+                active_transactions: None,
             };
 
             WriteTransaction::new(
@@ -3014,7 +3040,7 @@ mod timestamp_ordering_tests {
             tx.commit().unwrap();
 
             // Record the current timestamp after commit
-            let ts = *harness.current_timestamp.lock().unwrap();
+            let ts = harness.current_timestamp.load();
             timestamps.push(ts);
         }
 
@@ -3187,7 +3213,7 @@ mod timestamp_ordering_tests {
     fn test_rollback_does_not_advance_current_timestamp() {
         let harness = TestHarness::new();
 
-        let ts_before = *harness.current_timestamp.lock().unwrap();
+        let ts_before = harness.current_timestamp.load();
 
         // Build a transaction with work but drop it without committing (implicit rollback)
         {
@@ -3197,7 +3223,7 @@ mod timestamp_ordering_tests {
             // tx is dropped here → rollback; current_timestamp must not change
         }
 
-        let ts_after_rollback = *harness.current_timestamp.lock().unwrap();
+        let ts_after_rollback = harness.current_timestamp.load();
         assert_eq!(
             ts_before, ts_after_rollback,
             "Rollback must not advance current_timestamp"
@@ -3209,7 +3235,7 @@ mod timestamp_ordering_tests {
             .unwrap();
         tx2.commit().unwrap();
 
-        let ts_after_commit = *harness.current_timestamp.lock().unwrap();
+        let ts_after_commit = harness.current_timestamp.load();
         assert!(
             ts_after_commit > ts_before,
             "Commit after rollback must produce timestamp > pre-rollback timestamp \
@@ -3297,7 +3323,7 @@ mod bitemporal_validation_tests {
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
-        current_timestamp: Arc<Mutex<Timestamp>>,
+        current_timestamp: Arc<CommitClock>,
         node_id_gen: Arc<IdGenerator>,
         edge_id_gen: Arc<IdGenerator>,
         version_id_gen: Arc<IdGenerator>,
@@ -3316,7 +3342,7 @@ mod bitemporal_validation_tests {
             let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
             let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
-            let current_timestamp = Arc::new(Mutex::new(time::now()));
+            let current_timestamp = Arc::new(CommitClock::new(time::now()));
             let node_id_gen = Arc::new(IdGenerator::new());
             let edge_id_gen = Arc::new(IdGenerator::new());
             let version_id_gen = Arc::new(IdGenerator::new());
@@ -3340,7 +3366,7 @@ mod bitemporal_validation_tests {
 
         fn begin_write(&self) -> WriteTransaction {
             let tx_id = self.tx_id_gen.next();
-            let snapshot_ts = *self.current_timestamp.lock().unwrap();
+            let snapshot_ts = self.current_timestamp.load();
             let snapshot = self.visibility_manager.capture_snapshot(snapshot_ts);
 
             WriteTransaction::new(
@@ -3999,7 +4025,7 @@ mod find_nodes_by_property_tests {
         let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
-        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let current_timestamp = Arc::new(CommitClock::new(time::now()));
         let node_id_gen = Arc::new(IdGenerator::new());
         let edge_id_gen = Arc::new(IdGenerator::new());
         let version_id_gen = Arc::new(IdGenerator::new());
@@ -4008,7 +4034,7 @@ mod find_nodes_by_property_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
 
         let tx = WriteTransaction::new(
@@ -4051,7 +4077,7 @@ mod find_nodes_by_property_tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
-        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let current_timestamp = Arc::new(CommitClock::new(time::now()));
         let node_id_gen = Arc::new(IdGenerator::new());
         let edge_id_gen = Arc::new(IdGenerator::new());
         let version_id_gen = Arc::new(IdGenerator::new());
@@ -4059,7 +4085,7 @@ mod find_nodes_by_property_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
 
         let tx = WriteTransaction::new(
@@ -4116,7 +4142,7 @@ mod find_nodes_by_property_tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
-        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let current_timestamp = Arc::new(CommitClock::new(time::now()));
         let node_id_gen = Arc::new(IdGenerator::new());
         let edge_id_gen = Arc::new(IdGenerator::new());
         let version_id_gen = Arc::new(IdGenerator::new());
@@ -4124,7 +4150,7 @@ mod find_nodes_by_property_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
 
         let mut tx = WriteTransaction::new(
@@ -4167,7 +4193,7 @@ mod find_nodes_by_property_tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
-        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let current_timestamp = Arc::new(CommitClock::new(time::now()));
         let node_id_gen = Arc::new(IdGenerator::new());
         let edge_id_gen = Arc::new(IdGenerator::new());
         let version_id_gen = Arc::new(IdGenerator::new());
@@ -4175,7 +4201,7 @@ mod find_nodes_by_property_tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: Arc::new(std::collections::HashSet::new()),
+            active_transactions: None,
         };
 
         let mut tx = WriteTransaction::new(
@@ -4226,7 +4252,7 @@ mod lock_poisoning_tests {
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
-        current_timestamp: Arc<Mutex<Timestamp>>,
+        current_timestamp: Arc<CommitClock>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<IdGenerator>,
         edge_id_gen: Arc<IdGenerator>,
@@ -4243,7 +4269,7 @@ mod lock_poisoning_tests {
             let temp_dir = TempDir::new().unwrap();
             let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
             let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
-            let current_timestamp = Arc::new(Mutex::new(time::now()));
+            let current_timestamp = Arc::new(CommitClock::new(time::now()));
             let node_id_gen = Arc::new(IdGenerator::new());
             let edge_id_gen = Arc::new(IdGenerator::new());
             let version_id_gen = Arc::new(IdGenerator::new());
@@ -4266,11 +4292,11 @@ mod lock_poisoning_tests {
 
         fn create_tx_with_timestamp(
             &self,
-            current_timestamp: Arc<Mutex<Timestamp>>,
+            current_timestamp: Arc<CommitClock>,
         ) -> WriteTransaction {
             let snapshot = TransactionSnapshot {
                 snapshot_timestamp: time::now(),
-                active_transactions: Arc::new(std::collections::HashSet::new()),
+                active_transactions: None,
             };
             WriteTransaction::new(
                 self.tx_id_gen.next(),
@@ -4289,12 +4315,12 @@ mod lock_poisoning_tests {
 
         fn create_tx_with_clock(
             &self,
-            current_timestamp: Arc<Mutex<Timestamp>>,
+            current_timestamp: Arc<CommitClock>,
             commit_clock_observed_at: Arc<Mutex<Instant>>,
         ) -> WriteTransaction {
             let snapshot = TransactionSnapshot {
                 snapshot_timestamp: time::now(),
-                active_transactions: Arc::new(std::collections::HashSet::new()),
+                active_transactions: None,
             };
             WriteTransaction::new_with_clock_observed_at(
                 self.tx_id_gen.next(),
@@ -4325,10 +4351,15 @@ mod lock_poisoning_tests {
     /// Poisoning `current_timestamp` causes `commit()` to return `LockPoisoned`
     /// instead of panicking.
     #[test]
+    // Produces `Error::Transaction(LockPoisoned)`, which bumps the process-global
+    // `error_transaction_total` metric under the `observability` feature. Join the
+    // `metrics` serial group so it never runs concurrently with the delta-based
+    // metric asserters that read that counter (de-flake, Wave-8 Lane P).
+    #[cfg_attr(feature = "observability", serial_test::serial(metrics))]
     fn test_timestamp_lock_poisoning_during_commit() {
         let harness = TestHarness::new();
-        let poisoned_ts: Arc<Mutex<Timestamp>> = Arc::new(Mutex::new(time::now()));
-        poison_mutex(&poisoned_ts);
+        let poisoned_ts: Arc<CommitClock> = Arc::new(CommitClock::new(time::now()));
+        poisoned_ts.poison_for_test();
         assert!(poisoned_ts.is_poisoned());
 
         let mut tx = harness.create_tx_with_timestamp(poisoned_ts);
@@ -4354,9 +4385,13 @@ mod lock_poisoning_tests {
     /// When multiple threads attempt concurrent commits against a poisoned lock,
     /// each thread gets a `LockPoisoned` error rather than panicking.
     #[test]
+    // Each thread produces `Error::Transaction(LockPoisoned)`, bumping the
+    // process-global `error_transaction_total` metric under `observability`. Join
+    // the `metrics` serial group (de-flake, Wave-8 Lane P).
+    #[cfg_attr(feature = "observability", serial_test::serial(metrics))]
     fn test_concurrent_commits_with_poisoned_lock() {
-        let poisoned_ts: Arc<Mutex<Timestamp>> = Arc::new(Mutex::new(time::now()));
-        poison_mutex(&poisoned_ts);
+        let poisoned_ts: Arc<CommitClock> = Arc::new(CommitClock::new(time::now()));
+        poisoned_ts.poison_for_test();
         assert!(poisoned_ts.is_poisoned());
 
         let num_threads = 4;
@@ -4398,6 +4433,10 @@ mod lock_poisoning_tests {
     /// Poisoning `commit_clock_observed_at` causes `commit()` to return
     /// `LockPoisoned` via the adaptive forward-jump guard, not a panic.
     #[test]
+    // Produces `Error::Transaction(LockPoisoned)`, bumping the process-global
+    // `error_transaction_total` metric under `observability`. Join the `metrics`
+    // serial group (de-flake, Wave-8 Lane P).
+    #[cfg_attr(feature = "observability", serial_test::serial(metrics))]
     fn test_commit_clock_observed_at_lock_poisoning() {
         let harness = TestHarness::new();
         let poisoned_clock: Arc<Mutex<Instant>> = Arc::new(Mutex::new(Instant::now()));
@@ -4448,7 +4487,7 @@ mod buffer_aware_read_tests {
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
-        current_timestamp: Arc<Mutex<Timestamp>>,
+        current_timestamp: Arc<CommitClock>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<IdGenerator>,
         edge_id_gen: Arc<IdGenerator>,
@@ -4467,7 +4506,7 @@ mod buffer_aware_read_tests {
             let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
             let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
-            let current_timestamp = Arc::new(Mutex::new(time::now()));
+            let current_timestamp = Arc::new(CommitClock::new(time::now()));
             let node_id_gen = Arc::new(IdGenerator::new());
             let edge_id_gen = Arc::new(IdGenerator::new());
             let version_id_gen = Arc::new(IdGenerator::new());
@@ -4491,8 +4530,8 @@ mod buffer_aware_read_tests {
 
         fn create_tx(&self) -> WriteTransaction {
             let snapshot = TransactionSnapshot {
-                snapshot_timestamp: *self.current_timestamp.lock().unwrap(),
-                active_transactions: Arc::new(std::collections::HashSet::new()),
+                snapshot_timestamp: self.current_timestamp.load(),
+                active_transactions: None,
             };
 
             WriteTransaction::new(

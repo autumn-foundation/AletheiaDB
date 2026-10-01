@@ -166,7 +166,7 @@ async fn status_unauthenticated_401_byte_parity() {
     let (l_status, l_body) = legacy_request(router, "GET", "/status", None, None).await;
     assert_eq!(s_status, 401);
     assert_eq!(s_status, l_status);
-    assert_eq!(s_body["code"], "UNAUTHENTICATED");
+    assert_eq!(s_body["error"]["code"], "UNAUTHENTICATED");
     assert_eq!(s_body, l_body, "uniform 401 must equal legacy");
 }
 
@@ -292,7 +292,11 @@ async fn admin_revoke_key_behavior() {
     )
     .await;
     assert_eq!(status, 404);
-    assert_eq!(body["success"], false);
+    assert!(
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "NOT_FOUND");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -317,6 +321,7 @@ async fn get_node_byte_parity_with_legacy_mcp() {
     assert_eq!(status, 200);
 
     let legacy: Value = serde_json::from_str(&mcp_server(&db).get_node(GetNodeRequest {
+        namespace: None,
         node_id: node_id.as_u64(),
         include_vectors: None,
     }))
@@ -345,6 +350,7 @@ async fn get_node_include_vectors_parity() {
     )
     .await;
     let legacy: Value = serde_json::from_str(&mcp_server(&db).get_node(GetNodeRequest {
+        namespace: None,
         node_id: node_id.as_u64(),
         include_vectors: Some(true),
     }))
@@ -364,6 +370,7 @@ async fn get_node_anonymous_mode_parity() {
     let (status, body) = new_get(&client, &format!("/nodes/{}", node_id.as_u64()), None).await;
     assert_eq!(status, 200);
     let legacy: Value = serde_json::from_str(&mcp_server(&db).get_node(GetNodeRequest {
+        namespace: None,
         node_id: node_id.as_u64(),
         include_vectors: None,
     }))
@@ -391,6 +398,7 @@ async fn list_nodes_byte_parity_with_legacy_mcp() {
     let (status, body) = new_get(&client, "/nodes?label=Person", Some(READER_TOKEN)).await;
     assert_eq!(status, 200);
     let legacy: Value = serde_json::from_str(&mcp_server(&db).list_nodes(ListNodesRequest {
+        namespace: None,
         label: Some("Person".to_string()),
         property_key: None,
         property_value: None,
@@ -498,7 +506,7 @@ async fn mcp_tools_list_advertises_three_node_tools_with_read_class() {
 /// ship class-ungated.
 ///
 /// The reverse inclusion (registry ⊆ routable) is deliberately NOT asserted
-/// (coordinator-directed): the registry is inventory-anchored to all 46 tools
+/// (coordinator-directed): the registry is inventory-anchored to all 74 tools
 /// upfront (`registry_matches_inventory_exactly` in `tests/security_rbac.rs`
 /// pins it to `tests/parity/inventory.json`), while handlers become routable one
 /// slice at a time during the autumn port. The registry legitimately contains
@@ -546,6 +554,80 @@ async fn mcp_routable_tools_are_all_classified() {
         assert!(
             rbac::tool_access_class(name).is_some(),
             "routable tool {name} has no class"
+        );
+    }
+}
+
+/// SECURITY. The budgetable edge reads forward RAW ARGUMENTS to
+/// `AletheiaMcpServer::dispatch_tool_json` with a **hardcoded literal** tool
+/// name pinned to the route (e.g. the `get_edge` handler pins `"get_edge"`). A
+/// read-gated (`Authorized<ReadClass>`) handler that pinned a WRITE tool's name
+/// would route a caller past a read gate into a write tool — privilege
+/// escalation. This test makes that impossible: for every pinned entry in
+/// `edge_tools::DISPATCH_ROUTED_READ_TOOLS`, the pinned name must (1) be a
+/// **routed** tool on `/mcp` (pinned ↔ routed) and (2) resolve in the RBAC
+/// registry to **exactly** the [`AccessClass`] of the handler's `Authorized<C>`
+/// gate (routed ↔ class). Since every dispatch-routed read is `ReadClass`, any
+/// drift to a non-Read (e.g. write) pinned name fails here.
+#[tokio::test]
+async fn dispatch_pinned_names_match_routed_class() {
+    use aletheia_server::edge_tools::{ALL_DISPATCH_ROUTED, DISPATCH_ROUTED_READ_TOOLS};
+    use std::collections::BTreeSet;
+
+    let (db, store, _) = fixture();
+    let client = build_server_client(db, store, AuthMode::Required);
+
+    // The set of tool names actually routed on `/mcp`.
+    let rpc = json!({ "jsonrpc": "2.0", "id": 77, "method": "tools/list" });
+    let resp = client
+        .post("/mcp")
+        .header("authorization", &format!("Bearer {READER_TOKEN}"))
+        .json(&rpc)
+        .send()
+        .await;
+    assert_eq!(resp.status.as_u16(), 200);
+    let body: Value = serde_json::from_str(&resp.text()).expect("json");
+    let routable: BTreeSet<String> = body["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name").to_string())
+        .collect();
+
+    // Iterate the SUPERSET `ALL_DISPATCH_ROUTED` so EVERY dispatch_tool_json call
+    // site is covered — the budgetable/cursorable slow reads AND the three
+    // non-budgetable provenance-hash-chain tools (`audit_export`, `verify_chain`,
+    // `export_chain_head`, Issue #3524 PR7) that also pin a literal name.
+    assert!(
+        !ALL_DISPATCH_ROUTED.is_empty(),
+        "the pinned-name table must not be empty"
+    );
+    for (pinned, class) in ALL_DISPATCH_ROUTED {
+        // (1) pinned ↔ routed: the literal a handler forwards must be a real,
+        // routed tool name (never a typo or an off-surface name).
+        assert!(
+            routable.contains(*pinned),
+            "pinned dispatch name {pinned:?} is not routed on /mcp: {routable:?}"
+        );
+        // (2) routed ↔ class: the RBAC-registry class of the pinned name must
+        // equal the handler's declared Authorized<C> class. A read-gated
+        // handler pinning a write tool's name would trip this (Write != Read).
+        assert_eq!(
+            rbac::tool_access_class(pinned),
+            Some(*class),
+            "pinned dispatch name {pinned:?} registry class must equal the handler's \
+             Authorized<C> class ({class:?}) — a read handler pinning a write name is escalation"
+        );
+    }
+
+    // Subset invariant: every budgetable-routed entry must appear in the superset,
+    // so `DISPATCH_ROUTED_READ_TOOLS` and `ALL_DISPATCH_ROUTED` can never drift
+    // (a budgetable read added to one but not the other would fail here).
+    for entry in DISPATCH_ROUTED_READ_TOOLS {
+        assert!(
+            ALL_DISPATCH_ROUTED.contains(entry),
+            "DISPATCH_ROUTED_READ_TOOLS entry {entry:?} is missing from the \
+             ALL_DISPATCH_ROUTED superset — the two tables have drifted"
         );
     }
 }

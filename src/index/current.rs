@@ -5,14 +5,52 @@
 //! that must be extremely fast.
 
 use crate::core::graph::{Edge, Node, NodeHeader};
+use crate::core::hasher::IdHashBuilder;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
+use crate::core::namespace::{Namespace, NamespaceId, intern_namespace, resolve_namespace_id};
+use crate::core::property::PropertyMap;
 use crate::index::adjacency::AdjacencyEntry;
-use crate::index::incremental_adjacency::{CompactionScheduler, IncrementalAdjacencyIndex};
-use dashmap::DashMap;
+use crate::index::adjacency_maintenance::{self, AdjacencyMaintenanceConfig};
+use crate::index::incremental_adjacency::{
+    AdjacencyLayerStats, CompactionScheduler, IncrementalAdjacencyIndex,
+};
+use crate::index::property_index::{ValueKey, value_key};
+use dashmap::{DashMap, DashSet};
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
+
+/// One direction's exported CSR arrays: `(node_ids, offsets, edge_ids)`.
+///
+/// Matches [`IncrementalAdjacencyIndex::export_frozen_csr`](crate::index::IncrementalAdjacencyIndex::export_frozen_csr).
+pub type ExportedCsr = (Vec<u64>, Vec<u64>, Vec<u64>);
+
+/// Both directions' exported CSR arrays: `(outgoing, incoming)`.
+pub type ExportedCsrPair = (ExportedCsr, ExportedCsr);
+
+/// Layer occupancy of a database's two adjacency indexes (Issue #3810).
+///
+/// Returned by [`CurrentIndexes::adjacency_stats`],
+/// [`CurrentStorage::adjacency_stats`](crate::storage::current::CurrentStorage::adjacency_stats)
+/// and [`AletheiaDB::adjacency_stats`](crate::AletheiaDB::adjacency_stats).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AdjacencyIndexStats {
+    /// Outgoing (source -> targets) adjacency index.
+    pub outgoing: AdjacencyLayerStats,
+    /// Incoming (target -> sources) adjacency index.
+    pub incoming: AdjacencyLayerStats,
+}
+
+impl AdjacencyIndexStats {
+    /// Whether **both** directions are compacted, i.e. every adjacency read
+    /// currently takes the frozen-CSR fast path.
+    #[inline]
+    pub fn is_fully_compacted(&self) -> bool {
+        self.outgoing.is_compacted() && self.incoming.is_compacted()
+    }
+}
 
 // Note: AdjacencyGuard was removed in favor of MergedAdjacencyGuard from incremental_adjacency.
 // The new guard supports merging frozen CSR + delta buffer on-the-fly.
@@ -43,15 +81,23 @@ use std::thread::JoinHandle;
 /// - **Compaction**: Automatic in background, doesn't block operations
 pub struct CurrentIndexes {
     /// Node ID → Node (O(1) lookup, cold path with full PropertyMap)
-    nodes: DashMap<NodeId, Node>,
+    ///
+    /// Keyed by `NodeId`, an already-unique internal u64, so identity-hashed
+    /// via [`IdHashBuilder`] to avoid SipHash overhead on the point-lookup
+    /// hot path (`get_node`, `get_node_with`, ...).
+    nodes: DashMap<NodeId, Node, IdHashBuilder>,
     /// Node ID → NodeHeader (hot path for label filtering, 16 bytes per entry)
     ///
     /// Kept in sync with `nodes`: every `insert_node` writes a header and every
     /// `remove_node` removes it. Scanning this map for label matches touches far
-    /// less memory than scanning the full `nodes` map.
-    node_headers: DashMap<NodeId, NodeHeader>,
+    /// less memory than scanning the full `nodes` map. Identity-hashed for the
+    /// same reason as `nodes`.
+    node_headers: DashMap<NodeId, NodeHeader, IdHashBuilder>,
     /// Edge ID → Edge (O(1) lookup)
-    edges: DashMap<EdgeId, Edge>,
+    ///
+    /// Identity-hashed for the same reason as `nodes` — `EdgeId` is already a
+    /// unique internal u64.
+    edges: DashMap<EdgeId, Edge, IdHashBuilder>,
     /// Outgoing edges: source node → adjacency list (incremental with O(1) inserts)
     outgoing: Arc<IncrementalAdjacencyIndex>,
     /// Incoming edges: target node → adjacency list (incremental with O(1) inserts)
@@ -73,31 +119,107 @@ pub struct CurrentIndexes {
     /// the storage's own id generator is never advanced and cannot bound a
     /// scan.
     max_node_id: AtomicU64,
+    /// Secondary namespace → member-node membership index (Issue #3349, PR2).
+    ///
+    /// A derived, **non-persisted** acceleration structure mapping each
+    /// namespace to the set of node ids that currently live in it, so a
+    /// namespace-scoped read can enumerate members without a full property
+    /// scan. The durable ground truth is the reserved ride-along property on
+    /// each node ([`crate::core::namespace::NAMESPACE_KEY`]); this index is
+    /// rebuilt for free at load / WAL-replay because every node insertion
+    /// funnels through [`insert_node`](Self::insert_node).
+    ///
+    /// # Lock discipline
+    ///
+    /// This is a **leaf** in the lock-acquisition order: a lock-free `DashMap`
+    /// of lock-free `DashSet`s, mutated only inside
+    /// `insert_node`/`remove_node`, and it never calls back into `historical`,
+    /// `wal`, or `current_timestamp`.
+    ///
+    /// Keyed by the interned [`NamespaceId`] (Issue #3349, PR2 performance) so
+    /// each per-edge scoped-read probe is an integer (identity) hash rather than
+    /// a heap-string hash. The inner member set is likewise identity-hashed (its
+    /// keys are `NodeId`s — already unique u64s), so the per-edge `contains`
+    /// probe is a plain integer hash, not SipHash.
+    ns_nodes: DashMap<NamespaceId, DashSet<NodeId, IdHashBuilder>, IdHashBuilder>,
+    /// Secondary namespace → member-edge membership index (Issue #3349, PR2).
+    /// The edge counterpart of [`ns_nodes`](Self::ns_nodes); see its docs.
+    ns_edges: DashMap<NamespaceId, DashSet<EdgeId, IdHashBuilder>, IdHashBuilder>,
+    /// Opt-in registry of `(label_id, prop_key_id)` pairs that have a secondary
+    /// equality index enabled. Empty by default — the property-index maintenance
+    /// hooks in `insert_node` / `remove_node` short-circuit on `is_empty()`, so a
+    /// database with no property index pays only that check on the write path.
+    prop_index_enabled: DashMap<(InternedString, InternedString), ()>,
+    /// Secondary equality index: `(label_id, prop_key_id, ValueKey)` → the set of
+    /// node ids currently holding that value.
+    ///
+    /// A **derived, non-persisted** acceleration structure — the durable ground
+    /// truth is each node's `PropertyMap`. Rebuilt for free at load / WAL-replay
+    /// because every node insertion funnels through
+    /// [`insert_node`](Self::insert_node) (the opt-in *decision* is in-memory
+    /// only; re-enable after restart to backfill). See
+    /// [`crate::index::property_index`] for the full design, the `Float`
+    /// exclusion rationale, and the namespace fail-closed contract.
+    ///
+    /// # Lock discipline
+    ///
+    /// A **leaf** in the lock-acquisition order (like `ns_nodes`): lock-free
+    /// `DashMap` of lock-free `DashSet`s, mutated only inside
+    /// `insert_node`/`remove_node`, never calling back into `historical`, `wal`,
+    /// or `current_timestamp`. The inner set is `NodeId`-keyed so it is
+    /// identity-hashed, not SipHashed.
+    prop_index: DashMap<(InternedString, InternedString, ValueKey), DashSet<NodeId, IdHashBuilder>>,
 }
 
 impl CurrentIndexes {
     /// Create new empty indexes with incremental adjacency.
     ///
-    /// Uses incremental CSR adjacency indexes for O(1) inserts and deletes.
-    /// No background compaction - call `compact_adjacency()` manually when needed.
+    /// The adjacency indexes are registered with the shared background
+    /// maintenance worker (Issue #3810), which compacts them once writes go
+    /// quiet so reads reach the frozen-CSR fast path. Registration is a `Weak`
+    /// reference: dropping these indexes deregisters them, with no shutdown
+    /// call and no `Drop` impl required.
+    ///
+    /// Use [`with_maintenance_config`](Self::with_maintenance_config) with
+    /// [`AdjacencyMaintenanceConfig::disabled`] for the pre-#3810 behavior
+    /// (compaction only when `compact_adjacency()` is called explicitly).
     pub fn new() -> Self {
+        Self::with_maintenance_config(AdjacencyMaintenanceConfig::default())
+    }
+
+    /// Create new empty indexes with an explicit background-maintenance policy.
+    pub fn with_maintenance_config(maintenance: AdjacencyMaintenanceConfig) -> Self {
+        let outgoing = Arc::new(IncrementalAdjacencyIndex::new());
+        let incoming = Arc::new(IncrementalAdjacencyIndex::new());
+        adjacency_maintenance::register(&outgoing, maintenance.clone());
+        adjacency_maintenance::register(&incoming, maintenance);
+
         CurrentIndexes {
-            nodes: DashMap::new(),
-            node_headers: DashMap::new(),
-            edges: DashMap::new(),
-            outgoing: Arc::new(IncrementalAdjacencyIndex::new()),
-            incoming: Arc::new(IncrementalAdjacencyIndex::new()),
+            nodes: DashMap::with_hasher(BuildHasherDefault::default()),
+            node_headers: DashMap::with_hasher(BuildHasherDefault::default()),
+            edges: DashMap::with_hasher(BuildHasherDefault::default()),
+            outgoing,
+            incoming,
             outgoing_compaction: None,
             incoming_compaction: None,
             max_node_id: AtomicU64::new(0),
+            ns_nodes: DashMap::with_hasher(BuildHasherDefault::default()),
+            ns_edges: DashMap::with_hasher(BuildHasherDefault::default()),
+            prop_index_enabled: DashMap::new(),
+            prop_index: DashMap::new(),
         }
     }
 
-    /// Create new indexes with background compaction enabled.
+    /// Create new indexes with a **dedicated** per-index compaction thread.
     ///
-    /// Background thread will automatically compact adjacency indexes
-    /// when thresholds are exceeded. Call `shutdown_background_compaction()`
-    /// before dropping to cleanly stop the background thread.
+    /// Two threads (outgoing + incoming) are spawned for these indexes alone and
+    /// must be stopped with [`shutdown_background_compaction`](Self::shutdown_background_compaction)
+    /// before dropping.
+    ///
+    /// Prefer plain [`new`](Self::new): since Issue #3810 it enrolls the indexes
+    /// in the shared, process-wide maintenance worker instead -- one thread for
+    /// the whole process, no shutdown obligation. These indexes deliberately do
+    /// **not** also enroll there, so exactly one compactor owns them.
     pub fn new_with_background_compaction() -> Self {
         let outgoing = Arc::new(IncrementalAdjacencyIndex::new());
         let incoming = Arc::new(IncrementalAdjacencyIndex::new());
@@ -110,14 +232,18 @@ impl CurrentIndexes {
         let incoming_handle = incoming_scheduler.start();
 
         CurrentIndexes {
-            nodes: DashMap::new(),
-            node_headers: DashMap::new(),
-            edges: DashMap::new(),
+            nodes: DashMap::with_hasher(BuildHasherDefault::default()),
+            node_headers: DashMap::with_hasher(BuildHasherDefault::default()),
+            edges: DashMap::with_hasher(BuildHasherDefault::default()),
             outgoing,
             incoming,
             outgoing_compaction: Some((outgoing_scheduler, outgoing_handle)),
             incoming_compaction: Some((incoming_scheduler, incoming_handle)),
             max_node_id: AtomicU64::new(0),
+            ns_nodes: DashMap::with_hasher(BuildHasherDefault::default()),
+            ns_edges: DashMap::with_hasher(BuildHasherDefault::default()),
+            prop_index_enabled: DashMap::new(),
+            prop_index: DashMap::new(),
         }
     }
 
@@ -148,6 +274,18 @@ impl CurrentIndexes {
         Ok(())
     }
 
+    /// Snapshot of both adjacency indexes' layer occupancy (Issue #3810).
+    ///
+    /// `delta_edges == 0 && tombstones == 0` is exactly the condition under
+    /// which reads take the frozen-CSR fast path, so this is the direct
+    /// observable for whether background maintenance has caught up.
+    pub fn adjacency_stats(&self) -> AdjacencyIndexStats {
+        AdjacencyIndexStats {
+            outgoing: self.outgoing.layer_stats(),
+            incoming: self.incoming.layer_stats(),
+        }
+    }
+
     /// Get frozen edge count for outgoing adjacency (for testing).
     #[doc(hidden)]
     pub fn frozen_edge_count(&self) -> usize {
@@ -173,8 +311,147 @@ impl CurrentIndexes {
         // node visibility itself is governed by the DashMap insert below.
         self.max_node_id
             .fetch_max(node.id.as_u64().wrapping_add(1), Ordering::Relaxed);
+        // Maintain the namespace membership index (Issue #3349). Read the
+        // namespace off the node before moving it into the map. The insert is
+        // idempotent, so re-inserting on an in-place update is a no-op (the
+        // namespace is immutable for the life of the entity).
+        let node_id = node.id;
+        // Derive the interned namespace id from the node's durable ride-along
+        // string (Issue #3349, PR2). This is the single derivation site for the
+        // node membership index, so every hydration path (write, WAL replay,
+        // index-persistence load, cold rehydration) that funnels through
+        // `insert_node` produces the identical id for the same namespace.
+        let ns_id = intern_namespace(&node.namespace());
+        // Maintain the secondary property (equality) index. Only pay the cost
+        // when at least one (label, property) is enabled; otherwise this is a
+        // single `is_empty` check on the create/update hot path. On an in-place
+        // update the prior node is still present in `self.nodes`, so we capture
+        // its LABEL and properties before overwriting: a create sees no prior
+        // node (pure add), a same-label update diffs old vs new to de-index the
+        // stale value, and a LABEL-CHANGING replace (`replace_node`, Issue
+        // #3549 — full overwrite reaches `insert_node` with a new label)
+        // de-indexes under the old label and re-indexes under the new one. This
+        // is the single choke point every hydration path funnels through
+        // (create, update, replace, WAL replay, index-persistence load), so the
+        // index rebuilds for free at load.
+        //
+        // ORDERING: the node must be published in `self.nodes` BEFORE it is
+        // published in the property index, never the other way round. The index
+        // is a pointer *to* the node, so indexing first opens a window in which
+        // `find_nodes_by_property` returns an id that `get_node` cannot resolve
+        // -- a lookup racing an insert gets `NodeNotFound` for a node the index
+        // just told it about. The window is a couple of instructions wide, and
+        // it went unnoticed because group commit could only apply ~93 writes a
+        // second; once commits actually batch it reproduces in seconds.
+        let reindex = if self.prop_index_enabled.is_empty() {
+            None
+        } else {
+            let old = self.nodes.get(&node_id).map(|e| {
+                let prior = e.value();
+                (prior.label, prior.properties.clone())
+            });
+            // Cloning the new label and property map is cheap -- `PropertyMap`
+            // is `Arc`-backed, so this is a refcount bump, not a deep copy --
+            // and it is what lets the node move into the map first.
+            Some((old, node.label, node.properties.clone()))
+        };
+
         self.nodes.insert(node.id, node);
+
+        if let Some((old, new_label, new_props)) = reindex {
+            let (old_label, old_props) = match &old {
+                Some((label, props)) => (Some(*label), Some(props)),
+                None => (None, None),
+            };
+            self.reindex_node_property(node_id, old_label, old_props, new_label, &new_props);
+        }
+
         self.node_headers.insert(header.id, header);
+        self.ns_nodes.entry(ns_id).or_default().insert(node_id);
+    }
+
+    /// Reconcile a node's property-index membership across a create, update, or
+    /// label-changing replace. Called from [`insert_node`](Self::insert_node); a
+    /// pure create passes `old_label = None` / `old_props = None`.
+    ///
+    /// Old and new labels are handled **independently** so a label change
+    /// (`old_label != new_label`, e.g. `replace_node`) both de-indexes the
+    /// node's old value under the *old* label and indexes its new value under
+    /// the *new* label — otherwise a lone new-label filter would leave a stale
+    /// entry under the old label (false positive) and, because the old and new
+    /// values compare equal, skip adding under the new label (false negative).
+    /// The `old_vk == new_vk` no-op fast path applies only to a same-label
+    /// update, where a bucket move is genuinely unnecessary.
+    fn reindex_node_property(
+        &self,
+        id: NodeId,
+        old_label: Option<InternedString>,
+        old_props: Option<&PropertyMap>,
+        new_label: InternedString,
+        new_props: &PropertyMap,
+    ) {
+        for entry in self.prop_index_enabled.iter() {
+            let (lbl, key) = *entry.key();
+            let is_old = Some(lbl) == old_label;
+            let is_new = lbl == new_label;
+            if !is_old && !is_new {
+                continue;
+            }
+            if is_old && is_new {
+                // Same-label create/update: move the value bucket only if it
+                // actually changed.
+                let old_vk = old_props
+                    .and_then(|p| p.get_by_interned_key(&key))
+                    .and_then(value_key);
+                let new_vk = new_props.get_by_interned_key(&key).and_then(value_key);
+                if old_vk == new_vk {
+                    continue;
+                }
+                if let Some(ov) = old_vk {
+                    self.prop_index_remove((lbl, key, ov), id);
+                }
+                if let Some(nv) = new_vk {
+                    self.prop_index
+                        .entry((lbl, key, nv))
+                        .or_default()
+                        .insert(id);
+                }
+            } else if is_old {
+                // Label changed away from `lbl`: drop the node's old value.
+                if let Some(ov) = old_props
+                    .and_then(|p| p.get_by_interned_key(&key))
+                    .and_then(value_key)
+                {
+                    self.prop_index_remove((lbl, key, ov), id);
+                }
+            } else {
+                // Label changed to `lbl` (or a fresh create under `lbl`): add the
+                // node's new value.
+                if let Some(nv) = new_props.get_by_interned_key(&key).and_then(value_key) {
+                    self.prop_index
+                        .entry((lbl, key, nv))
+                        .or_default()
+                        .insert(id);
+                }
+            }
+        }
+    }
+
+    /// Remove `id` from a property-index value bucket, reclaiming the bucket if
+    /// it drains empty. Mirrors the `ns_nodes` reclaim: the read guard is dropped
+    /// before `remove_if`, which re-checks emptiness under the shard write lock,
+    /// so a concurrent insert racing the reclaim never loses its set.
+    fn prop_index_remove(&self, key: (InternedString, InternedString, ValueKey), id: NodeId) {
+        let now_empty = match self.prop_index.get(&key) {
+            Some(set) => {
+                set.remove(&id);
+                set.is_empty()
+            }
+            None => false,
+        };
+        if now_empty {
+            self.prop_index.remove_if(&key, |_, set| set.is_empty());
+        }
     }
 
     /// Exclusive upper bound on the node id space: `max(id ever inserted) + 1`.
@@ -213,11 +490,16 @@ impl CurrentIndexes {
             }
             Entry::Vacant(e) => {
                 // New edge: insert into both edge map and adjacency
+                // Single derivation site for the edge membership index id
+                // (Issue #3349, PR2); see `insert_node`.
+                let ns_id = intern_namespace(&edge.namespace());
                 e.insert(edge);
                 self.outgoing
                     .insert(source, AdjacencyEntry::new(target, edge_id, label));
                 self.incoming
                     .insert(target, AdjacencyEntry::new(source, edge_id, label));
+                // Maintain the namespace membership index (Issue #3349).
+                self.ns_edges.entry(ns_id).or_default().insert(edge_id);
             }
         }
     }
@@ -583,6 +865,41 @@ impl CurrentIndexes {
     pub fn remove_node(&self, id: NodeId) -> Option<Node> {
         self.nodes.remove(&id).map(|(_, node)| {
             self.node_headers.remove(&id);
+            // Drop the node from its namespace membership set (Issue #3349).
+            let ns_id = intern_namespace(&node.namespace());
+            let now_empty = match self.ns_nodes.get(&ns_id) {
+                Some(members) => {
+                    members.remove(&id);
+                    members.is_empty()
+                }
+                None => false,
+            };
+            // Reclaim a fully-drained namespace set so the outer DashMap does not
+            // retain empty entries (Issue #3349 A6). The read guard above is
+            // dropped before `remove_if`, which re-checks emptiness under the
+            // shard write lock — so a concurrent insert racing the reclaim never
+            // removes a set that has just become non-empty.
+            if now_empty {
+                self.ns_nodes.remove_if(&ns_id, |_, set| set.is_empty());
+            }
+            // Drop the node from every enabled property-index value bucket. This
+            // single choke point covers plain delete, cascade delete, and
+            // retraction (they all land on `remove_node`).
+            if !self.prop_index_enabled.is_empty() {
+                for entry in self.prop_index_enabled.iter() {
+                    let (lbl, key) = *entry.key();
+                    if lbl != node.label {
+                        continue;
+                    }
+                    if let Some(vk) = node
+                        .properties
+                        .get_by_interned_key(&key)
+                        .and_then(value_key)
+                    {
+                        self.prop_index_remove((lbl, key, vk), id);
+                    }
+                }
+            }
             node
         })
     }
@@ -633,6 +950,21 @@ impl CurrentIndexes {
             // Mark as deleted in both adjacency indexes (O(1))
             self.outgoing.delete(id);
             self.incoming.delete(id);
+            // Drop the edge from its namespace membership set (Issue #3349).
+            let ns_id = intern_namespace(&edge.namespace());
+            let now_empty = match self.ns_edges.get(&ns_id) {
+                Some(members) => {
+                    members.remove(&id);
+                    members.is_empty()
+                }
+                None => false,
+            };
+            // Reclaim a fully-drained namespace set (Issue #3349 A6); the read
+            // guard is dropped before `remove_if`, which re-checks under the shard
+            // write lock so a concurrent insert never loses its set.
+            if now_empty {
+                self.ns_edges.remove_if(&ns_id, |_, set| set.is_empty());
+            }
             edge
         })
     }
@@ -641,6 +973,219 @@ impl CurrentIndexes {
     #[inline]
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    // ========================================================================
+    // Secondary property (equality) index
+    // See `crate::index::property_index` for the design and scope boundaries.
+    // ========================================================================
+
+    /// Enable the equality index for `(label, prop_key)` and backfill it from
+    /// current state. Returns `false` if it was already enabled (no-op).
+    ///
+    /// # Serialization requirement
+    ///
+    /// The caller **must** hold the storage `snapshot_lock.write()` for the
+    /// duration of this call (see
+    /// [`CurrentStorage::enable_property_index`](crate::storage::current::CurrentStorage::enable_property_index)).
+    /// Every write path (`create_node`, `insert_node_direct`,
+    /// `update_node_direct`, `delete_node_direct`) holds `snapshot_lock.read()`,
+    /// so the write lock makes enable **mutually exclusive** with all concurrent
+    /// mutators. Without it, two interleavings corrupt the index: (a) a create
+    /// whose `insert_node` observed `prop_index_enabled` still empty (so it
+    /// skipped maintenance) but installs its node *after* the backfill scan
+    /// passed it — leaving the node in no bucket; and (b) a mid-update node read
+    /// by the backfill under its old value while the update installs the new
+    /// value — leaving it in two buckets.
+    ///
+    /// The enabled flag is published **last** (after the backfill completes), so
+    /// a lock-free reader — which takes no lock — never observes the index as
+    /// "enabled" while it is only half-populated: it keeps scanning until the
+    /// flag flips, and the flag's release on the `prop_index_enabled` shard
+    /// happens-after all bucket writes.
+    pub fn enable_property_index(&self, label: InternedString, prop_key: InternedString) -> bool {
+        if self.prop_index_enabled.contains_key(&(label, prop_key)) {
+            return false;
+        }
+        // Defensively clear any stale buckets a prior disable may have left for
+        // this pair if it raced a concurrent writer (belt-and-suspenders for the
+        // #S3 race; the caller's snapshot_lock.write() already excludes writers).
+        self.prop_index
+            .retain(|k, _| !(k.0 == label && k.1 == prop_key));
+        // Backfill BEFORE publishing the flag: index every current node of this
+        // label whose property value is indexable.
+        for entry in self.nodes.iter() {
+            let node = entry.value();
+            if node.label != label {
+                continue;
+            }
+            if let Some(vk) = node
+                .properties
+                .get_by_interned_key(&prop_key)
+                .and_then(value_key)
+            {
+                self.prop_index
+                    .entry((label, prop_key, vk))
+                    .or_default()
+                    .insert(node.id);
+            }
+        }
+        // Publish the flag last (see the release-ordering note above). Enable
+        // calls are serialized by the caller's write lock, so the
+        // check-then-insert cannot race another enable.
+        self.prop_index_enabled.insert((label, prop_key), ());
+        true
+    }
+
+    /// Disable the equality index for `(label, prop_key)` and purge its buckets.
+    /// Returns `false` if no index was enabled for the pair.
+    pub fn disable_property_index(&self, label: InternedString, prop_key: InternedString) -> bool {
+        if self.prop_index_enabled.remove(&(label, prop_key)).is_none() {
+            return false;
+        }
+        self.prop_index
+            .retain(|k, _| !(k.0 == label && k.1 == prop_key));
+        true
+    }
+
+    /// Whether an equality index is enabled for `(label, prop_key)`.
+    #[inline]
+    pub fn has_property_index(&self, label: InternedString, prop_key: InternedString) -> bool {
+        self.prop_index_enabled.contains_key(&(label, prop_key))
+    }
+
+    /// The `(label_id, prop_key_id)` pairs with an enabled equality index.
+    pub fn property_index_pairs(&self) -> Vec<(InternedString, InternedString)> {
+        self.prop_index_enabled.iter().map(|e| *e.key()).collect()
+    }
+
+    /// Probe the equality index for the node ids currently holding `value` under
+    /// `(label, prop_key)`. Order is unspecified (`DashSet` iteration); callers
+    /// that need determinism sort. Caller must have checked
+    /// [`has_property_index`](Self::has_property_index).
+    pub fn find_nodes_by_property_indexed(
+        &self,
+        label: InternedString,
+        prop_key: InternedString,
+        value: &ValueKey,
+    ) -> Vec<NodeId> {
+        self.prop_index
+            .get(&(label, prop_key, value.clone()))
+            .map(|set| {
+                // Pre-size from the set's own length: `DashSet::iter()`'s
+                // `size_hint()` doesn't reflect the true element count, so an
+                // unsized `collect()` under-guesses and `Vec` grows by
+                // repeated reallocation as it fills (mirrors the
+                // `capacity_hint()` idiom already used by the adjacency
+                // merged-path readers in `storage/current/mod.rs`).
+                let mut result = Vec::with_capacity(set.len());
+                result.extend(set.iter().map(|e| *e.key()));
+                result
+            })
+            .unwrap_or_default()
+    }
+
+    // ========================================================================
+    // Namespace membership index (Issue #3349, PR2)
+    // ========================================================================
+
+    /// Node ids currently in `namespace`, from the secondary membership index.
+    ///
+    /// O(members) with no property scan. Returns an empty vec for a namespace
+    /// with no members. Order is unspecified (DashSet iteration); callers that
+    /// need determinism should sort.
+    pub fn namespace_node_ids(&self, namespace: &Namespace) -> Vec<NodeId> {
+        self.ns_nodes
+            .get(&intern_namespace(namespace))
+            .map(|members| members.iter().map(|e| *e.key()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Edge ids currently in `namespace`, from the secondary membership index.
+    pub fn namespace_edge_ids(&self, namespace: &Namespace) -> Vec<EdgeId> {
+        self.ns_edges
+            .get(&intern_namespace(namespace))
+            .map(|members| members.iter().map(|e| *e.key()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Whether `node_id` currently lives in `namespace` (Issue #3349, PR2).
+    ///
+    /// Convenience wrapper that interns `namespace` and delegates to
+    /// [`node_in_namespace_id`](Self::node_in_namespace_id). Hot loops that probe
+    /// the same scope repeatedly should intern once (via
+    /// [`NamespaceScope::resolved_ids`](crate::core::namespace::NamespaceScope::resolved_ids))
+    /// and call the `_id` form to avoid re-interning per candidate.
+    #[inline]
+    pub fn node_in_namespace(&self, node_id: NodeId, namespace: &Namespace) -> bool {
+        self.node_in_namespace_id(node_id, intern_namespace(namespace))
+    }
+
+    /// Whether `node_id` currently lives in the interned namespace `ns_id`
+    /// (Issue #3349, PR2). O(1): an identity-hashed outer probe plus a set
+    /// membership test — no property load, no `Namespace` allocation, no string
+    /// hashing — so a scoped traversal's per-edge boundary check is two integer
+    /// hash probes.
+    #[inline]
+    pub fn node_in_namespace_id(&self, node_id: NodeId, ns_id: NamespaceId) -> bool {
+        self.ns_nodes
+            .get(&ns_id)
+            .is_some_and(|members| members.contains(&node_id))
+    }
+
+    /// Whether `edge_id` currently lives in `namespace` (Issue #3349, PR2). The
+    /// edge counterpart of [`node_in_namespace`](Self::node_in_namespace).
+    #[inline]
+    pub fn edge_in_namespace(&self, edge_id: EdgeId, namespace: &Namespace) -> bool {
+        self.edge_in_namespace_id(edge_id, intern_namespace(namespace))
+    }
+
+    /// Whether `edge_id` currently lives in the interned namespace `ns_id`
+    /// (Issue #3349, PR2). The edge counterpart of
+    /// [`node_in_namespace_id`](Self::node_in_namespace_id).
+    #[inline]
+    pub fn edge_in_namespace_id(&self, edge_id: EdgeId, ns_id: NamespaceId) -> bool {
+        self.ns_edges
+            .get(&ns_id)
+            .is_some_and(|members| members.contains(&edge_id))
+    }
+
+    /// Number of nodes currently in `namespace` (O(1) set-length read).
+    #[inline]
+    pub fn namespace_node_count(&self, namespace: &Namespace) -> usize {
+        self.ns_nodes
+            .get(&intern_namespace(namespace))
+            .map_or(0, |members| members.len())
+    }
+
+    /// Number of edges currently in `namespace` (O(1) set-length read).
+    #[inline]
+    pub fn namespace_edge_count(&self, namespace: &Namespace) -> usize {
+        self.ns_edges
+            .get(&intern_namespace(namespace))
+            .map_or(0, |members| members.len())
+    }
+
+    /// Every namespace that currently holds at least one node or edge, from
+    /// the membership index. Used to enumerate populated namespaces for
+    /// per-namespace stats/schema without a full entity scan.
+    pub fn populated_namespaces(&self) -> std::collections::BTreeSet<Namespace> {
+        let mut out = std::collections::BTreeSet::new();
+        for entry in self.ns_nodes.iter() {
+            if !entry.value().is_empty()
+                && let Some(ns) = resolve_namespace_id(*entry.key())
+            {
+                out.insert(ns);
+            }
+        }
+        for entry in self.ns_edges.iter() {
+            if !entry.value().is_empty()
+                && let Some(ns) = resolve_namespace_id(*entry.key())
+            {
+                out.insert(ns);
+            }
+        }
+        out
     }
 
     /// Get the number of edges.
@@ -788,7 +1333,8 @@ impl CurrentIndexes {
     ///
     /// - After bulk inserts (to move many edges from delta to frozen)
     /// - To reduce delta size before persistence
-    /// - Usually not needed if background compaction is enabled
+    /// - Rarely needed since Issue #3810: background maintenance compacts on
+    ///   its own once writes go quiet (unless it is disabled by config)
     ///
     /// # Performance
     ///
@@ -861,6 +1407,26 @@ impl CurrentIndexes {
     /// Call `compact_adjacency()` first to include recent changes.
     pub fn export_incoming_csr(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
         self.incoming.export_frozen_csr()
+    }
+
+    /// Export both directions' frozen CSRs as one compaction-consistent pair.
+    ///
+    /// The two indexes are compacted independently by the background
+    /// maintenance worker (Issue #3810), so exporting them with two separate
+    /// calls can capture an edge in one direction's CSR and not the other's --
+    /// a skew the restore path then has to guess about. Holding both compaction
+    /// locks across the two exports rules that out: no edge can move from a
+    /// delta buffer into a frozen CSR in between.
+    ///
+    /// Locks are taken outgoing-then-incoming, matching the adjacency lock
+    /// order in CLAUDE.md.
+    pub fn export_csr_pair(&self) -> ExportedCsrPair {
+        let _outgoing = self.outgoing.lock_compaction();
+        let _incoming = self.incoming.lock_compaction();
+        (
+            self.outgoing.export_frozen_csr(),
+            self.incoming.export_frozen_csr(),
+        )
     }
 
     /// Import CSR data for both outgoing and incoming adjacency.
@@ -944,26 +1510,38 @@ impl CurrentIndexes {
         self.incoming.import_frozen_csr(Arc::new(incoming_csr));
 
         // ===== Phase 7: Reconstruct Delta Buffer =====
-        // Build set of edge IDs that are in frozen CSR
-        let frozen_edge_ids: HashSet<EdgeId> = outgoing_edge_ids
+        // Build the set of edge IDs each direction's frozen CSR carries.
+        //
+        // The two sets are derived SEPARATELY (Issue #3810). They used to be
+        // assumed identical, which held only while nothing ever compacted: the
+        // two indexes are now compacted independently by the background
+        // maintenance worker, so a persisted snapshot can legitimately carry an
+        // edge in one direction's CSR and not the other's. Deciding both deltas
+        // from the outgoing set alone would then either duplicate that edge in
+        // the incoming adjacency (frozen + delta) or drop it from the incoming
+        // adjacency entirely.
+        let frozen_outgoing_ids: HashSet<EdgeId> = outgoing_edge_ids
             .iter()
-            .map(|&id| EdgeId::new(id).unwrap())
+            .filter_map(|&id| EdgeId::new(id).ok())
+            .collect();
+        let frozen_incoming_ids: HashSet<EdgeId> = incoming_edge_ids
+            .iter()
+            .filter_map(|&id| EdgeId::new(id).ok())
             .collect();
 
         // Iterate through all edges in DashMap
-        // For edges NOT in frozen, insert into delta
+        // For edges NOT in frozen, insert into delta -- per direction.
         for entry in self.edges.iter() {
             let edge = entry.value();
 
-            // If edge is NOT in frozen CSR, it belongs in delta
-            if !frozen_edge_ids.contains(&edge.id) {
-                // Insert into outgoing delta
+            if !frozen_outgoing_ids.contains(&edge.id) {
                 self.outgoing.insert(
                     edge.source,
                     crate::index::adjacency::AdjacencyEntry::new(edge.target, edge.id, edge.label),
                 );
+            }
 
-                // Insert into incoming delta
+            if !frozen_incoming_ids.contains(&edge.id) {
                 self.incoming.insert(
                     edge.target,
                     crate::index::adjacency::AdjacencyEntry::new(edge.source, edge.id, edge.label),
@@ -1189,6 +1767,40 @@ mod tests {
         assert_eq!(indexes.out_degree(NodeId::new(0).unwrap()), 2);
         assert_eq!(indexes.out_degree(NodeId::new(1).unwrap()), 1);
         assert_eq!(indexes.in_degree(NodeId::new(2).unwrap()), 2);
+    }
+
+    /// The two adjacency indexes compact independently, so exporting them with
+    /// two separate calls could capture an edge in one direction's frozen CSR
+    /// and not the other's -- and the restore path then reconstructed *both*
+    /// deltas from the outgoing set alone (Issue #3810).
+    ///
+    /// `export_csr_pair` holds both compaction locks across the two exports, so
+    /// the halves always describe the same edge set.
+    #[test]
+    fn export_csr_pair_captures_both_directions_at_the_same_point() {
+        let indexes = CurrentIndexes::new();
+        indexes.insert_edge(create_test_edge(0, 0, 1, "KNOWS"));
+        indexes.insert_edge(create_test_edge(1, 0, 2, "KNOWS"));
+        indexes.insert_edge(create_test_edge(2, 1, 2, "KNOWS"));
+        indexes.compact_adjacency();
+
+        let ((_, _, out_edge_ids), (_, _, in_edge_ids)) = indexes.export_csr_pair();
+
+        let mut out_sorted = out_edge_ids.clone();
+        out_sorted.sort_unstable();
+        let mut in_sorted = in_edge_ids.clone();
+        in_sorted.sort_unstable();
+
+        assert_eq!(
+            out_sorted, in_sorted,
+            "the exported outgoing and incoming CSRs must describe the same edge \
+             set; a difference is the skew export_csr_pair exists to prevent"
+        );
+        assert_eq!(
+            out_sorted,
+            vec![0, 1, 2],
+            "all three edges must be captured"
+        );
     }
 
     #[test]
@@ -2328,6 +2940,101 @@ mod node_header_index_tests {
             indexes.filter_nodes_by_label(user_label).count(),
             1,
             "new label should match"
+        );
+    }
+}
+
+#[cfg(test)]
+mod property_index_publish_order_tests {
+    use super::*;
+    use crate::core::graph::Node;
+    use crate::core::id::{NodeId, VersionId};
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMapBuilder;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+
+    /// A secondary index entry must never be visible before the node it points
+    /// at.
+    ///
+    /// `insert_node` used to publish the property index first and the node
+    /// second, so a lookup racing an insert could be handed an id and then fail
+    /// to resolve it -- `find_nodes_by_property` returns `NodeId(n)`,
+    /// `get_node(n)` says `NodeNotFound`. The window is two instructions wide,
+    /// which is why it survived: at the commit rates group commit could reach
+    /// (~93/s, before the flush wait moved out of the commit lock) the
+    /// integration suite never hit it in 120 runs. Driving `insert_node`
+    /// directly removes the commit path from the picture and reproduces it in
+    /// well under a second.
+    #[test]
+    fn a_property_index_hit_always_resolves_to_a_node() {
+        let indexes = Arc::new(CurrentIndexes::new());
+        let label = GLOBAL_INTERNER.intern("Item").unwrap();
+        let key = GLOBAL_INTERNER.intern("batch").unwrap();
+        assert!(indexes.enable_property_index(label, key));
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let dangling = Arc::new(AtomicU64::new(0));
+        let probes = Arc::new(AtomicU64::new(0));
+
+        let writer = {
+            let indexes = Arc::clone(&indexes);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut id = 1u64;
+                while !stop.load(AtomicOrdering::Relaxed) && id < 200_000 {
+                    indexes.insert_node(Node::new(
+                        NodeId::new(id).unwrap(),
+                        label,
+                        PropertyMapBuilder::new().insert("batch", "v").build(),
+                        VersionId::new(1).unwrap(),
+                    ));
+                    id += 1;
+                }
+                id
+            })
+        };
+
+        let readers: Vec<_> = (0..3)
+            .map(|_| {
+                let indexes = Arc::clone(&indexes);
+                let stop = Arc::clone(&stop);
+                let dangling = Arc::clone(&dangling);
+                let probes = Arc::clone(&probes);
+                std::thread::spawn(move || {
+                    let vk = crate::index::property_index::value_key(
+                        &crate::core::property::PropertyValue::from("v"),
+                    )
+                    .expect("string values are indexable");
+                    while !stop.load(AtomicOrdering::Relaxed) {
+                        for id in indexes.find_nodes_by_property_indexed(label, key, &vk) {
+                            probes.fetch_add(1, AtomicOrdering::Relaxed);
+                            if indexes.get_node(id).is_none() {
+                                dangling.fetch_add(1, AtomicOrdering::Relaxed);
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        stop.store(true, AtomicOrdering::Relaxed);
+
+        let written = writer.join().expect("writer");
+        for r in readers {
+            r.join().expect("reader");
+        }
+
+        assert!(written > 1, "writer made no progress");
+        assert!(
+            probes.load(AtomicOrdering::Relaxed) > 0,
+            "readers probed nothing, so the test proved nothing"
+        );
+        assert_eq!(
+            dangling.load(AtomicOrdering::Relaxed),
+            0,
+            "the property index handed out ids that did not resolve to a node"
         );
     }
 }

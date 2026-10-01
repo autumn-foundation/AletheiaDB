@@ -55,7 +55,7 @@ fn principal_with_role(role: Role) -> Principal {
 // ── AC (b): registry / inventory conformance ────────────────────────────────
 
 /// The RBAC registry equals `tests/parity/inventory.json`'s `mcp.tools[]`
-/// EXACTLY — same 46 names, same class per name, in both directions. The
+/// EXACTLY — same 74 names, same class per name, in both directions. The
 /// inventory is the cross-lane source of truth; this pins the registry to it so
 /// neither can drift silently.
 #[test]
@@ -88,7 +88,7 @@ fn registry_matches_inventory_exactly() {
         rbac::MCP_TOOL_CLASSES.len(),
         "registry has duplicate tool names"
     );
-    assert_eq!(inventory.len(), 46, "inventory advertises 46 MCP tools");
+    assert_eq!(inventory.len(), 74, "inventory advertises 74 MCP tools");
     assert_eq!(
         registry, inventory,
         "MCP_TOOL_CLASSES must equal inventory.json mcp.tools[] exactly \
@@ -266,17 +266,26 @@ fn permission_denied_message_is_byte_identical() {
 
     // via authorize_class
     let err = authorize_class(&reader, AccessClass::Write).expect_err("reader denied write");
-    let AletheiaHttpError::PermissionDenied(msg) = err else {
-        panic!("expected PermissionDenied");
-    };
-    assert_eq!(msg, "role 'reader' does not permit write access");
+    assert!(
+        matches!(err, AletheiaHttpError::PermissionDenied { .. }),
+        "expected PermissionDenied"
+    );
+    // The Display free text is byte-identical to the legacy message.
+    assert_eq!(
+        err.to_string(),
+        "role 'reader' does not permit write access"
+    );
 
     // via the marker-generic authorize::<C> (the shape Authorized<C> calls)
     let err = authorize::<WriteClass>(&reader).expect_err("reader denied write class");
-    let AletheiaHttpError::PermissionDenied(msg) = err else {
-        panic!("expected PermissionDenied");
-    };
-    assert_eq!(msg, "role 'reader' does not permit write access");
+    assert!(
+        matches!(err, AletheiaHttpError::PermissionDenied { .. }),
+        "expected PermissionDenied"
+    );
+    assert_eq!(
+        err.to_string(),
+        "role 'reader' does not permit write access"
+    );
 
     // A permitted class does not error.
     assert!(authorize::<ReadClass>(&reader).is_ok());
@@ -285,10 +294,14 @@ fn permission_denied_message_is_byte_identical() {
     // matrix guarantees: metrics role denied read.
     let metrics = principal_with_role(Role::Metrics);
     let err = authorize::<ReadClass>(&metrics).expect_err("metrics denied read");
-    let AletheiaHttpError::PermissionDenied(msg) = err else {
-        panic!("expected PermissionDenied");
-    };
-    assert_eq!(msg, "role 'metrics' does not permit read access");
+    assert!(
+        matches!(err, AletheiaHttpError::PermissionDenied { .. }),
+        "expected PermissionDenied"
+    );
+    assert_eq!(
+        err.to_string(),
+        "role 'metrics' does not permit read access"
+    );
     assert!(authorize::<MetricsClass>(&metrics).is_ok());
 }
 

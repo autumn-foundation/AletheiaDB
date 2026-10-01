@@ -370,6 +370,10 @@ impl OperationReordering {
                 // For NOT: complement of inner selectivity
                 1.0 - self.estimate_filter_selectivity(inner, stats)
             }
+            // Edge-scoped leaves (Issue #3622) are evaluated against the row's
+            // traversed edge; estimate from the wrapped predicate so an edge
+            // equality still orders ahead of an edge range, etc.
+            Predicate::EdgeScoped(inner) => self.estimate_filter_selectivity(inner, stats),
             Predicate::Ne { .. } => NOT_EQUALS_SELECTIVITY,
             Predicate::In { .. } => IN_PREDICATE_SELECTIVITY,
             Predicate::Exists(_) | Predicate::NotExists(_) => EXISTENCE_CHECK_SELECTIVITY,

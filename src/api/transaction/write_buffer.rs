@@ -172,6 +172,20 @@ impl BufferedWrite {
         }
     }
 
+    /// Return a mutable reference to the properties map if the operation has one
+    /// (Issue #3359, PR-1b: in-place crypto-shred sealing of the buffer before
+    /// WAL logging).
+    #[cfg(feature = "audit-export")]
+    pub(crate) fn properties_mut(&mut self) -> Option<&mut PropertyMap> {
+        match self {
+            Self::CreateNode { properties, .. } => Some(properties),
+            Self::UpdateNode { properties, .. } => Some(properties),
+            Self::CreateEdge { properties, .. } => Some(properties),
+            Self::UpdateEdge { properties, .. } => Some(properties),
+            _ => None,
+        }
+    }
+
     /// Check if this is a node operation
     pub fn is_node_operation(&self) -> bool {
         matches!(
@@ -364,6 +378,13 @@ impl WriteBuffer {
     /// Get all operations in order
     pub fn operations(&self) -> &[BufferedWrite] {
         &self.operations
+    }
+
+    /// Mutable access to all operations in order (Issue #3359, PR-1b: in-place
+    /// crypto-shred sealing of buffered property maps before WAL logging).
+    #[cfg(feature = "audit-export")]
+    pub(crate) fn operations_mut(&mut self) -> &mut [BufferedWrite] {
+        &mut self.operations
     }
 
     /// Check if a node has been modified in this buffer

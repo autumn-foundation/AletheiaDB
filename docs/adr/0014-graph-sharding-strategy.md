@@ -594,7 +594,7 @@ Shard by relationship depth from "anchor" nodes.
 
 ## References
 
-- GitHub Issues: [#123](https://github.com/madmax983/AletheiaDB/issues/123), [#124](https://github.com/madmax983/AletheiaDB/issues/124), [#125](https://github.com/madmax983/AletheiaDB/issues/125), [#126](https://github.com/madmax983/AletheiaDB/issues/126)
+- GitHub Issues: [#123](https://github.com/autumn-foundation/AletheiaDB/issues/123), [#124](https://github.com/autumn-foundation/AletheiaDB/issues/124), [#125](https://github.com/autumn-foundation/AletheiaDB/issues/125), [#126](https://github.com/autumn-foundation/AletheiaDB/issues/126)
 - Project: [AletheiaDB Scalability Roadmap](https://github.com/users/madmax983/projects/4)
 - ADR-0013: Tiered Storage Architecture (prerequisite)
 - Facebook TAO: [Paper](https://www.usenix.org/system/files/conference/atc13/atc13-bronson.pdf)

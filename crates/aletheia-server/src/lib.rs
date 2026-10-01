@@ -28,14 +28,26 @@
 #![warn(missing_docs)]
 
 pub mod app;
+pub mod changefeed_stream;
+pub mod constraints_lineage_audit_tools;
+pub mod crypto_shred_tools;
+pub mod daemon;
+pub mod deferred_batch_tools;
+pub mod edge_tools;
 pub mod http_routes;
+pub mod metrics_exposition;
+pub mod namespace_tools;
 pub mod node_tools;
+pub mod schema_batch_tools;
 pub mod security;
 pub mod state;
+pub mod traverse_temporal_tools;
+pub mod vector_query_tools;
 
 pub use app::{
-    build_server_client, build_server_client_with_config, build_server_testapp,
+    all_routes, build_server_client, build_server_client_with_config, build_server_testapp,
     try_build_server_client, try_build_server_testapp,
 };
+pub use daemon::{DaemonConfig, run_server};
 pub use security::{SecurityConfig, ServerSecurityState};
 pub use state::ServerState;

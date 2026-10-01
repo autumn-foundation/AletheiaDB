@@ -7,8 +7,27 @@ default:
     @just --list
 
 # Run all tests
+#
+# Feature list mirrors CI's test job: a bare `cargo test` compiles the
+# feature-gated suites (e.g. the daemon-client proxy tests, which are
+# `#![cfg(feature = "mcp-server")]`) to ZERO tests, so a developer following the
+# documented pre-commit workflow would get green on a broken proxy.
 test:
-    cargo test
+    cargo test --features "config-toml,mcp-server,sharding-rpc,simulation,cypher"
+    cargo test -p aletheia-server
+
+# Build the daemon (`aletheia-daemon`).
+#
+# It lives in the `aletheia-server` workspace member, and `default-members = ["."]`
+# means a bare `cargo build` does NOT produce it — so `aletheia daemon start`
+# would fail to find it on a stock checkout.
+daemon-build:
+    cargo build -p aletheia-server --bin aletheia-daemon
+
+# Install the daemon + the CLI + the MCP proxy.
+daemon-install:
+    cargo install --path . --features mcp-server --force
+    cargo install --path crates/aletheia-server --force
 
 # Run tests with output
 test-verbose:
@@ -42,6 +61,32 @@ mcp-bench-baseline sample='300' warmup='30':
     MCP_BENCH_SCALE=nightly MCP_BENCH_SAMPLE_SIZE={{sample}} MCP_BENCH_WARMUP={{warmup}} \
     MCP_BENCH_WRITE_BASELINE=benchmarks/baselines/mcp_round_trip_baseline.json \
     cargo bench --bench mcp_round_trip --features "mcp-server,config-toml"
+
+# LDBC-style benchmark suite (Issue #3373). Informational — NOT part of the
+# gating `just bench` path. Runs the AletheiaDB-side SNB subset + temporal &
+# vector extensions at the given scale and emits a machine-readable JSON report.
+# Defaults to the tiny `smoke` size. Requires an explicit `-p` (isolated crate).
+#   just bench-ldbc                 # smoke, writes ldbc_results.json
+#   just bench-ldbc sf0.1 300 30    # SF0.1-equivalent, 300 iters, 30 warmup
+bench-ldbc scale='smoke' iterations='200' warmup='20' out='ldbc_results.json':
+    cargo run -p aletheia-bench-ldbc --release --bin ldbc-bench -- \
+        --scale {{scale}} --iterations {{iterations}} --warmup {{warmup}} --out {{out}}
+
+# Regenerate the committed LDBC-style regression baseline for a scale (run on a
+# stable reference machine; commit the result). Refresh per release/hardware.
+bench-ldbc-baseline scale='smoke' iterations='300' warmup='30':
+    cargo run -p aletheia-bench-ldbc --release --bin ldbc-bench -- \
+        --scale {{scale}} --iterations {{iterations}} --warmup {{warmup}} \
+        --out crates/aletheia-bench-ldbc/baselines/ldbc_{{scale}}_baseline.json \
+        --write-baseline crates/aletheia-bench-ldbc/baselines/ldbc_{{scale}}_baseline.json
+
+# Run the LDBC-style suite and check it against the committed baseline; exits
+# non-zero on a >10% p99 regression (the AletheiaDB-only regression gate).
+bench-ldbc-gate scale='smoke' iterations='200' warmup='20':
+    cargo run -p aletheia-bench-ldbc --release --bin ldbc-bench -- \
+        --scale {{scale}} --iterations {{iterations}} --warmup {{warmup}} \
+        --out ldbc_results.json --check-gate \
+        --baseline crates/aletheia-bench-ldbc/baselines/ldbc_{{scale}}_baseline.json
 
 # Run benchmarks and generate HTML tables
 bench-tables:
@@ -78,6 +123,8 @@ check-features:
     @echo "=== semantic-temporal ===" && cargo check --features semantic-temporal
     @echo "=== semantic-diagnostics ===" && cargo check --features semantic-diagnostics
     @echo "=== semantic-characterization ===" && cargo check --features semantic-characterization
+    @echo "=== semantic-retrieval-fusion (standalone) ===" && cargo check --no-default-features --features semantic-retrieval-fusion
+    @echo "=== semantic-retrieval-fusion + mcp-server ===" && cargo check --no-default-features --features semantic-retrieval-fusion,mcp-server
     @echo "=== nova umbrella ===" && cargo check --features nova
     @echo "=== nova + semantic-search ===" && cargo check --features nova,semantic-search
     # Serde-enabling features (Issue #3390): each must compile standalone

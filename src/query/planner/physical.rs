@@ -356,9 +356,12 @@ impl PhysicalPlan {
             | PhysicalOp::Sort { input, .. }
             | PhysicalOp::Limit { input, .. }
             | PhysicalOp::Project { input, .. }
+            | PhysicalOp::ProjectProvenance { input, .. }
             | PhysicalOp::Distinct { input, .. }
             | PhysicalOp::Count { input, .. }
             | PhysicalOp::Aggregate { input, .. }
+            | PhysicalOp::TemporalWindowAggregate { input, .. }
+            | PhysicalOp::TemporalAlign { input, .. }
             | PhysicalOp::Materialize { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
             | PhysicalOp::IndexedTraversal { input, .. }
@@ -676,6 +679,17 @@ pub enum PhysicalOp {
         properties: Vec<String>,
     },
 
+    /// Project provenance accessors as output columns (Issue #3354). The
+    /// executor resolves each row entity's write-time provenance (via the
+    /// historical store handle the executor injects) and attaches one column per
+    /// projection, preserving a bare entity via the bindings channel when named.
+    ProjectProvenance {
+        /// Input operator
+        input: Box<PhysicalOp>,
+        /// The provenance projection plan.
+        projection: crate::query::ir::ProvenanceProjection,
+    },
+
     /// Distinct/deduplicate
     Distinct {
         /// Input operator
@@ -708,6 +722,26 @@ pub enum PhysicalOp {
         input: Box<PhysicalOp>,
         /// Time range to track
         time_range: TimeRange,
+    },
+
+    /// Temporal aggregation window (Issue #3363). Consumes the upstream
+    /// matched-entity stream and emits one computed-column row per tumbling
+    /// window. Maps 1:1 to the executor's `TemporalWindowAggregateIterator`.
+    TemporalWindowAggregate {
+        /// Input operator providing the matched entities.
+        input: Box<PhysicalOp>,
+        /// The resolved window specification.
+        spec: crate::query::ir::TemporalWindowSpec,
+    },
+
+    /// Temporal join / align (Issue #3379). Consumes the upstream matched
+    /// participant stream and emits one computed-column row per alignment
+    /// coordinate. Maps 1:1 to the executor's `TemporalJoinIterator`.
+    TemporalAlign {
+        /// Input operator providing the matched participants.
+        input: Box<PhysicalOp>,
+        /// The resolved temporal-align specification.
+        spec: crate::query::ir::TemporalAlignSpec,
     },
 
     /// Materialize results into memory
@@ -789,9 +823,12 @@ impl PhysicalOp {
             PhysicalOp::Sort { .. } => "Sort",
             PhysicalOp::Limit { .. } => "Limit",
             PhysicalOp::Project { .. } => "Project",
+            PhysicalOp::ProjectProvenance { .. } => "ProjectProvenance",
             PhysicalOp::Distinct { .. } => "Distinct",
             PhysicalOp::Count { .. } => "Count",
             PhysicalOp::Aggregate { .. } => "Aggregate",
+            PhysicalOp::TemporalWindowAggregate { .. } => "TemporalWindowAggregate",
+            PhysicalOp::TemporalAlign { .. } => "TemporalAlign",
             PhysicalOp::TemporalTrack { .. } => "TemporalTrack",
             PhysicalOp::Materialize { .. } => "Materialize",
             PhysicalOp::OptionalApply { .. } => "OptionalApply",
@@ -840,9 +877,12 @@ impl PhysicalOp {
             | PhysicalOp::Sort { input, .. }
             | PhysicalOp::Limit { input, .. }
             | PhysicalOp::Project { input, .. }
+            | PhysicalOp::ProjectProvenance { input, .. }
             | PhysicalOp::Distinct { input, .. }
             | PhysicalOp::Count { input, .. }
             | PhysicalOp::Aggregate { input, .. }
+            | PhysicalOp::TemporalWindowAggregate { input, .. }
+            | PhysicalOp::TemporalAlign { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
             | PhysicalOp::Materialize { input, .. }
             | PhysicalOp::OptionalApply { input, .. } => 1 + input.depth(),
@@ -1048,9 +1088,12 @@ impl PhysicalOp {
             | PhysicalOp::Sort { input, .. }
             | PhysicalOp::Limit { input, .. }
             | PhysicalOp::Project { input, .. }
+            | PhysicalOp::ProjectProvenance { input, .. }
             | PhysicalOp::Distinct { input, .. }
             | PhysicalOp::Count { input, .. }
             | PhysicalOp::Aggregate { input, .. }
+            | PhysicalOp::TemporalWindowAggregate { input, .. }
+            | PhysicalOp::TemporalAlign { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
             | PhysicalOp::Materialize { input, .. }
             | PhysicalOp::OptionalApply { input, .. } => Some(input),

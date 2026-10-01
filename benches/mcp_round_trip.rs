@@ -909,6 +909,120 @@ fn build_scenarios(fx: &Fixture) -> Vec<Scenario> {
                 move |_| json!({"edge_id": id})
             }
         ),
+        // Belief-revision audit (Issue #3362). The bench build lacks the
+        // `semantic-temporal` feature, so this returns a tolerated
+        // FAILED_PRECONDITION (isError) — present only to satisfy the runtime
+        // registry-completeness assertion, like `semantic__semantic_path`.
+        s!(
+            "temporal__get_belief_revisions",
+            "get_belief_revisions",
+            "temporal",
+            "typical",
+            false,
+            {
+                let id = f.person_id;
+                move |_| json!({"entity_kind": "node", "id": id})
+            }
+        ),
+        // Deferred MCP-registry batch tools (Issue #3367 / #3352 / #3357 /
+        // #3382). The bench build lacks the `semantic-temporal` /
+        // `semantic-reasoning` features, so each returns a tolerated
+        // FAILED_PRECONDITION (isError) — present only to satisfy the runtime
+        // registry-completeness assertion (AC2), like `get_belief_revisions`.
+        s!(
+            "temporal__create_drift_monitor",
+            "create_drift_monitor",
+            "temporal",
+            "typical",
+            false,
+            move |_| json!({
+                "property_key": "embedding",
+                "metric": "cosine",
+                "threshold": 0.5,
+                "window_micros": 3_600_000_000_u64
+            })
+        ),
+        s!(
+            "temporal__list_drift_monitors",
+            "list_drift_monitors",
+            "temporal",
+            "typical",
+            false,
+            move |_| json!({})
+        ),
+        s!(
+            "temporal__delete_drift_monitor",
+            "delete_drift_monitor",
+            "temporal",
+            "typical",
+            false,
+            move |_| json!({"id": 1})
+        ),
+        s!(
+            "temporal__query_drift_alarms",
+            "query_drift_alarms",
+            "temporal",
+            "typical",
+            false,
+            move |_| json!({})
+        ),
+        s!(
+            "temporal__resolve_drift_alarm",
+            "resolve_drift_alarm",
+            "temporal",
+            "typical",
+            false,
+            {
+                let id = f.person_id;
+                move |_| json!({"alarm_id": id})
+            }
+        ),
+        s!(
+            "temporal__contradiction_genealogy",
+            "contradiction_genealogy",
+            "temporal",
+            "typical",
+            false,
+            {
+                let id = f.person_id;
+                move |_| json!({"entity_kind": "node", "id": id, "property": "name"})
+            }
+        ),
+        s!(
+            "temporal__find_contradictions",
+            "find_contradictions",
+            "temporal",
+            "typical",
+            false,
+            move |_| json!({})
+        ),
+        s!(
+            "temporal__counterfactual_replay",
+            "counterfactual_replay",
+            "temporal",
+            "typical",
+            false,
+            move |_| json!({"name": "cf-bench", "exclude_source": "poisoned-feed"})
+        ),
+        s!(
+            "reasoning__trust_breakdown",
+            "trust_breakdown",
+            "reasoning",
+            "typical",
+            false,
+            {
+                let id = f.person_id;
+                move |_| json!({"entity_kind": "node", "id": id, "version": 1})
+            }
+        ),
+        s!(
+            "reasoning__list_trust_policies",
+            "list_trust_policies",
+            "reasoning",
+            "typical",
+            false,
+            move |_| json!({})
+        ),
         // ---- Traversal depth sweep (AC3) ----
         s!(
             "traverse__depth1",
@@ -1087,6 +1201,17 @@ fn build_scenarios(fx: &Fixture) -> Vec<Scenario> {
             }
         ),
         s!(
+            "temporal__await_changes",
+            "await_changes",
+            "temporal",
+            "typical",
+            false,
+            // timeout_ms:0 makes recv_timeout return instantly (Ok(empty)) so the
+            // long-poll never blocks the bench; with no concurrent writes this
+            // resolves as timed_out:true with an empty changes array.
+            |_| json!({"timeout_ms": 0})
+        ),
+        s!(
             "temporal__temporal_extent",
             "temporal_extent",
             "temporal",
@@ -1256,6 +1381,67 @@ fn build_scenarios(fx: &Fixture) -> Vec<Scenario> {
             false,
             move |i| json!({"label": format!("UniqProbe{i}"), "property": "email"})
         ),
+        // ---- Namespace management (Issue #3349) — admin/read-class ----
+        // create_namespace is a write; a fresh unique name per iteration keeps
+        // every call a clean success (a duplicate name would be a tolerated
+        // tool-level CONFLICT, but unique names measure the success path).
+        s!(
+            "admin__create_namespace",
+            "create_namespace",
+            "admin",
+            "typical",
+            false,
+            move |i| json!({"name": format!("agent:bench_{i}"), "description": "round-trip bench namespace"})
+        ),
+        s!(
+            "admin__list_namespaces",
+            "list_namespaces",
+            "read",
+            "typical",
+            false,
+            |_| json!({})
+        ),
+        // describe_namespace on the implicit 'default' namespace always resolves.
+        s!(
+            "admin__describe_namespace",
+            "describe_namespace",
+            "read",
+            "typical",
+            false,
+            |_| json!({"name": "default"})
+        ),
+        // ---- GDPR crypto-shred admin tools (Issue #3359) ----
+        // The smoke build configures no encryption key material, so both tools
+        // return the structured FAILED_PRECONDITION unavailable response (a
+        // tool-level `isError`, NOT a JSON-RPC error), which `measure_scenario`
+        // tolerates. They are present to satisfy registry-completeness (AC2);
+        // they are non-gated and assert no success. Args are well-formed so the
+        // request deserializes cleanly (only malformed args trip a JSON-RPC
+        // error / `sample_response_ok`).
+        s!(
+            "admin__designate_subject",
+            "designate_subject",
+            "admin",
+            "typical",
+            false,
+            {
+                let id = f.person_id;
+                move |i| {
+                    json!({
+                        "subject_id": format!("bench-subject-{i}"),
+                        "targets": [{"entity_kind": "node", "id": id}]
+                    })
+                }
+            }
+        ),
+        s!(
+            "admin__erase_subject",
+            "erase_subject",
+            "admin",
+            "typical",
+            false,
+            move |i| json!({"subject_id": format!("bench-subject-{i}")})
+        ),
         // ---- Provenance / audit ----
         s!(
             "provenance__verify_chain",
@@ -1282,6 +1468,149 @@ fn build_scenarios(fx: &Fixture) -> Vec<Scenario> {
             {
                 let id = f.person_id;
                 move |_| json!({"entity_type": "node", "entity_id": id})
+            }
+        ),
+        // ---- Semantic-search analysis tools (Issue #2907) ----
+        // These are advertised on every build, but the PR-smoke bench compiles
+        // WITHOUT the `semantic-search` feature, so each returns the structured
+        // FAILED_PRECONDITION unavailable-feature response. The round-trip
+        // harness treats a tool-level (isError) response as a valid round-trip
+        // (only a JSON-RPC transport error trips `sample_response_ok`), so these
+        // are present purely to satisfy registry-completeness (AC2); they are
+        // non-gated and assert no success.
+        s!(
+            "semantic__semantic_path",
+            "semantic_path",
+            "vector",
+            "typical",
+            false,
+            {
+                let start = f.person_id;
+                let end = f.hub_id;
+                move |_| json!({"start": start, "end": end, "property_name": "embedding"})
+            }
+        ),
+        s!(
+            "semantic__concept_analogy",
+            "concept_analogy",
+            "vector",
+            "typical",
+            false,
+            {
+                let a = f.person_id;
+                let b = f.hub_id;
+                let c = f.update_node_id;
+                move |_| json!({"a": a, "b": b, "c": c, "property_name": "embedding", "k": 10})
+            }
+        ),
+        s!(
+            "semantic__concept_mean",
+            "concept_mean",
+            "vector",
+            "typical",
+            false,
+            {
+                let a = f.person_id;
+                let b = f.hub_id;
+                move |_| json!({"nodes": [a, b], "property_name": "embedding", "k": 10})
+            }
+        ),
+        s!(
+            "semantic__find_duplicate_candidates",
+            "find_duplicate_candidates",
+            "vector",
+            "typical",
+            false,
+            {
+                let id = f.person_id;
+                move |_| json!({"node_id": id, "property_name": "embedding", "threshold": 0.9, "limit": 10})
+            }
+        ),
+        s!(
+            "semantic__semantic_horizon",
+            "semantic_horizon",
+            "vector",
+            "typical",
+            false,
+            {
+                let seed = f.person_id;
+                move |_| json!({"seed": seed, "property_name": "embedding", "threshold": 0.5, "max_depth": 3})
+            }
+        ),
+        s!(
+            "semantic__context_aspects",
+            "context_aspects",
+            "vector",
+            "typical",
+            false,
+            {
+                let id = f.person_id;
+                move |_| json!({"node_id": id, "property_name": "embedding", "k": 3})
+            }
+        ),
+        // ---- Embedding generation & text semantic search (Issue #2906) ----
+        // These tools require a configured embedder / the `embeddings` feature.
+        // The smoke build has neither, so each round-trip returns a structured
+        // FAILED_PRECONDITION (a tool-level `isError`, NOT a JSON-RPC error), which
+        // `measure_scenario` tolerates. They are present purely to satisfy the
+        // registry-completeness gate (AC2); they are not gated on latency.
+        s!(
+            "embedding__embed_query",
+            "embed_query",
+            "vector",
+            "typical",
+            false,
+            move |_| json!({"text": "benchmark embedding probe"})
+        ),
+        s!(
+            "embedding__embed_text",
+            "embed_text",
+            "vector",
+            "typical",
+            false,
+            move |_| json!({"texts": ["benchmark embedding probe"]})
+        ),
+        s!(
+            "embedding__semantic_search",
+            "semantic_search",
+            "vector",
+            "typical",
+            false,
+            {
+                move |_| json!({"property_name": "embedding", "query_text": "benchmark probe", "k": 10})
+            }
+        ),
+        s!(
+            "embedding__create_node_with_embedding",
+            "create_node_with_embedding",
+            "vector",
+            "typical",
+            false,
+            {
+                move |i| {
+                    json!({
+                        "label": "BenchEmbed",
+                        "text": format!("benchmark probe {i}"),
+                        "embedding_property": "embedding"
+                    })
+                }
+            }
+        ),
+        s!(
+            "embedding__update_node_embedding",
+            "update_node_embedding",
+            "vector",
+            "typical",
+            false,
+            {
+                let id = f.person_id;
+                move |i| {
+                    json!({
+                        "node_id": id,
+                        "text": format!("benchmark probe {i}"),
+                        "embedding_property": "embedding"
+                    })
+                }
             }
         ),
     ]

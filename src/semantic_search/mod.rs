@@ -13,7 +13,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! aletheiadb = { version = "0.1", features = ["semantic-search"] }
+//! aletheiadb = { version = "0.2", features = ["semantic-search"] }
 //! ```
 //!
 //! # Module Inventory

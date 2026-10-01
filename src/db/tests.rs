@@ -1569,19 +1569,27 @@ fn test_retract_node_no_concurrent_edge_commits_ok() {
 #[test]
 fn test_create_edge_write_skew_concurrent_delete_aborts() {
     // Issue #3416 Pt1 MIRROR interleaving (ordering ii). The edge creator
-    // validates endpoints BEFORE the WAL/apply phase; if a concurrent tx
-    // deletes an endpoint in the window between validate() and apply, the
-    // apply-time endpoint re-check must ABORT the edge tx so no dangling edge
-    // is committed. Driven deterministically (single thread) via the
-    // #[cfg(test)] pre-apply hook, which fires after the edge tx has validated
-    // but before it acquires historical.write().
+    // validates endpoints at `validate()` (before the commit-clock section); if a
+    // concurrent tx deletes an endpoint in the window between `validate()` and the
+    // commit-time endpoint re-check, that re-check must ABORT the edge tx so no
+    // dangling edge is committed.
+    //
+    // Post-#3413 the re-check runs BEFORE the WAL append, under `current_timestamp`
+    // (held across apply). The deterministic seam therefore moved from the old
+    // post-WAL pre-apply hook to the pre-commit-clock hook, which fires AFTER
+    // `validate()` but BEFORE the victim acquires `current_timestamp` — so a
+    // concurrent delete can commit (the victim holds no commit-clock lock yet) and
+    // the victim then aborts at its own pre-WAL re-check. Because the abort is now
+    // pre-WAL the rejected edge also leaves NO durable frame (the #3413
+    // abort-framing fix); the crash-recovery proof is in
+    // `tests/wal_abort_framing.rs`.
     use crate::api::transaction::write::commit_test_hooks;
     use std::cell::Cell;
     use std::sync::Arc;
 
     thread_local! {
-        // Only the edge tx's own commit thread arms this; every other commit
-        // in the process (including tx A's nested commit below, and unrelated
+        // Only the edge tx's own commit thread arms this; every other commit in
+        // the process (including tx A's nested commit below, and unrelated
         // concurrent tests) sees the hook as a no-op.
         static ARMED: Cell<bool> = const { Cell::new(false) };
     }
@@ -1602,12 +1610,13 @@ fn test_create_edge_write_skew_concurrent_delete_aborts() {
         .create_edge(x, victim, "POINTS_AT", PropertyMapBuilder::new().build())
         .unwrap();
 
-    // Pre-apply hook: exactly once, on the armed (edge-tx) thread, commit the
-    // concurrent tx A that deletes victim. B does not hold historical yet, so A
-    // acquires the guard and commits cleanly (victim has 0 committed edges).
+    // Pre-commit-clock hook: exactly once, on the armed (edge-tx) thread, commit
+    // the concurrent tx A that deletes victim. B has passed validate() but not yet
+    // acquired `current_timestamp`, so A acquires the clock and commits cleanly
+    // (victim has 0 committed edges); B then aborts at its own re-check.
     {
         let db_hook = Arc::clone(&db);
-        commit_test_hooks::set_pre_apply_hook(Arc::new(move || {
+        commit_test_hooks::set_pre_commit_clock_hook(Arc::new(move || {
             let armed = ARMED.with(|a| a.replace(false));
             if !armed {
                 return; // no-op for A's own commit and any other tx/thread
@@ -1621,7 +1630,7 @@ fn test_create_edge_write_skew_concurrent_delete_aborts() {
     ARMED.with(|a| a.set(true));
     let commit_result = tx_b.commit();
     ARMED.with(|a| a.set(false));
-    commit_test_hooks::clear_pre_apply_hook();
+    commit_test_hooks::clear_pre_commit_clock_hook();
 
     // The edge tx applied SECOND and must abort — no dangling edge.
     assert!(
@@ -1950,6 +1959,11 @@ fn test_write_transaction_commit_then_rollback_path() {
 }
 
 #[test]
+// This test propagates an `Error::Storage`, which bumps the process-global
+// `error_storage_total` metric under the `observability` feature. It must join
+// the `metrics` serial group so it never runs concurrently with the delta-based
+// metric asserters that read that same counter (de-flake, Wave-8 Lane P).
+#[cfg_attr(feature = "observability", serial_test::serial(metrics))]
 fn test_write_closure_error_propagation() {
     let db = AletheiaDB::new().unwrap();
 
@@ -1972,6 +1986,10 @@ fn test_write_closure_error_propagation() {
 }
 
 #[test]
+// Propagates an `Error::Storage` (bumps `error_storage_total` under
+// `observability`); joins the `metrics` serial group so it never races the
+// delta-based metric asserters reading that counter (de-flake, Wave-8 Lane P).
+#[cfg_attr(feature = "observability", serial_test::serial(metrics))]
 fn test_read_closure_error_propagation() {
     let db = AletheiaDB::new().unwrap();
 
@@ -2763,23 +2781,43 @@ fn poison_mutex<T>(mutex: &std::sync::Arc<std::sync::Mutex<T>>) {
 
 #[cfg(feature = "observability")]
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(metrics)]
 fn test_create_node_transaction_error_counted_once_when_lock_poisoned() {
-    crate::observability::METRICS.reset();
     let db = AletheiaDB::new().unwrap();
 
-    poison_mutex(&db.current_timestamp);
+    // The commit clock's serialization mutex is internal to `CommitClock`, so
+    // it exposes its own test-only poisoner rather than being poisoned from
+    // outside. (`poison_mutex` below is still used for the plain `Mutex` at
+    // `commit_clock_observed_at`.)
+    db.current_timestamp.poison_for_test();
 
+    // Delta-based assertion (not absolute-count-after-`reset()`): the counter is
+    // a process-global singleton shared by the whole test binary, so an absolute
+    // assertion races any concurrent test that bumps the same counter. Reading
+    // the counter immediately before and after the single failing action, and
+    // asserting the increment attributable to THAT action is exactly 1, both
+    // preserves the "counted exactly once (not double-counted)" intent and is
+    // robust to concurrent neighbors. The `metrics` serial group additionally
+    // fences out the known same-counter bumpers so the delta window is clean.
+    let before = crate::observability::METRICS
+        .snapshot()
+        .error_transaction_total;
     let result = db.create_node("Person", PropertyMapBuilder::new().build());
     assert!(result.is_err());
+    let after = crate::observability::METRICS
+        .snapshot()
+        .error_transaction_total;
 
-    let snapshot = crate::observability::METRICS.snapshot();
-    assert_eq!(snapshot.error_transaction_total, 1);
+    assert_eq!(
+        after - before,
+        1,
+        "failing create_node must record exactly one transaction error"
+    );
 }
 
 #[cfg(feature = "observability")]
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(metrics)]
 fn test_vector_builder_duplicate_enable_counts_error_once() {
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
@@ -2787,52 +2825,74 @@ fn test_vector_builder_duplicate_enable_counts_error_once() {
     db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
         .unwrap();
 
-    crate::observability::METRICS.reset();
+    // Delta-based (see `test_create_node_transaction_error_counted_once_when_lock_poisoned`
+    // for the rationale): robust to concurrent bumps of the process-global counter.
+    let before = crate::observability::METRICS.snapshot().error_vector_total;
     let result = db
         .vector_index("embedding")
         .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
         .enable();
     assert!(result.is_err());
+    let after = crate::observability::METRICS.snapshot().error_vector_total;
 
-    let snapshot = crate::observability::METRICS.snapshot();
-    assert_eq!(snapshot.error_vector_total, 1);
+    assert_eq!(
+        after - before,
+        1,
+        "duplicate vector-index enable must record exactly one vector error"
+    );
 }
 
 #[cfg(feature = "observability")]
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(metrics)]
 fn test_read_closure_db_error_counts_once() {
-    crate::observability::METRICS.reset();
     let db = AletheiaDB::new().unwrap();
 
     let missing_id = NodeId::new(999_999).unwrap();
+    // Delta-based (see `test_create_node_transaction_error_counted_once_when_lock_poisoned`
+    // for the rationale): robust to concurrent bumps of the process-global counter.
+    let before = crate::observability::METRICS.snapshot().error_storage_total;
     let result: Result<()> = db.read(|tx| {
         tx.get_node(missing_id)?;
         Ok(())
     });
     assert!(result.is_err());
+    let after = crate::observability::METRICS.snapshot().error_storage_total;
 
-    let snapshot = crate::observability::METRICS.snapshot();
-    assert_eq!(snapshot.error_storage_total, 1);
+    assert_eq!(
+        after - before,
+        1,
+        "failing read closure must record exactly one storage error"
+    );
 }
 
 #[cfg(feature = "observability")]
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(metrics)]
 fn test_write_commit_error_counts_once() {
-    crate::observability::METRICS.reset();
     let db = AletheiaDB::new().unwrap();
 
     poison_mutex(&db.commit_clock_observed_at);
 
+    // Delta-based (see `test_create_node_transaction_error_counted_once_when_lock_poisoned`
+    // for the rationale): robust to concurrent bumps of the process-global counter.
+    let before = crate::observability::METRICS
+        .snapshot()
+        .error_transaction_total;
     let result: Result<()> = db.write(|tx| {
         tx.create_node("Person", PropertyMapBuilder::new().build())?;
         Ok(())
     });
     assert!(result.is_err());
+    let after = crate::observability::METRICS
+        .snapshot()
+        .error_transaction_total;
 
-    let snapshot = crate::observability::METRICS.snapshot();
-    assert_eq!(snapshot.error_transaction_total, 1);
+    assert_eq!(
+        after - before,
+        1,
+        "failing write commit must record exactly one transaction error"
+    );
 }
 
 // ==================== Schema Discovery Tests (Issue #3214) ====================
@@ -3108,8 +3168,9 @@ fn test_stats_populated_matches_underlying_counters() {
         stats.historical.total_node_versions,
         hist.total_node_versions
     );
-    // 2 creates + 1 update = exactly 3 node versions.
-    assert_eq!(stats.historical.total_node_versions, 3);
+    // 2 creates + 1 update + its structural carry-forward (ADR-0061) =
+    // exactly 4 stored node versions.
+    assert_eq!(stats.historical.total_node_versions, 4);
     assert_eq!(stats.historical.unique_nodes, hist.unique_nodes);
     assert_eq!(
         stats.historical.anchor_count,

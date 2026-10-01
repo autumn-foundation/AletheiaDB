@@ -79,6 +79,9 @@ use std::time::Duration;
 
 use crate::core::hasher::IdentityHasher;
 use parking_lot::RwLock;
+// rayon needs OS threads, unavailable on wasm32; the single parallel scan below
+// falls back to a serial iterator on wasm.
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 
 type IdentityBuildHasher = BuildHasherDefault<IdentityHasher>;
@@ -1022,9 +1025,12 @@ impl TemporalVectorIndex {
         };
         // Lock is released here
 
-        // Process snapshots in parallel and collect results
-        let mut results: TemporalSearchResults = snapshots
-            .par_iter()
+        // Process snapshots in parallel (serial on wasm) and collect results
+        #[cfg(not(target_arch = "wasm32"))]
+        let snapshot_iter = snapshots.par_iter();
+        #[cfg(target_arch = "wasm32")]
+        let snapshot_iter = snapshots.iter();
+        let mut results: TemporalSearchResults = snapshot_iter
             .map(|(timestamp, snapshot)| {
                 // Search snapshot
                 snapshot

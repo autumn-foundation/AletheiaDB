@@ -120,7 +120,7 @@ fn error_code(e: &AletheiaHttpError) -> &'static str {
         AletheiaHttpError::BadRequest(_) => "INVALID_ARGUMENT",
         AletheiaHttpError::NotFound(_) => "NOT_FOUND",
         AletheiaHttpError::Unauthorized => "UNAUTHENTICATED",
-        AletheiaHttpError::PermissionDenied(_) => "PERMISSION_DENIED",
+        AletheiaHttpError::PermissionDenied { .. } => "PERMISSION_DENIED",
         _ => "INTERNAL",
     }
 }

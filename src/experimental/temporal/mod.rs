@@ -8,8 +8,27 @@
 
 pub mod ariadne;
 pub mod aura;
+/// Belief-revision audit: classify *when and why* an entity's stored facts
+/// changed (correction / world-change / retraction / reaffirmation) — Issue #3362.
+pub mod belief_revision;
 pub mod chronos;
+/// Contradiction genealogy: reconstruct the bi-temporal life of every competing
+/// claim behind a value conflict, attribute each to its sources, locate the
+/// divergence point, and classify retroactive corrections vs contemporaneous
+/// disagreement — read-only and deterministic (Issue #3352).
+pub mod contradiction_genealogy;
+/// Counterfactual exclusion replay: materialize a read-only shadow view of the
+/// database as it would exist had a named source's writes never been recorded,
+/// with a divergence (blast-radius) report — Issue #3357.
+pub mod counterfactual;
+/// Temporal semantic drift alarms: watch embedding evolution against declared
+/// thresholds and surface "this concept changed meaning" as durable,
+/// bi-temporal, changefeed-delivered alarm events — Issue #3367.
+pub mod drift_alarm;
 pub mod echo;
+/// Knowledge half-life analytics: survival analysis over fact volatility —
+/// per-cohort half-lives, per-fact freshness, staleness inventories (Issue #3377).
+pub mod half_life;
 pub mod kairos;
 pub mod mnemosyne;
 pub mod sherlock;

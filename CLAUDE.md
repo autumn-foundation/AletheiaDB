@@ -83,6 +83,16 @@ Current implementation notes: `wal` is a `ConcurrentWalSystem`, `temporal_indexe
 
 If code must acquire both adjacency indexes, acquire `outgoing` before `incoming`. Neither adjacency index may call back into `historical`, `wal`, or `current_timestamp` while held.
 
+Two primitives sit **below** the adjacency indexes in this order (Issue #3810):
+each `IncrementalAdjacencyIndex`'s `compaction_lock` (taken only by compaction,
+CSR import, and the consistent CSR-pair export -- never on a read or insert
+path), and the process-global adjacency-maintenance registry mutex (taken by
+`register()` and by the maintenance worker's tick, and never while holding any
+other AletheiaDB lock). A thread must not take an adjacency *shard* guard (a
+`MergedAdjacencyGuard` / `OutgoingEdgesIter`) and then take that index's
+`compaction_lock` on the same thread: compaction's retire pass needs the same
+shard.
+
 ## Testing Requirements
 
 **See [TESTING.md](TESTING.md) for detailed testing instructions.**
@@ -293,6 +303,55 @@ let db = AletheiaDB::with_unified_config(config)?;
 
 **See [docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md) for complete guide.**
 
+### Background Adjacency Maintenance (Issue #3810)
+
+Adjacency reads (`get_outgoing_edges`, `get_incoming_edges`, traversal) have a
+frozen-CSR fast path (~8-14ns) that is only available while the delta buffer and
+tombstone set are **globally empty** -- a state only compaction produces.
+ADR-0026 shipped a `CompactionScheduler` that no shipping constructor ever
+started, so 100% of adjacency reads permanently took the merged (delta) path.
+
+A single **process-wide** worker now services every database's two adjacency
+indexes through `Weak` references (**not** two threads per database, and no
+shutdown obligation -- dropping a database deregisters it). It compacts an index
+when writes go **quiescent** (pending count unchanged across `quiet_ticks`),
+which is what actually unlocks the fast path and is size-independent -- closing
+ADR-0026's threshold bootstrap gap, where `should_compact()`'s ratio branch is
+dead on a fresh index (`frozen == 0`) and a graph under 10,000 edges could never
+trigger compaction. `should_compact()`'s size thresholds still bound delta growth
+under a burst that never goes quiet, and a **duty-cycle limiter** (default 10% of
+one core per index, measured from the last compaction's own cost) keeps a
+read/write-interleaved workload off the O(E log E) rebuild cliff. All policy runs
+on the worker: neither the read nor the write hot path gains an instruction of it.
+
+Compaction now **publishes the rebuilt CSR before retiring** the delta entries it
+absorbed (selectively, so a mid-compaction write is not dropped), and is
+serialized with itself. The old order left a window in which an edge was in
+neither layer -- a concurrent reader got an adjacency list *missing* those edges,
+or an **empty** one on a freshly built graph. The new order's window has an edge
+in *both* layers, which readers de-duplicate. Read order is a correctness
+contract (counters→frozen on the fast path; delta→frozen→publish-window on the
+merged path) and is documented at each reader.
+
+```rust
+use aletheiadb::{AletheiaDB, AletheiaDBConfig, AdjacencyMaintenanceConfig};
+
+let db = AletheiaDB::new()?;
+db.adjacency_stats().is_fully_compacted();   // true == reads are on the fast path
+db.compact_adjacency();                       // force it now (bulk load, benchmarks)
+
+// Opt out (reads stay correct, they just keep taking the merged path):
+let config = AletheiaDBConfig::builder()
+    .adjacency(AdjacencyMaintenanceConfig::disabled())
+    .build();
+```
+
+`ALETHEIADB_ADJACENCY_MAINTENANCE=off` disables it for a whole process -- the
+opt-out for `AletheiaDB::new()`/`open()`, which take no config, and the switch a
+profiler flips to compare the two read paths in one binary.
+
+**See [docs/adr/0060-background-adjacency-maintenance.md](docs/adr/0060-background-adjacency-maintenance.md).**
+
 ### MCP Server (Claude Integration)
 
 Model Context Protocol server enabling LLMs to interact with AletheiaDB.
@@ -308,25 +367,77 @@ ALETHEIADB_BOOTSTRAP_ADMIN_KEY="$(openssl rand -base64 32)" \
 ALETHEIADB_AUTH_MODE=anonymous cargo run --bin aletheia-mcp --features mcp-server
 ```
 
+**Daemon-owned mode (Issue #2905)**: AletheiaDB is single-writer, but MCP
+clients spawn one server process per session — so without a daemon each session
+either gets its own **ephemeral** database or several processes open the **same**
+data directory as unsupported concurrent writers (on Windows the live
+`aletheia-mcp.exe` handles also break `cargo install --force` with
+`Access is denied. (os error 5)`). `aletheia daemon start` makes **one**
+`aletheia-daemon` process the local owner of the WAL, indexes, and recovery,
+serving REST + **MCP over Streamable HTTP at `/mcp`** + OpenAPI + `/metrics` from
+one autumn-web app (the routes are shared with the parity-tested proving ground
+via `aletheia_server::all_routes`, and the same `/mcp` security gate applies:
+uniform `UNAUTHENTICATED` 401, per-tool RBAC 403, unknown tool names refused
+fail-closed). It claims `{data_dir}/daemon.lock`, so a second daemon on the same
+directory **refuses to start** (a lock from a crashed daemon is reclaimed by
+liveness, not deleted blindly). MCP clients that speak HTTP connect to `/mcp`
+directly; command-based clients run `aletheia-mcp` with `ALETHEIADB_DAEMON_URL`
+(or `--daemon-url`) set, which turns it into a **stdio↔HTTP relay** that forwards
+JSON-RPC frames verbatim and **never calls `open_from_env()` or opens local
+storage** — so N sessions share one database. The relay makes no access-control
+decisions (it forwards `ALETHEIADB_MCP_API_KEY` as `Authorization: Bearer`; the
+daemon decides), never silently falls back to an embedded database when the
+daemon is unreachable (it answers a JSON-RPC transport error naming
+`aletheia daemon status`), and exits 0 on stdin EOF when its client disconnects —
+the daemon is the long-lived process. Omitting the daemon URL preserves the
+**embedded** stdio mode exactly. `aletheia daemon start --surface legacy` keeps
+launching the older HTTP-only `aletheia-server`; `aletheia daemon status [--json]`
+reports liveness, the base URL, the `/mcp` endpoint, and a paste-ready
+`mcpServers` client config. Liveness/stop work on Windows (`tasklist` filtered on
+pid **and** image name and parsed by column, `taskkill`), Linux (`/proc`), and
+other Unix (`kill(pid,0)` + `ps`). The ownership claim is honored by every
+storage-opening process — the CLI, embedded `aletheia-mcp`, and `aletheia-server`
+all refuse a directory a live daemon owns — and is resolved from
+`ALETHEIADB_DATA_DIR` **or** an `ALETHEIADB_CONFIG` TOML's `persistence.data_dir`.
+It is advisory (pid-file based, exclusively created and ownership-checked on
+release), not OS-enforced. The daemon binary lives in the `aletheia-server`
+workspace member: `cargo install --path crates/aletheia-server`. Anonymous auth
+on a non-loopback bind is **refused** unless
+`ALETHEIADB_ALLOW_ANONYMOUS_NETWORK=1`. See
+[docs/guides/daemon-mode.md](docs/guides/daemon-mode.md).
+
 **Available Tools:**
 | Category | Tools |
 |----------|-------|
 | **Nodes** | `get_node`, `create_node`, `update_node`, `delete_node`, `delete_node_cascade`, `retract_node`, `list_nodes`, `count_nodes` |
-| **Edges** | `get_edge`, `create_edge`, `update_edge`, `delete_edge`, `retract_edge`, `get_outgoing_edges`, `get_incoming_edges` |
+| **Edges** | `get_edge`, `create_edge`, `update_edge`, `delete_edge`, `retract_edge`, `get_outgoing_edges`, `get_incoming_edges`, `count_edges` |
 | **Batch** | `apply_batch` (ordered multi-op write batch committing all-or-nothing in one transaction; edge ops may reference batch-created nodes via `$alias`/`$<index>` local refs; see below) |
 | **Traversal** | `traverse` (multi-hop graph traversal; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
-| **Temporal** | `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time` (point-in-time find by label/property, no NodeId needed), `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown) |
+| **Embeddings** | `embed_query`, `embed_text`, `semantic_search`, `create_node_with_embedding`, `update_node_embedding` (generate embeddings from text and run text-based semantic search; require the `embeddings` feature + a configured model, else return a structured unavailable/precondition error — see [docs/EMBEDDINGS.md](docs/EMBEDDINGS.md#mcp-embedding-tools)) |
+| **Semantic** | `semantic_path`, `concept_analogy`, `concept_mean`, `find_duplicate_candidates`, `semantic_horizon`, `context_aspects` (read-only analysis over the stable `semantic-search` cohort; gated on the `semantic-search` feature — return `FAILED_PRECONDITION` with `required_feature` when absent; see [docs/guides/mcp-semantic-search-tools.md](docs/guides/mcp-semantic-search-tools.md)) |
+| **Temporal** | `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time` (point-in-time find by label/property, no NodeId needed), `get_node_at_valid_time`, `get_node_at_transaction_time`, `get_edge_at_valid_time`, `get_edge_at_transaction_time` (single-dimension point-in-time reads), `get_node_history`, `get_edge_history`, `diff_node_versions`, `diff_edge_versions` (version history + pairwise diff), `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown), `get_belief_revisions` (audit when/why the database changed its mind about a node/edge — classified revision sequence + confidence trajectory; requires the `semantic-temporal` feature; see below) |
+| **Changefeed** | `list_changes` (pull: what changed in a tx-time window), `await_changes` (push long-poll: block for the next committed changes; see below) |
+| **Drift alarms** | `create_drift_monitor`, `list_drift_monitors`, `delete_drift_monitor`, `query_drift_alarms`, `resolve_drift_alarm` (declare/manage semantic-drift monitors and query/resolve durable drift alarms; require the `semantic-temporal` feature — else `FAILED_PRECONDITION` with `required_feature`; Issue #3367) |
+| **Contradiction** | `contradiction_genealogy`, `find_contradictions` (reconstruct how conflicting claims about a fact evolved across bi-temporal history + provenance, and scan for entity/property contradictions; require the `semantic-temporal` feature; Issue #3352) |
+| **Counterfactual** | `counterfactual_replay` (materialize a read-only counterfactual view excluding a source's writes and report the blast radius; the real DB is never mutated; response carries a `counterfactual: true` marker; requires the `semantic-temporal` feature; Issue #3357) |
+| **Trust** | `trust_breakdown`, `list_trust_policies` (explain a fact's computed confidence as a tree over its derivation lineage, and list the active trust-propagation policies; require the `semantic-reasoning` feature; Issue #3382) |
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
 | **Lineage** | `lineage_upstream` / `lineage_downstream` (fact-to-fact derivation closure in both directions; the write tools take an optional `derived_from`) |
 | **Query** | `query` (execute a single read-only Cypher/AQL statement; see below) |
 | **Schema** | `get_schema` (node labels, edge types, and property keys, each with counts; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Stats** | `database_stats` (holistic snapshot: current size, bi-temporal depth + anchor/delta compression, hot/warm/cold tier distribution, WAL state; no arguments) |
+| **Constraints** | `enable_unique_constraint` (enable a uniqueness constraint on a label+property pair; fails fast on existing duplicates), `list_unique_constraints` (list active uniqueness constraints) |
+| **Namespaces** | `list_namespaces`, `describe_namespace`, `create_namespace` (agent-scoped namespaces — register/list/describe scopes with O(1) current-state node/edge counts; writing to an unknown namespace auto-registers it; see Namespaces guide) |
+| **Audit** | `audit_export` (produce a SIGNED, self-contained bi-temporal + provenance audit export of one node/edge, verifiable OFFLINE with only the signer's public key — for compliance, GDPR/CCPA subject-access, legal discovery; optional `redact_keys`) |
+| **GDPR crypto-shred (Admin)** | `designate_subject`, `erase_subject` (the only Admin-class tools; designate GDPR erasure targets then irreversibly destroy their key material — sealed payload becomes permanently undecryptable — returning a signed erasure attestation; require encryption configured; see [docs/guides/crypto-shred.md](docs/guides/crypto-shred.md)) |
 
 **Atomic multi-write batches (Issue #3231)**: `apply_batch` accepts an
 **ordered** array of write operations (`create_node`, `create_edge`,
 `update_node`, `update_edge`, `delete_node`, `delete_edge`, each supporting
-the #3221 optional `valid_time`) committing **all-or-nothing** in one
+the #3221 optional `valid_time`, plus `compare_and_set_node` — a
+version-precondition CAS on a committed node whose stale expected version
+aborts the whole batch → zero writes) committing **all-or-nothing** in one
 `WriteTransaction` (single WAL batch append / GroupCommit fsync) — an LLM
 builds an entity-with-relationships subgraph in ONE call instead of N calls
 with N−1 possible partially-committed states. A `create_node` may carry a
@@ -385,6 +496,13 @@ Recovery loop: `retriable: true` -> retry with backoff; `INVALID_ARGUMENT` /
 `message` + `details` and re-issue; otherwise escalate. Codes may be added
 over time but never change meaning; treat unknown codes as non-retriable. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#structured-error-codes-and-the-retriable-contract).
+**The HTTP surface now shares this exact nested envelope (breaking change):**
+`AletheiaHttpError` emits `{"error":{"code","message","retriable","details"?}}`
+(with `trace_id`, when present, a **top-level** sibling of `error`) — the legacy
+flat HTTP body (`{"success":false,"error":"<msg>","code":…}`, top-level
+`success`/`error`/`code`/`retriable`/`details`) has been **removed**, so HTTP and
+MCP error bodies are byte-shape-identical. Success responses are unchanged
+(`{"success":true,"data":…}`).
 
 **Database stats (Issue #3222)**: `database_stats` (no arguments) returns a
 holistic snapshot in one call so an LLM/operator can orient itself before
@@ -399,6 +517,63 @@ disk tier is not configured — never misleading zeros — or counters plus a
 serializable `DatabaseStats`; every field is an O(1)/cached counter read
 (no version scans; see Issue #212), so it is safe to call frequently. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#database-stats-and-storage-tier-health-database_stats).
+
+**Per-query resource limits (Issue #3368)**: the wall-clock-timeout and
+result-byte-cap enforcement that guards the `query` tool now also governs the
+read tools — `traverse`, `hybrid_query`, `find_similar`, `get_node_at_time`,
+`get_edge_at_time`, `find_nodes_at_time`, plus the six #2907 semantic-search
+analysis tools (`semantic_path`, `concept_analogy`, `concept_mean`,
+`find_duplicate_candidates`, `semantic_horizon`, `context_aspects`) enrolled for
+uniform coverage — wrapped at the dispatch seam
+(`RESOURCE_LIMITED_READ_TOOLS`), reusing the `query` tool's timeout thread-race
+and bounded in-flight-worker DoS guard. A breach returns `RESOURCE_EXHAUSTED`
+with `details.dimension` (`wall_clock_timeout`, retriable; `result_bytes`,
+non-retriable) — but via **tool-agnostic** emitters that produce the plain
+#3234 envelope (`{error:{code,message,retriable,details}}`); unlike the `query`
+tool's builders these carry **no** `kind` and **no** `language` field (a
+wrapped read tool is not a query language) and their remediation is
+tool-neutral (no `limits.timeout_ms`/`limits.max_response_bytes` advice, since
+these tools have no per-call `limits` override in v1). Ordering is cursor
+(#3360) → resource cap → token budget (#3353). **Overhead:** the output is
+unchanged under the default config, but the zero-overhead inline path applies
+**only** when the effective timeout is `0` (the `disabled()` config); under the
+*default* config the effective timeout is 30_000 ms, so each covered call runs
+on a timeout-race worker (thread-spawn + mpsc + in-flight-CAS, exactly like the
+`query` tool) — response-identical but not free. The per-call worker-spawn cost
+on hot-path reads (including cheap `get_node_at_time`/`get_edge_at_time`) has a
+quantifying micro-benchmark deferred to Lane-2. The `max_in_flight_queries` cap
+(default 64) is a **single shared pool** across the `query` tool and these
+wrapped read tools, so a flood of slow calls to one can make the others return
+`UNAVAILABLE` (bounded, retriable); a per-class sub-budget is a Lane-2
+follow-up. `database_stats` additively surfaces a
+`resource_limits` block (`timeout_terminations`, `byte_cap_terminations`,
+`override_rejections`) from process-lifetime atomic counters (the
+`DatabaseStats` struct/storage layer are untouched; row-cap breaches are **not**
+counted — they self-disclose via `truncated`/`has_more`). **v1 scope for these
+read tools:** server defaults only (no per-call `limits` override), **post-hoc**
+byte cap (the response is fully serialized then rejected if over cap). See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#extended-to-the-read-tools-issue-3368-residue).
+**Engine lane (landed):** the executor now enforces limits *cooperatively*
+inside its pull-based iterator pipeline via a `ResourceGuardIterator` — a
+row-granular guard checked before each `next()` that aborts the scan (no
+orphaned background thread), closing most of the deferred "Lane-2" work: a
+public **Rust builder API** (`QueryBuilder::with_timeout`/`with_max_rows`/
+`with_memory_budget`) + `AletheiaDBConfig::query_limits`
+(`EngineQueryLimitsConfig`, default/override/ceiling mirroring the MCP+HTTP
+merge), a **memory-budget** dimension (an `estimate_row_bytes` working-memory
+proxy, default-off; also wired into the MCP `query` tool so its detached
+timeout-race worker self-cancels near its deadline), structured
+`QueryError::ResourceExhausted { dimension, limit, consumed, retriable }` →
+`RESOURCE_EXHAUSTED`, per-dimension counters via
+`AletheiaDB::query_limit_counters()` (deliberately **not** on `DatabaseStats`),
+a **benchmark** (`benches/query_resource_limits.rs`, guard-on vs -off — the
+guard is off the direct current-state/temporal hot paths the standard suite and
+the <1µs single-hop target measure, so 0% there), a **concurrency soak**
+(`tests/query_resource_limits_soak.rs`), and an LLM **self-correction** test.
+The guard is skipped entirely under a fully-unlimited (`disabled()`) config
+(zero-alloc fast path). Still deferred: true per-allocation memory accounting +
+spill, HTTP-surface memory dimension, per-call overrides on the MCP read tools.
+See [docs/guides/query-resource-limits.md](docs/guides/query-resource-limits.md).
 
 **Valid-time writes (Issue #3221)**: `create_node`, `create_edge`,
 `update_node`, `update_edge`, `delete_node`, and `delete_edge` accept an
@@ -422,6 +597,27 @@ unless `detach: true`, which co-retracts edges and reports
 existing `[valid_from, valid_to)` interval. Rust API:
 `retract_node(_detach)` / `retract_edge` on `AletheiaDB`. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#retracting-a-fact-closing-valid-time).
+
+**Append-only valid-time supersession on update (ADR-0061)**: an update with
+`valid_from = t` no longer leaves the superseded version's valid-time prefix
+unreachable. The version whose valid interval contains `t` is closed on the
+transaction axis only (#3504: recorded valid intervals are never rewritten, so
+earlier-tx snapshots still see it open-ended), and a **structural carry-forward**
+version re-records its content over `[old_valid_from, t)` at the update's
+commit. The still-recorded versions of a live entity therefore partition valid
+time with no gaps or overlaps: an as-of read between two versions returns the
+earlier one. A **backfill** (`t` before later versions) covers only
+`[t, next_valid_from)` and re-asserts the open head, so the successor and current
+state are unchanged; an update at exactly the current `valid_from` is a
+degenerate replace. Structural versions carry the reserved
+`STRUCTURAL_VERSION_TAG` id bit (`VersionId::is_structural`), persist through
+every format without a format change, are skipped by `list_changes` and by
+`get_*_history` / `get_*_at_version` (history lists writes), and are exempt from
+the per-entity version cap. `get_node_valid_time_slices` /
+`get_edge_valid_time_slices` return the current partition. Delete
+withdraws every slice; retraction keeps the earlier slices. Still-recorded
+versions never migrate to the cold tier. See
+[docs/adr/0061-append-only-valid-time-supersession.md](docs/adr/0061-append-only-valid-time-supersession.md).
 
 **Point-in-time (AS OF) traversal (Issue #3225)**: `traverse` accepts optional
 `as_of_valid_time` / `as_of_transaction_time` (ISO 8601 / RFC 3339 or
@@ -503,10 +699,13 @@ temporal/history tools (`get_node_at_time`, `get_edge_at_time`,
 `get_node_history`), which have no `include_vectors` flag and always return
 full vectors.
 
-**Token-budget-aware responses (Issue #3353)**: the thirteen budgetable read
+**Token-budget-aware responses (Issue #3353)**: the twenty budgetable read
 tools — `get_node`, `list_nodes`, `get_edge`, `list_edges`,
 `get_outgoing_edges`, `get_incoming_edges`, `traverse`, `find_similar`,
-`hybrid_query`, `query`, `find_nodes_at_time`, `get_node_history`, `get_schema`
+`semantic_search`, `hybrid_query`, `query`, `find_nodes_at_time`,
+`get_node_history`, `get_schema`, `semantic_path`, `concept_analogy`,
+`concept_mean`, `find_duplicate_candidates`, `semantic_horizon`,
+`context_aspects`
 (the single source of truth is `BUDGETABLE_READ_TOOLS`; not *every* read tool —
 e.g. `get_node_at_time`, `get_edge_history`, `diff_node_versions`,
 `temporal_extent`, `database_stats`, `count_nodes` are out of scope) — accept an
@@ -630,7 +829,11 @@ per call (revocation is immediate); auth failures are a uniform
 `UNAUTHENTICATED` (never distinguishing missing/unknown/revoked), role
 denials are `PERMISSION_DENIED` with `details.required_class` /
 `details.principal_role` — both additive to the #3234 enum, both
-`retriable: false`. Authenticated writes stamp the principal's name into
+`retriable: false`. Since the #3234 HTTP error-envelope unification these
+denials render identically on **both** surfaces as the nested
+`{"error":{"code","message","retriable","details"}}` body (the HTTP surface no
+longer emits the legacy flat `{"success":false,…}` shape, and its 403 now carries
+`error.details.{required_class,principal_role}` too). Authenticated writes stamp the principal's name into
 version provenance (`provenance.principal`, composing with the
 caller-supplied `source`) on the structured create/update node/edge
 paths of both surfaces — deletes/retracts and HTTP AQL-statement writes
@@ -858,6 +1061,235 @@ dangling ref, `INVALID_ARGUMENT` for self/cycle, `FAILED_PRECONDITION` for
 already-recorded), all non-retriable. Durable persistence of lineage is a
 #3413 follow-up; the #3427 attribution caveat applies. See
 [docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md).
+
+### Schema Constraints: Property Types & Required Keys (Issue #3378)
+
+**Opt-in** per-label (node) / per-edge-type declarations that a property must be
+present and/or hold a declared type; a label with no declaration stays fully
+schemaless (zero behavior change, zero write-path overhead). Declared via a
+builder mirroring `unique_constraint`:
+
+```rust
+use aletheiadb::core::{EntityKind, constraint::DeclaredType};
+db.schema_constraint(EntityKind::Node, "Person")
+    .require("name")                              // required, any type
+    .require_typed("age", DeclaredType::Integer)  // required + typed
+    .typed("email", DeclaredType::String)         // optional but typed
+    .enable()?;                                    // -> ConformanceReport
+```
+
+`DeclaredType` = `String|Integer|Float|Boolean|Temporal|Bytes|Vector{dim:Option<usize>}`
+(`Temporal` maps to `Int` micros-since-epoch; `Vector{dim:Some(d)}` requires
+exactly dim `d`). Enforced at the existing pre-apply commit hook
+(`check_constraints`, alongside #3218 uniqueness) for **both nodes and edges**,
+so all write paths (incl. bulk import) are covered atomically — one violating op
+aborts the whole transaction, zero partial writes. Updates are **PATCH**: checks
+run against the effective post-merge map (a patch nulling a required key fails; a
+patch not touching it passes). `enable()` scans **current state** only and
+returns a `ConformanceReport` (`conforms`, counts, aggregated `violations` with
+sample ids); on a populated non-conforming label it returns
+`ConstraintError::NonConformingOnEnable` and declares nothing; `.dry_run()`
+returns the report without applying. **Forward-only temporal**: history is never
+re-scanned/invalidated (time-travel reads keep working; reads never blocked); a
+backdated (`valid_time`) write is validated against the constraint set active at
+its transaction time = now (AC7). API: `schema_constraint(kind,label)` builder,
+`list_schema_constraints()`, `drop_schema_constraint(kind,label)`. `get_schema`
+gains `declared_constraints` per label/type (declared vs merely observed keys).
+
+**Errors (#3234):** `TypeViolation`/`MissingRequiredKey` → `CONSTRAINT_VIOLATION`,
+`NonConformingOnEnable` → `FAILED_PRECONDITION` (all `retriable:false`).
+
+**Durability:** a bitcode+CRC sidecar `{data_dir}/schema_constraints.dat` (atomic
+temp→fsync→rename, tolerant/quarantining load) — ephemeral `new()` is in-memory
+only — and folded into the `.albk` backup payload (round-trips through
+restore). **Residue:** #3218 uniqueness constraints are WAL-persisted but NOT in
+`.albk`; these schema constraints ARE.
+
+**v1 scope:** Rust API + a minimal MCP error-classification hunk only. MCP/CLI
+declaration tools and AQL/Cypher DDL (#560) are follow-ups.
+
+**See [docs/guides/schema-constraints.md](docs/guides/schema-constraints.md).**
+
+### Changefeed Subscriptions (Issue #3375)
+
+Push counterpart to the #3216 `list_changes` pull feed: `AletheiaDB::subscribe_changes(filter)`
+returns a `Subscription` whose bounded buffer fills with matching `ChangeRecord`s as
+transactions commit — no polling. `poll()` drains non-blocking; `recv_timeout(dur)` is a
+sync `Mutex`+`Condvar` long-poll (no async dep). A `ChangeFilter`
+selects by node label / edge type / change type (unset dimension = match-all on that axis;
+setting only labels excludes edges and vice-versa; `change_types` is a kind-independent AND).
+The broadcast runs in the commit path **after** the write is durable + applied + visible and
+**outside every write-path lock** (the broadcaster's locks are leaves; records are built via a
+targeted O(txn-size) `historical.read()` of just that transaction's versions, so they are
+byte-identical to `list_changes`). Delivery is **best-effort at-least-once**; the durable
+ground truth is `list_changes`. A lagged (bounded-buffer overflow → disconnected, never
+back-pressures the writer), reconnecting, or crash-surviving consumer resumes with **zero
+loss** by pulling `list_changes` from its last `resume_token` (the encoded `ChangeCursor` of
+the last event drained); duplicates on resume dedup by that stable cursor
+`(tx_time, kind, entity_id, version_id)`. Caps are configurable via `set_changefeed_config`
+(defaults: 128 subscriptions, 1024-event buffer); exceeding the subscription cap fails
+`subscribe_changes` with `CapacityExceeded`. Dropping a `Subscription` deregisters it. v1 is
+in-memory (no WAL change). See [docs/guides/reacting-to-change.md](docs/guides/reacting-to-change.md).
+
+**MCP `await_changes` long-poll + HTTP SSE stream (changefeed surface):** the
+`await_changes` MCP tool (read-class) wraps this primitive as a **stateless**
+per-call subscribe→catch-up→block long-poll: it subscribes (capturing the
+frontier so nothing is lost between catch-up and blocking), optionally catches
+up from a prior `from_token` via `list_changes` (returning immediately if any
+change already exists), else blocks up to `timeout_ms` (default 25000, hard cap
+60000) for the next matching commit. Response:
+`{changes:[…list_changes shape…], count, resume_token, timed_out, has_more}`.
+Error mappings (#3234): a lagged subscription → retriable `RESOURCE_EXHAUSTED`
+with `details.resume_token` (resume losslessly via `list_changes`); a
+subscribe-cap breach → retriable `UNAVAILABLE`; a malformed `from_token` →
+`INVALID_ARGUMENT`. It is deliberately **excluded** from the #3368 per-read
+timeout, #3353 token-budget, and #3360 cursor wrappers (a long-poll is expected
+to block). The HTTP surface adds `POST /changes/await` (the tool projection) and
+a **route-only** `GET /changes/stream` Server-Sent Events stream (read-class,
+NOT an MCP tool — like `GET /metrics`): one `data:` frame per committed change,
+a terminal `event: lagged` frame carrying the resume token on overflow. Filter
+via `?node_labels=…&edge_types=…&change_types=…` (comma-separated).
+### Named Snapshots — Reproducible Reads (Issue #3370)
+
+Pins a human-readable name to a bi-temporal coordinate
+`(valid_time, transaction_time)`; reads through the resulting handle resolve
+via the deterministic historical (`*_at_time`) path, so the same handle returns
+**identical results regardless of later writes**. A snapshot is a **coordinate,
+not a held resource**: it pins no storage and adds no lasting write-path
+overhead (the registry is off the data write path). Creation takes the
+commit-clock lock just long enough to copy one `Timestamp` (nanosecond-scale,
+not literally zero); a snapshot created racing an in-flight commit inherits the
+engine's standard committed-but-not-yet-applied visibility window (same caveat
+as #3225/#3236). **Rust API:** `create_snapshot(name, description)` defaults
+**valid-time = wallclock `time::now()`** (the engine's "now" convention, so
+facts actually valid at creation are not dropped) and **transaction-time = the
+commit frontier under `current_timestamp`** (race-free monotonic, so post-pin
+commits are invisible and pre-pin commits visible) / `create_snapshot_at(name,
+vt, tt, description)` (explicit/backdated, not extent-checked) /
+`snapshot(name) -> Snapshot` / `get_snapshot` / `list_snapshots` (stable order:
+created_at, then name) / `delete_snapshot`. The `Snapshot<'_>` handle pins
+`get_node`/`get_edge`/`find_nodes`/`find_nodes_by_property`, adjacency
+(`get_outgoing_edges`/`get_incoming_edges`), and a pre-pinned `query()` builder
+(traversal at the pin). Errors reuse the #3234 codes (dup name → `CONFLICT`,
+missing → `NOT_FOUND` with the name). Durably persisted (atomic
+temp+rename+fsync, coordinates as the **full HLC** `{wallclock, logical}` so a
+same-microsecond supersession pin resolves correctly after restart; sidecar
+`version: 2`, a legacy `version: 1` bare-i64 file still loads as logical 0)
+**inside** the persistence dir at `{persistence.data_dir}/snapshots.json`
+(`{data_dir}/indexes/snapshots.json` under the durable config) when index
+persistence is enabled — survives restart; in-memory-only for ephemeral
+`AletheiaDB::new()`. A corrupt/unparseable sidecar does **not** brick startup
+(unlike the auth key store): it is quarantined aside (`*.corrupt`) and startup
+proceeds with an empty registry. Caveats mirror `temporal_extent` (#3238) /
+point-in-time reads: cold-tier/truncation eviction can make a pinned version
+unreadable, and pinning "now" excludes future-valid facts. MCP exposure and an
+`AS OF SNAPSHOT <name>` query DDL are a coordinated follow-up (this wave is
+Rust-API-only). See [docs/guides/snapshot-pin.md](docs/guides/snapshot-pin.md).
+
+### Multi-Tenant Isolation (Issue #3365)
+
+Serve many isolated logical databases — **tenants** — from one process. A
+`TenantManager` (`src/tenant/`) owns **one fully-separate `AletheiaDB` per
+tenant** (instance-per-tenant), so hard data isolation, per-tenant
+history/indexes/constraints/schema, ID-collision-without-interference,
+independent `.albk` backup/restore, single-tenant-equivalent temporal/WAL/recovery
+semantics, and blast-radius containment all fall out **by construction** rather
+than from leak-prone per-query filtering. Deliberately unlike agent-scoped
+namespaces (#3349), which are a cooperative in-tenant convenience, **not** a
+security/resource boundary. **Rust API:** `TenantManager::new_ephemeral()` /
+`open(root)` (durable per-tenant dirs under `{root}/tenants/{id}`, registry
+sidecar `{root}/tenants.json`, quarantine-on-corrupt); `create_tenant` /
+`get_tenant` / `get_tenant_info` / `list_tenants` / `tenant_usage` /
+`set_tenant_quota` / `delete_tenant` / `restore_tenant`; a `TenantHandle` binds a
+session to one tenant (`db()` for isolated reads/queries; quota-enforced
+`create_*`/`delete_*` for writes; `mcp_server()` for a tenant-scoped MCP server so
+existing agent tooling works unchanged). **Quotas** (`TenantQuota`, adjustable):
+`max_nodes`/`max_edges` enforced **precisely** via an atomic reservation
+taken-before-write / released-on-failure (never a partial write, never a
+concurrent race past the cap); `max_vector_index_bytes`/`max_storage_bytes`
+enforced **best-effort** against O(1) estimators (v1). A quota breach →
+`TenantError::QuotaExceeded` → `RESOURCE_EXHAUSTED` (non-retriable, `details:
+{tenant, dimension, current, limit}`) on both the MCP and HTTP #3234 envelopes;
+lifecycle errors → `INVALID_ARGUMENT`/`NOT_FOUND`/`CONFLICT`. **Usage
+accounting** (`TenantUsage`, O(1) counters) is metering-suitable. Tenant ids are
+**lowercase-only** (`[a-z0-9._-]`) so a case-insensitive-filesystem directory
+collision (`Acme` vs `acme` sharing one WAL) is impossible by construction. The
+single-tenant default (`AletheiaDB::new()`/`open()`) is untouched, zero overhead.
+**v1 scope:** Rust-API core + MCP tenant-scoping + #3234 error wiring; the string
+interner is process-global (a documented cross-tenant capacity/DoS caveat — data
+values are never shared, per-tenant interners are a follow-up), and admin *tool*
+wiring on the MCP/HTTP/CLI surfaces plus #3350 identity→tenant binding are
+coordinated follow-ups that compose directly on this core. See
+[docs/guides/multi-tenancy.md](docs/guides/multi-tenancy.md).
+
+### Asynchronous Replication (Issue #3355)
+
+Single-primary, asynchronous, pull-based replication: a replica polls the
+primary's feed for durable (already-fsynced) WAL entries and applies them via
+the same recovery replay engine crash recovery and PITR use, giving read
+scale-out and a warm standby for manual failover with effectively zero
+primary write-path overhead. Config via `[replication]`
+(`ReplicationConfig`/`ReplicationConfigBuilder` in `src/config.rs`):
+`listen_addr`, `primary_addr`, `auth_token` / `auth_token_env`,
+`poll_interval_ms`, `batch_max_entries` — setting `listen_addr`/`primary_addr`
+without a resolvable token fails `with_unified_config` fast, never falling
+back to anonymous replication. Rust entry points:
+`AletheiaDB::start_replication(source, opts)` (stream into an existing
+database) and `AletheiaDB::bootstrap_replica(source, data_dir, opts)`
+(snapshot-bootstrap a fresh replica via the `.albk` format, then stream).
+Promotion: `AletheiaDB::promote_to_primary() -> PromotionReport` (Rust) or
+`POST /admin/promote` (HTTP, Admin-class — the one write path a replica is
+allowed to accept). **Consistency contract**: replicas are strictly
+read-only — every other write/admin surface rejects with a structured,
+non-retriable `FAILED_PRECONDITION`
+(`details: {node_role: "replica", reason: "read_only_replica"}`) — and apply
+only whole commit frames, so reads are always a consistent, possibly-stale
+(never torn) snapshot at transaction time ≤ the replica's applied LSN. Whole-frame
+*submission* is only half of "never torn": the replay engine walks a frame
+operation by operation, so a replica also arms a **current-state apply gate**
+(Issue #3788) that the applier publishes each batch inside — a point lookup
+(`get_node`/`get_edge`, edge endpoint/label accessors, adjacency lookups,
+degrees) sees the state before the batch or after it, never mid-apply. The gate
+is disarmed on a primary (a predictable branch, no lock) and re-disarmed once
+`promote_to_primary()` joins the applier; while armed it is a seqlock (loads
+only, no atomic RMW) so replica reader fan-out still scales. Bulk scans and
+iterators are deliberately NOT gated (`DashMap` iteration was never a
+point-in-time snapshot even on a primary) — use the bi-temporal reads for a true
+snapshot. RPO
+under primary loss equals replication lag at failure, surfaced via
+`replication_progress()`/`database_stats`. Manual failover only — no
+automatic election or fencing (split-brain risk if an old primary is not
+isolated before promotion). See
+[docs/guides/replication-guide.md](docs/guides/replication-guide.md) and
+[docs/guides/promotion-runbook.md](docs/guides/promotion-runbook.md).
+
+### Encryption & Compliance
+
+Encryption-at-rest for on-disk data plus GDPR-oriented compliance tooling.
+All encryption is **opt-in behind feature flags** — a default build carries no
+encryption code or write-path overhead.
+
+- **Encryption-at-rest** (`encryption` feature, ADR-0028): transparent
+  authenticated encryption of persisted data (WAL, index persistence, cold
+  storage). See `src/encryption/` (`manager`, `cipher`, `key_provider`,
+  `rotation`).
+- **KMS / Vault key providers** (`encryption-aws-kms`, `encryption-vault`
+  features): envelope encryption with an external key-management service —
+  AWS KMS (`src/encryption/kms_provider.rs`) or HashiCorp Vault
+  (`src/encryption/vault_provider.rs`).
+- **Key rotation** (`src/encryption/rotation.rs`): rotate the data-encryption
+  key without re-encrypting the whole dataset.
+- **Hot-live enable** (`src/db/encryption_enable.rs`,
+  `AletheiaDB::enable_encryption`): turn encryption on for an already-running
+  database with no reopen required (paired disable engine in
+  `src/db/encryption_disable.rs`).
+- **GDPR crypto-shred** (`src/db/crypto_shred/`): designate an erasure subject
+  over whole entities or specific property keys, then irreversibly destroy the
+  per-subject key material so the sealed payload becomes permanently
+  undecryptable, emitting a signed erasure attestation. Exposed as the
+  Admin-class MCP tools `designate_subject` / `erase_subject`.
+
+**Start here: [docs/guides/encryption.md](docs/guides/encryption.md)** — the end-to-end encryption narrative that ties these pieces together. **See also [docs/ENCRYPTION.md](docs/ENCRYPTION.md), [docs/adr/0028-encryption-at-rest.md](docs/adr/0028-encryption-at-rest.md), and [docs/guides/crypto-shred.md](docs/guides/crypto-shred.md).**
 
 ### Feature Flags: Stable vs Experimental
 
@@ -1109,18 +1541,38 @@ pub fn hot_path_function() {
 
 ## LLM Integration
 
-AletheiaDB is designed for LLM integration with temporal query patterns:
+AletheiaDB is designed for LLM integration with temporal query patterns.
 
-**Natural Language-Like Queries:**
+**Temporal query patterns (real API — illustrative snippets):**
+
 ```rust
-db.as_of("2024-01-15T10:00:00Z").find_node("Person", "name" == "Alice")
-db.between("2024-01-01", "2024-12-31").track_changes(node_id)
+// "What did we know about X at time T?"
+// Point-in-time reconstruction of a single entity (bi-temporal coordinate).
+let node = db.get_node_at_time(node_id, valid_time, transaction_time)?;
+
+// "Who was a Person named Alice, as of T?" — resolve entry points without a NodeId.
+let matches = db.find_nodes_at_time("Person", valid_time, transaction_time)?;
+
+// "How has Y changed?" — full version history of an entity.
+let history = db.get_node_history(node_id)?;
+
+// Bi-temporal graph traversal via the query builder
+// (as_of/between live on QueryBuilder and take two `Timestamp` args).
+let results = db.query()
+    .as_of(valid_time, transaction_time)
+    .start(alice_id)
+    .traverse("KNOWS")
+    .execute(&db)?;
+
+// Or express the same temporally-scoped question declaratively:
+let rows = db.execute_cypher(
+    "MATCH (n:Person {name: 'Alice'})-[:KNOWS]->(f) AS OF SYSTEM_TIME '2024-01-15T10:00:00Z' RETURN f",
+)?;
 ```
 
-**Query Patterns:**
-- "What did we know about X at time T?" → `db.as_of(T).get(X)`
-- "How has Y changed?" → `db.history(Y).changes()`
-- "When did we first record F?" → `db.first_occurrence(F)`
+The snippets above are illustrative; see the linked guides and `src/db/` for
+exact signatures (`get_node_at_time`, `find_nodes_at_time`, `get_node_history`,
+`QueryBuilder::as_of` / `between`, `execute_cypher`).
 
 **Integration Methods:**
 1. Direct Rust API (for embedded use)
@@ -1179,9 +1631,9 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 
 ### Vector Search (SUPERRAG) - Remaining Phases
 
-**Status**: Phases 1-4 complete (storage, indexing, temporal, hybrid queries), Phase 5 pending
+**Status**: Phases 1-4 complete (storage, indexing, temporal, hybrid queries); Phase 5 partially landed — vector index persistence has shipped (`src/storage/index_persistence/vector.rs`; HNSW meta/mappings persistence — see [docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md)).
 
-**Phase 5 will add:**
+**Phase 5 remaining:**
 - Streaming temporal queries
 - Incremental index updates
 - Advanced optimization techniques
@@ -1192,12 +1644,14 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 
 - ✅ Sharding for horizontal scale (implemented)
 - ✅ Distributed transaction coordination with 2PC (implemented)
-- Replication for high availability (planned)
+- ✅ Asynchronous replication for read scale-out and manual failover
+  (implemented, Issue #3355 — see the Asynchronous Replication section above)
+- Automatic leader election / fencing (not planned; failover is manual)
 
 ### Query Language
 
 - ✅ Cypher-like temporal extensions (implemented)
-- SQL:2011 temporal syntax (planned)
+- ✅ SQL:2011 temporal syntax (implemented, behind the `sql` feature — `parse_sql`, `FOR SYSTEM_TIME AS OF` / `FOR VALID_TIME AS OF`; see `src/sql/`)
 - ✅ Time-aware pattern matching (implemented)
 
 ### Advanced Features
@@ -1218,7 +1672,7 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 - **[docs/MIRI.md](docs/MIRI.md)** - Undefined behavior detection for unsafe code
 
 ### Language Bindings
-- **[python/README.md](python/README.md)** - Python SDK (PyO3 bindings, `pip install aletheiadb`)
+- **[python/README.md](python/README.md)** - Python SDK (PyO3 bindings, `pip install aletheiadatabase`; the PyPI *distribution* is `aletheiadatabase` because `aletheiadb` there belongs to an unrelated project, but the *import* name is still `aletheiadb`)
 
 ### Feature Documentation
 - **[docs/WAL.md](docs/WAL.md)** - Write-ahead log internals
@@ -1239,6 +1693,10 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 - **[docs/guides/security-quickstart.md](docs/guides/security-quickstart.md)** - Authentication, RBAC roles, API-key lifecycle
 - **[docs/guides/access-control-matrix.md](docs/guides/access-control-matrix.md)** - Canonical role/operation authorization matrix
 - **[docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md)** - Fact-to-fact derivation lineage: version-pinned upstream/downstream closures (Issue #3371)
+- **[docs/guides/trust-propagation.md](docs/guides/trust-propagation.md)** - Computed confidence over lineage: combinators, per-label policy, trust_breakdown explainability, retraction/valid-time rules (Issue #3382)
+- **[docs/guides/namespaces-guide.md](docs/guides/namespaces-guide.md)** - Agent-scoped namespaces: shared knowledge base + private agent scratch, isolated-by-default read scoping (Issue #3349)
+- **[docs/guides/multi-tenancy.md](docs/guides/multi-tenancy.md)** - Multi-tenant isolation: one fully-separate `AletheiaDB` per tenant, per-tenant resource quotas + O(1) usage accounting, hard data isolation by construction (Issue #3365)
+- **[docs/guides/daemon-mode.md](docs/guides/daemon-mode.md)** - Daemon-owned database: one `aletheia-daemon` process serving REST + MCP-over-HTTP, `ALETHEIADB_DAEMON_URL` stdio relays, Windows/Codex client setup (Issue #2905)
 
 ### Architecture Decision Records (ADRs)
 See `docs/adr/` for all architectural decisions.

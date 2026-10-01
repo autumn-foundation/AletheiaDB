@@ -1,6 +1,6 @@
 # AletheiaDB
 
-[![CI](https://github.com/madmax983/AletheiaDB/actions/workflows/ci.yml/badge.svg)](https://github.com/madmax983/AletheiaDB/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/madmax983/AletheiaDB/branch/trunk/graph/badge.svg)](https://codecov.io/gh/madmax983/AletheiaDB) [![crates.io](https://img.shields.io/crates/v/aletheiadb.svg)](https://crates.io/crates/aletheiadb) [![docs.rs](https://docs.rs/aletheiadb/badge.svg)](https://docs.rs/aletheiadb) [![Security Policy](https://img.shields.io/badge/security-policy-blue.svg)](SECURITY.md)
+[![CI](https://github.com/autumn-foundation/AletheiaDB/actions/workflows/ci.yml/badge.svg)](https://github.com/autumn-foundation/AletheiaDB/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/autumn-foundation/AletheiaDB/branch/trunk/graph/badge.svg)](https://codecov.io/gh/autumn-foundation/AletheiaDB) [![crates.io](https://img.shields.io/crates/v/aletheiadb.svg)](https://crates.io/crates/aletheiadb) [![docs.rs](https://docs.rs/aletheiadb/badge.svg)](https://docs.rs/aletheiadb) [![Security Policy](https://img.shields.io/badge/security-policy-blue.svg)](SECURITY.md)
 
 A high-performance **bi-temporal graph database** in Rust, combining graph
 traversal, vector similarity search, and full temporal history in a single
@@ -24,15 +24,21 @@ cargo run --example demo
 ```
 
 Time-to-first-query is a few seconds (the one-time `cargo build` is separate).
-The three entry channels, each with its exact commands:
+The four entry channels, each with its exact commands:
 
 | Channel | Command | Server? | API key? |
 |---------|---------|---------|----------|
 | **Embedded (Rust)** | `cargo run --example demo` | No | No |
 | **MCP (agent-issued)** | `export ALETHEIADB_BOOTSTRAP_ADMIN_KEY="$(openssl rand -base64 32)"`<br>`cargo run --bin aletheia-mcp --features mcp-server` | Yes (stdio) | Yes |
 | **HTTP server** | `export ALETHEIADB_BOOTSTRAP_ADMIN_KEY="$(openssl rand -base64 32)"`<br>`cargo run --bin aletheia-server --features http-server` | Yes | Yes |
+| **Daemon (HTTP + MCP, one owner)** | `cargo install --path crates/aletheia-server`<br>`ALETHEIADB_DATA_DIR=~/.aletheiadb aletheia daemon start` | Yes | Yes |
 
-Authentication is **on by default** for both servers — see the
+Use the **daemon** when more than one agent session must share state: the
+embedded MCP channel above gives each client session its own database, whereas
+one daemon owns the files and every client — CLI, HTTP, MCP — talks to it. See
+the [daemon-mode guide](docs/guides/daemon-mode.md).
+
+Authentication is **on by default** for every server — see the
 [Security Quickstart](docs/guides/security-quickstart.md) for key setup and the
 explicit anonymous opt-in. Full walkthrough, sample output, and measured
 timings: **[60-Second Quickstart guide →](docs/guides/quickstart.md)**
@@ -43,7 +49,7 @@ timings: **[60-Second Quickstart guide →](docs/guides/quickstart.md)**
 
 ```toml
 [dependencies]
-aletheiadb = "0.1"
+aletheiadb = "0.2"
 ```
 
 Requires Rust 1.92+.
@@ -110,6 +116,45 @@ graceful shutdown, and measured footprint/startup.
 
 ---
 
+## Shell completions
+
+The `aletheia` CLI can print a tab-completion script for your shell. The script
+reflects the subcommands compiled into your binary.
+
+```bash
+aletheia completions <bash|zsh|fish|powershell|elvish>
+```
+
+Install it once so `aletheia <TAB>` completes subcommands and flags:
+
+```bash
+# bash — system-wide (needs write access to the completion dir)
+aletheia completions bash | sudo tee /etc/bash_completion.d/aletheia > /dev/null
+
+# bash — per user (the file-write approach requires the `bash-completion` package)
+mkdir -p ~/.local/share/bash-completion/completions
+aletheia completions bash > ~/.local/share/bash-completion/completions/aletheia
+# ...or source it directly (add this line to ~/.bashrc):
+eval "$(aletheia completions bash)"
+```
+
+```zsh
+# zsh — write into a user-owned completions dir and ensure compinit runs
+# Ensure ~/.zshrc initializes completions:  autoload -Uz compinit && compinit
+mkdir -p ~/.zsh/completions
+aletheia completions zsh > ~/.zsh/completions/_aletheia
+# add to ~/.zshrc BEFORE compinit:  fpath=(~/.zsh/completions $fpath)
+# then reload: rm -f ~/.zcompdump; compinit   (or restart the shell)
+```
+
+```fish
+# fish
+mkdir -p ~/.config/fish/completions
+aletheia completions fish > ~/.config/fish/completions/aletheia.fish
+```
+
+---
+
 ## Hybrid Queries
 
 Graph traversal, vector ranking, and temporal snapshots compose into a single
@@ -146,7 +191,7 @@ See the [Hybrid Query guide](docs/guides/hybrid-query-guide.md).
 ## Performance
 
 Benchmarks run on every push to trunk.
-[📊 Latest results](https://madmax983.github.io/AletheiaDB/benchmarks/)
+[📊 Latest results](https://autumn-foundation.github.io/AletheiaDB/benchmarks/)
 
 Averages across 30–212 datapoints of continuous CI runs:
 
@@ -182,7 +227,7 @@ All features are off by default except `config-toml`.
 
 `nova` does **not** include `semantic-search` — use both flags if you want everything:
 ```toml
-aletheiadb = { version = "0.1", features = ["nova", "semantic-search"] }
+aletheiadb = { version = "0.2", features = ["nova", "semantic-search"] }
 ```
 
 ---
@@ -195,6 +240,7 @@ aletheiadb = { version = "0.1", features = ["nova", "semantic-search"] }
 | [Why AletheiaDB](docs/guides/why-aletheiadb.md) | The problem it solves; when to use it |
 | [Core Concepts](docs/guides/core-concepts.md) | Bi-temporal model, nodes, edges, WAL, vector search |
 | [Installation](docs/guides/installation.md) | Prerequisites, feature flags, building from source |
+| [0.1 → 0.2 Migration](docs/guides/migration-0.1-to-0.2.md) | Upgrading an embedded 0.1.x deployment to 0.2.0 |
 | [Getting Started](docs/guides/getting-started.md) | First database, CRUD, time-travel, hybrid queries |
 | [Docker](docs/guides/docker.md) | Container image, compose quickstart, MCP mode, volumes |
 | [Persistence Guide](docs/guides/PERSISTENCE.md) | WAL, index persistence, cold storage |
@@ -238,7 +284,7 @@ request to get the full array back. Similarity scores (`score` /
 ## Contributing
 
 ```bash
-git clone https://github.com/madmax983/AletheiaDB
+git clone https://github.com/autumn-foundation/AletheiaDB
 cargo build
 just check-all   # format + lint + test + coverage
 ```

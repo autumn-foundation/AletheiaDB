@@ -4,7 +4,7 @@
 //! The executor transforms physical operators into iterators that
 //! lazily produce results.
 
-mod iterators;
+pub(crate) mod iterators;
 mod profiling;
 mod results;
 
@@ -12,13 +12,17 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 
 use crate::core::error::Result;
+use crate::core::namespace::{NamespaceScope, ResolvedScope};
+use crate::query::limits::{LimitCounters, QueryResourceLimits};
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 
 use super::planner::physical::{PhysicalOp, PhysicalPlan};
 
+pub use iterators::EdgeScanIterator;
 #[doc(hidden)]
 pub use iterators::NodeScanIterator;
+pub use iterators::ResourceGuardIterator;
 pub use iterators::ResultIterator;
 #[doc(hidden)]
 pub use iterators::ScanStrategy;
@@ -42,6 +46,7 @@ pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 ///     max_buffer_size: 5000,
 ///     parallel: true,
 ///     timeout_ms: 1000,
+///     ..ExecutionConfig::default()
 /// };
 /// assert_eq!(config.max_buffer_size, 5000);
 /// ```
@@ -55,7 +60,22 @@ pub struct ExecutionConfig {
     pub parallel: bool,
     /// Execution timeout in milliseconds.
     /// 0 means no timeout. Default is 0.
+    ///
+    /// This is a *legacy*, unenforced field kept for backward compatibility;
+    /// it is not read by [`QueryExecutor::execute`]. The enforced per-query
+    /// wall-clock budget lives on [`limits`](Self::limits) (Issue #3368
+    /// engine lane).
     pub timeout_ms: u64,
+    /// Resolved per-query resource limits enforced by a
+    /// [`ResourceGuardIterator`](super::executor::ResourceGuardIterator)
+    /// wrapped around the result stream (Issue #3368 engine lane). Defaults
+    /// to [`QueryResourceLimits::unlimited`], in which case `execute` skips
+    /// installing the guard entirely (zero-cost fast path).
+    pub limits: QueryResourceLimits,
+    /// Optional shared counters incremented when [`limits`](Self::limits)
+    /// terminates a query (Issue #3368 engine lane observability). `None`
+    /// disables recording.
+    pub counters: Option<Arc<LimitCounters>>,
 }
 
 impl Default for ExecutionConfig {
@@ -64,6 +84,8 @@ impl Default for ExecutionConfig {
             max_buffer_size: 10_000,
             parallel: false,
             timeout_ms: 0,
+            limits: QueryResourceLimits::unlimited(),
+            counters: None,
         }
     }
 }
@@ -120,8 +142,22 @@ pub struct QueryExecutor {
     current: Arc<CurrentStorage>,
     /// Reference to historical storage
     historical: Arc<RwLock<HistoricalStorage>>,
-    /// Execution configuration (used for timeout/parallelism in future)
-    _config: ExecutionConfig,
+    /// Execution configuration, including the resolved per-query resource
+    /// limits (Issue #3368 engine lane) consulted by [`Self::execute`] /
+    /// [`Self::execute_profiled`] to decide whether to install a
+    /// [`ResourceGuardIterator`](iterators::ResourceGuardIterator).
+    config: ExecutionConfig,
+    /// Optional namespace scope (Issue #3349, PR2). When set, the executor
+    /// filters produced entities to those whose namespace ∈ scope and threads
+    /// the boundary into graph traversal. `Arc` so it can be cheaply shared into
+    /// the traversal iterator. `None` ⇒ prior namespace-agnostic behavior.
+    scope: Option<Arc<NamespaceScope>>,
+    /// The attached `scope` resolved to interned ids **once** (Issue #3349, PR2
+    /// hoist), computed in [`with_namespace_scope`](Self::with_namespace_scope)
+    /// and cheaply cloned into every source-leaf filter and the traversal
+    /// boundary so no per-source/per-hop probe re-derives ids or allocates.
+    /// [`ResolvedScope::All`] when no restricting scope is attached.
+    resolved_scope: ResolvedScope,
 }
 
 impl QueryExecutor {
@@ -130,7 +166,9 @@ impl QueryExecutor {
         QueryExecutor {
             current,
             historical,
-            _config: ExecutionConfig::default(),
+            config: ExecutionConfig::default(),
+            scope: None,
+            resolved_scope: ResolvedScope::All,
         }
     }
 
@@ -143,8 +181,30 @@ impl QueryExecutor {
         QueryExecutor {
             current,
             historical,
-            _config: config,
+            config,
+            scope: None,
+            resolved_scope: ResolvedScope::All,
         }
+    }
+
+    /// Attach a namespace scope (Issue #3349, PR2). Produced entities are
+    /// filtered to those in scope and graph traversal honors the scope boundary
+    /// (an out-of-scope edge or node is never crossed). [`NamespaceScope::All`]
+    /// is a no-op filter. See [`QueryBuilder::in_namespace`](crate::query::QueryBuilder::in_namespace).
+    #[must_use]
+    pub fn with_namespace_scope(mut self, scope: NamespaceScope) -> Self {
+        // Resolve the scope to interned ids ONCE here (Issue #3349, PR2 hoist),
+        // then thread cheap clones into each source-leaf filter and the traversal
+        // boundary, rather than re-resolving per source/per traversal.
+        self.resolved_scope = scope.resolve();
+        self.scope = Some(Arc::new(scope));
+        self
+    }
+
+    /// Whether the attached scope actually restricts results (i.e. is present and
+    /// not [`NamespaceScope::All`]).
+    fn scope_is_restricting(&self) -> bool {
+        matches!(&self.scope, Some(s) if !matches!(s.as_ref(), NamespaceScope::All))
     }
 
     /// Execute a physical plan and return results.
@@ -194,13 +254,32 @@ impl QueryExecutor {
     /// }
     /// ```
     pub fn execute(&self, plan: PhysicalPlan) -> Result<QueryResults> {
-        let iterator = self.build_op(&plan.root, &mut None, 0)?;
+        let iterator = {
+            let bind_edge = plan_needs_edge_binding(&plan.root);
+            self.build_op(&plan.root, &mut None, 0, bind_edge)?
+        };
+        // Namespace scope (Issue #3349, PR2) is enforced at the source operators
+        // during `build_op` (see `maybe_scope_source`), so everything downstream --
+        // LIMIT/SKIP, ORDER BY, aggregation, COUNT -- already sees only in-scope
+        // rows. No outermost post-filter is applied here.
         // Wrap with provenance filter to conditionally strip metadata
-        let filtered = Box::new(iterators::ProvenanceFilterIterator::new(
+        let filtered: Box<dyn ResultIterator> = Box::new(iterators::ProvenanceFilterIterator::new(
             iterator,
             plan.include_provenance,
         ));
-        Ok(QueryResults::new(filtered))
+        // Per-query resource limits (Issue #3368 engine lane). The unlimited
+        // case (the default, and the overwhelming common case) is a pure
+        // pass-through: no guard is allocated and no per-row check is paid.
+        if self.config.limits.is_unlimited() {
+            Ok(QueryResults::new(filtered))
+        } else {
+            let guarded = Box::new(iterators::ResourceGuardIterator::new(
+                filtered,
+                self.config.limits.clone(),
+                self.config.counters.clone(),
+            ));
+            Ok(QueryResults::new(guarded))
+        }
     }
 
     /// Execute a physical plan with per-operator profiling instrumentation
@@ -219,15 +298,29 @@ impl QueryExecutor {
     /// the registry.
     pub fn execute_profiled(&self, plan: &PhysicalPlan) -> Result<(QueryResults, ProfileRegistry)> {
         let mut registry: Option<ProfileRegistry> = Some(Vec::new());
-        let iterator = self.build_op(&plan.root, &mut registry, 0)?;
-        let filtered = Box::new(iterators::ProvenanceFilterIterator::new(
+        let iterator = {
+            let bind_edge = plan_needs_edge_binding(&plan.root);
+            self.build_op(&plan.root, &mut registry, 0, bind_edge)?
+        };
+        // Scope is applied at the source operators (see `maybe_scope_source`).
+        let filtered: Box<dyn ResultIterator> = Box::new(iterators::ProvenanceFilterIterator::new(
             iterator,
             plan.include_provenance,
         ));
         // `registry` was seeded `Some` above and is never taken, so the unwrap
         // is infallible.
         let registry = registry.unwrap_or_default();
-        Ok((QueryResults::new(filtered), registry))
+        // Per-query resource limits (Issue #3368 engine lane); see `execute`.
+        if self.config.limits.is_unlimited() {
+            Ok((QueryResults::new(filtered), registry))
+        } else {
+            let guarded = Box::new(iterators::ResourceGuardIterator::new(
+                filtered,
+                self.config.limits.clone(),
+                self.config.counters.clone(),
+            ));
+            Ok((QueryResults::new(guarded), registry))
+        }
     }
 
     /// Candidate node ids for a temporal label scan (`AS OF` / `BETWEEN`).
@@ -287,6 +380,11 @@ impl QueryExecutor {
         op: &PhysicalOp,
         profile: &mut Option<ProfileRegistry>,
         depth: usize,
+        // Whether the overall physical plan references an edge variable (a
+        // `Predicate::EdgeScoped` / `SortKey::EdgeProperty`), computed once at
+        // the plan root. When set, `IndexedTraversal` attaches the traversed
+        // edge to each row for edge-property WHERE / ORDER BY (Issue #3622).
+        bind_edge: bool,
     ) -> Result<Box<dyn ResultIterator>> {
         // Reserve this operator's profile slot *before* building its children so
         // the registry is in pre-order (the closure's mutable borrow of the
@@ -298,266 +396,405 @@ impl QueryExecutor {
         });
 
         let child_depth = depth + 1;
-        let iter: Box<dyn ResultIterator> = match op {
-            PhysicalOp::NodeLookup { node_ids } => Box::new(iterators::NodeLookupIterator::new(
-                node_ids.clone(),
-                Arc::clone(&self.current),
-            )),
+        let iter: Box<dyn ResultIterator> =
+            match op {
+                PhysicalOp::NodeLookup { node_ids } => Box::new(
+                    iterators::NodeLookupIterator::new(node_ids.clone(), Arc::clone(&self.current)),
+                ),
 
-            PhysicalOp::NodeScan { label, .. } => Box::new(iterators::NodeScanIterator::new(
-                label.clone(),
-                Arc::clone(&self.current),
-            )),
+                PhysicalOp::NodeScan { label, .. } => Box::new(iterators::NodeScanIterator::new(
+                    label.clone(),
+                    Arc::clone(&self.current),
+                )),
 
-            PhysicalOp::HnswSearch {
-                embedding,
-                k,
-                label_filter,
-                property_key,
-            } => self.execute_hnsw_search(
-                embedding,
-                *k,
-                label_filter.as_deref(),
-                property_key.as_deref(),
-            )?,
+                // Full edge scan (SQL `SELECT * FROM edges`). Mirrors `NodeScan`.
+                // Yields `EntityResult::Edge` rows; these survive `collect_all` /
+                // `count_all` / direct iteration and the edge-shaped structured
+                // projection `collect_structured_edges`/`collect_edges` (Issue
+                // #3626). The node-centric `collect_structured`/`collect_nodes`
+                // helpers remain node-only by design and drop edge rows (see
+                // `results.rs`).
+                PhysicalOp::EdgeScan { edge_type, .. } => Box::new(
+                    iterators::EdgeScanIterator::new(edge_type.clone(), Arc::clone(&self.current)),
+                ),
 
-            PhysicalOp::TemporalNodeLookup {
-                node_ids,
-                valid_time,
-                transaction_time,
-                use_batch,
-            } => {
-                if *use_batch {
-                    // Use batch iterator for large queries (holds lock across all iterations)
-                    Box::new(iterators::BatchTemporalNodeIterator::new(
-                        node_ids.clone(),
-                        *valid_time,
-                        *transaction_time,
-                        Arc::clone(&self.historical),
-                    )?)
-                } else {
-                    // Use per-node iterator for small queries (lock per node)
-                    Box::new(iterators::TemporalNodeIterator::new(
-                        node_ids.clone(),
-                        *valid_time,
-                        *transaction_time,
-                        Arc::clone(&self.historical),
-                    ))
+                PhysicalOp::HnswSearch {
+                    embedding,
+                    k,
+                    label_filter,
+                    property_key,
+                } => self.execute_hnsw_search(
+                    embedding,
+                    *k,
+                    label_filter.as_deref(),
+                    property_key.as_deref(),
+                )?,
+
+                PhysicalOp::TemporalNodeLookup {
+                    node_ids,
+                    valid_time,
+                    transaction_time,
+                    use_batch,
+                } => {
+                    if *use_batch {
+                        // Use batch iterator for large queries (holds lock across all iterations)
+                        Box::new(iterators::BatchTemporalNodeIterator::new(
+                            node_ids.clone(),
+                            *valid_time,
+                            *transaction_time,
+                            Arc::clone(&self.historical),
+                        )?)
+                    } else {
+                        // Use per-node iterator for small queries (lock per node)
+                        Box::new(iterators::TemporalNodeIterator::new(
+                            node_ids.clone(),
+                            *valid_time,
+                            *transaction_time,
+                            Arc::clone(&self.historical),
+                        ))
+                    }
                 }
-            }
 
-            PhysicalOp::TemporalNodeScan {
-                label,
-                valid_time,
-                transaction_time,
-            } => {
-                // Point-in-time label scan (`AS OF`, Issues #550/#551). Enumerate
-                // every ever-versioned node (mirroring the AS OF node-find oracle
-                // `AletheiaDB::find_nodes_at_time`) and reconstruct each at the
-                // requested bi-temporal point, filtering by label; candidates that
-                // did not exist at that instant are skipped, not errors.
-                let node_ids = self.temporal_scan_candidates();
-                Box::new(
-                    iterators::TemporalNodeScanIterator::new(
+                PhysicalOp::TemporalNodeScan {
+                    label,
+                    valid_time,
+                    transaction_time,
+                } => {
+                    // Point-in-time label scan (`AS OF`, Issues #550/#551). Enumerate
+                    // every ever-versioned node (mirroring the AS OF node-find oracle
+                    // `AletheiaDB::find_nodes_at_time`) and reconstruct each at the
+                    // requested bi-temporal point, filtering by label; candidates that
+                    // did not exist at that instant are skipped, not errors.
+                    let node_ids = self.temporal_scan_candidates();
+                    Box::new(
+                        iterators::TemporalNodeScanIterator::new(
+                            node_ids,
+                            *valid_time,
+                            *transaction_time,
+                            Arc::clone(&self.historical),
+                            label.clone(),
+                        )
+                        .skipping_missing(),
+                    )
+                }
+
+                PhysicalOp::TemporalNodeRangeScan {
+                    label,
+                    valid_from,
+                    valid_to,
+                    transaction_time,
+                } => {
+                    // Valid-time range label scan (`BETWEEN`, Issue #552). Same
+                    // candidate enumeration; the iterator emits each node's
+                    // believed-at-`transaction_time` version whose valid interval
+                    // overlaps the range (at most one row per node -- multiple rows
+                    // only across distinct nodes).
+                    let node_ids = self.temporal_scan_candidates();
+                    Box::new(iterators::TemporalNodeRangeScanIterator::new(
                         node_ids,
-                        *valid_time,
+                        *valid_from,
+                        *valid_to,
                         *transaction_time,
                         Arc::clone(&self.historical),
                         label.clone(),
+                    ))
+                }
+
+                PhysicalOp::TemporalVectorSearch {
+                    embedding,
+                    k,
+                    timestamp,
+                    property_key,
+                } => {
+                    // Always use the multi-property-aware method with explicit property name.
+                    // This ensures correctness in multi-property setups instead of relying on
+                    // the default-property resolution (alphabetically first temporal index).
+                    let prop = property_key.as_deref().unwrap_or("embedding");
+                    let results = self
+                        .current
+                        .find_similar_as_of_in(prop, embedding, *k, *timestamp)?;
+
+                    Box::new(iterators::VectorResultIterator::new(
+                        results,
+                        Arc::clone(&self.current),
+                    ))
+                }
+
+                PhysicalOp::IndexedTraversal {
+                    input,
+                    direction,
+                    label,
+                    min_depth,
+                    depth: traversal_depth,
+                    temporal_context,
+                } => {
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
+                    let mut traversal = iterators::TraversalIterator::new(
+                        input_iter,
+                        *direction,
+                        label.clone(),
+                        *min_depth,
+                        *traversal_depth,
+                        Arc::clone(&self.current),
+                        Arc::clone(&self.historical),
+                        *temporal_context,
                     )
-                    .skipping_missing(),
-                )
-            }
+                    .bind_edges(bind_edge);
+                    // Namespace boundary (Issue #3349, PR2): when a restricting
+                    // scope is attached, the traversal never crosses an
+                    // out-of-scope edge nor bridges through an out-of-scope node.
+                    if self.scope_is_restricting()
+                        && let Some(scope) = &self.scope
+                    {
+                        traversal = traversal
+                            .with_namespace_scope(Arc::clone(scope), self.resolved_scope.clone());
+                    }
+                    Box::new(traversal)
+                }
 
-            PhysicalOp::TemporalNodeRangeScan {
-                label,
-                valid_from,
-                valid_to,
-                transaction_time,
-            } => {
-                // Valid-time range label scan (`BETWEEN`, Issue #552). Same
-                // candidate enumeration; the iterator emits each node's
-                // believed-at-`transaction_time` version whose valid interval
-                // overlaps the range (at most one row per node -- multiple rows
-                // only across distinct nodes).
-                let node_ids = self.temporal_scan_candidates();
-                Box::new(iterators::TemporalNodeRangeScanIterator::new(
-                    node_ids,
-                    *valid_from,
-                    *valid_to,
-                    *transaction_time,
-                    Arc::clone(&self.historical),
+                PhysicalOp::PropertyScan {
+                    label, key, value, ..
+                } => Box::new(iterators::PropertyScanIterator::new(
                     label.clone(),
-                ))
-            }
-
-            PhysicalOp::TemporalVectorSearch {
-                embedding,
-                k,
-                timestamp,
-                property_key,
-            } => {
-                // Always use the multi-property-aware method with explicit property name.
-                // This ensures correctness in multi-property setups instead of relying on
-                // the default-property resolution (alphabetically first temporal index).
-                let prop = property_key.as_deref().unwrap_or("embedding");
-                let results = self
-                    .current
-                    .find_similar_as_of_in(prop, embedding, *k, *timestamp)?;
-
-                Box::new(iterators::VectorResultIterator::new(
-                    results,
+                    key.clone(),
+                    value,
                     Arc::clone(&self.current),
-                ))
-            }
+                )),
 
-            PhysicalOp::IndexedTraversal {
-                input,
-                direction,
-                label,
-                min_depth,
-                depth: traversal_depth,
-                temporal_context,
-            } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::TraversalIterator::new(
-                    input_iter,
-                    *direction,
-                    label.clone(),
-                    *min_depth,
-                    *traversal_depth,
-                    Arc::clone(&self.current),
-                    Arc::clone(&self.historical),
-                    *temporal_context,
-                ))
-            }
+                PhysicalOp::Filter { input, predicate } => {
+                    // Real edge-property WHERE (Issue #3622): when the filter's
+                    // input stream is rooted at an `EdgeScan` (the SQL `FROM
+                    // edges` lane), the stream is pure edges, so property leaves
+                    // are evaluated against each edge's own properties instead of
+                    // the AQL/Cypher single-entity pass-through. AQL/Cypher never
+                    // emit `EdgeScan`, so this stays `false` there.
+                    let edge_mode = subtree_yields_edges(input);
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
+                    // Pass historical storage so a `Predicate::Provenance` leaf
+                    // (Issue #3354a) can resolve each row entity's write-time
+                    // provenance; property-only filters never touch it.
+                    Box::new(
+                        iterators::FilterIterator::with_historical(
+                            input_iter,
+                            predicate.clone(),
+                            Arc::clone(&self.historical),
+                        )
+                        .evaluate_edge_properties(edge_mode),
+                    )
+                }
 
-            PhysicalOp::PropertyScan {
-                label, key, value, ..
-            } => Box::new(iterators::PropertyScanIterator::new(
-                label.clone(),
-                key.clone(),
-                value,
-                Arc::clone(&self.current),
-            )),
+                PhysicalOp::VectorRerank {
+                    input,
+                    embedding,
+                    k,
+                    property_key,
+                    metric,
+                    threshold,
+                    score_alias,
+                } => {
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
+                    Box::new(iterators::VectorRerankIterator::with_options(
+                        input_iter,
+                        embedding.clone(),
+                        *k,
+                        Arc::clone(&self.current),
+                        property_key.clone(),
+                        *metric,
+                        *threshold,
+                        score_alias.clone(),
+                    ))
+                }
 
-            PhysicalOp::Filter { input, predicate } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                // Pass historical storage so a `Predicate::Provenance` leaf
-                // (Issue #3354a) can resolve each row entity's write-time
-                // provenance; property-only filters never touch it.
-                Box::new(iterators::FilterIterator::with_historical(
-                    input_iter,
-                    predicate.clone(),
-                    Arc::clone(&self.historical),
-                ))
-            }
+                PhysicalOp::Limit {
+                    input,
+                    count,
+                    offset,
+                } => {
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
+                    Box::new(iterators::LimitIterator::new(input_iter, *offset, *count))
+                }
 
-            PhysicalOp::VectorRerank {
-                input,
-                embedding,
-                k,
-                property_key,
-                metric,
-                threshold,
-                score_alias,
-            } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::VectorRerankIterator::with_options(
-                    input_iter,
-                    embedding.clone(),
+                PhysicalOp::Project { input, properties } => {
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
+                    Box::new(iterators::ProjectIterator::new(
+                        input_iter,
+                        properties.clone(),
+                    ))
+                }
+
+                PhysicalOp::OptionalApply { input, steps } => {
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
+                    // Namespace scope (Issue #3349, PR2): thread the scope into the
+                    // OPTIONAL MATCH sub-pipeline so its source leaf and traversal
+                    // hops are scope-bounded, matching the main pipeline (defense
+                    // in depth — unreachable until PR3 wires Cypher/AQL scope to
+                    // OPTIONAL MATCH, but never silently wrong). The unscoped path
+                    // uses the plain constructor and pays nothing.
+                    match (self.scope_is_restricting(), &self.scope) {
+                        (true, Some(scope)) => {
+                            Box::new(iterators::OptionalApplyIterator::with_namespace_scope(
+                                input_iter,
+                                steps.clone(),
+                                Arc::clone(&self.current),
+                                Arc::clone(&self.historical),
+                                Some(Arc::clone(scope)),
+                                self.resolved_scope.clone(),
+                            ))
+                        }
+                        _ => Box::new(iterators::OptionalApplyIterator::new(
+                            input_iter,
+                            steps.clone(),
+                            Arc::clone(&self.current),
+                            Arc::clone(&self.historical),
+                        )),
+                    }
+                }
+
+                PhysicalOp::Aggregate {
+                    input,
+                    group_keys,
+                    aggregates,
+                } => {
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
+                    Box::new(iterators::AggregateIterator::new(
+                        input_iter,
+                        group_keys.clone(),
+                        aggregates.clone(),
+                    ))
+                }
+
+                PhysicalOp::TemporalWindowAggregate { input, spec } => {
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
+                    // Historical storage is required to reconstruct each matched
+                    // entity's valid-time history per window (Issue #3363).
+                    Box::new(iterators::TemporalWindowAggregateIterator::new(
+                        input_iter,
+                        spec.clone(),
+                        Arc::clone(&self.historical),
+                    ))
+                }
+
+                PhysicalOp::TemporalAlign { input, spec } => {
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
+                    // Historical storage is required to reconstruct each matched
+                    // participant's valid-time history (and gating edge validity)
+                    // at the alignment coordinates (Issue #3379).
+                    Box::new(iterators::TemporalJoinIterator::new(
+                        input_iter,
+                        spec.clone(),
+                        Arc::clone(&self.historical),
+                    ))
+                }
+
+                PhysicalOp::Distinct { input } => {
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
+                    Box::new(iterators::DistinctIterator::new(input_iter))
+                }
+
+                PhysicalOp::Sort { input, keys } => {
+                    // Real edge-property ORDER BY (Issue #3622): a property sort
+                    // key over an `EdgeScan`-rooted (SQL `FROM edges`) stream
+                    // reads each edge's own properties instead of resolving to
+                    // null. AQL/Cypher never emit `EdgeScan`, so this is `false`
+                    // there and node-only sort-key extraction is unchanged.
+                    let edge_mode = subtree_yields_edges(input);
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
+                    // Pass historical storage so a `SortKey::Provenance` key
+                    // (Issue #3354) can resolve each row entity's write-time
+                    // provenance; property/score sorts never touch it.
+                    Box::new(
+                        iterators::SortIterator::with_historical(
+                            input_iter,
+                            keys.clone(),
+                            Arc::clone(&self.historical),
+                        )
+                        .order_by_edge_properties(edge_mode),
+                    )
+                }
+
+                PhysicalOp::ProjectProvenance { input, projection } => {
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
+                    Box::new(iterators::ProvenanceProjectIterator::new(
+                        input_iter,
+                        projection.clone(),
+                        Arc::clone(&self.historical),
+                    ))
+                }
+
+                PhysicalOp::Count { input } => {
+                    let input_iter = self.build_op(input, profile, child_depth, bind_edge)?;
+                    Box::new(iterators::CountIterator::new(input_iter))
+                }
+
+                PhysicalOp::Empty => Box::new(iterators::EmptyIterator),
+                PhysicalOp::SimilarToNode {
+                    source_node,
+                    property_key,
+                    k,
+                    label_filter,
+                } => self.execute_similar_to_node(
+                    *source_node,
+                    property_key,
                     *k,
-                    Arc::clone(&self.current),
-                    property_key.clone(),
-                    *metric,
-                    *threshold,
-                    score_alias.clone(),
-                ))
-            }
+                    label_filter.as_deref(),
+                )?,
 
-            PhysicalOp::Limit {
-                input,
-                count,
-                offset,
-            } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::LimitIterator::new(input_iter, *offset, *count))
-            }
+                // For unsupported operations, return error
+                _ => {
+                    return Err(crate::core::error::Error::Query(
+                        crate::core::error::QueryError::SyntaxError {
+                            message: format!("Unsupported physical operator: {:?}", op.name()),
+                        },
+                    ));
+                }
+            };
 
-            PhysicalOp::Project { input, properties } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::ProjectIterator::new(
-                    input_iter,
-                    properties.clone(),
-                ))
-            }
-
-            PhysicalOp::OptionalApply { input, steps } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::OptionalApplyIterator::new(
-                    input_iter,
-                    steps.clone(),
-                    Arc::clone(&self.current),
-                    Arc::clone(&self.historical),
-                ))
-            }
-
-            PhysicalOp::Aggregate {
-                input,
-                group_keys,
-                aggregates,
-            } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::AggregateIterator::new(
-                    input_iter,
-                    group_keys.clone(),
-                    aggregates.clone(),
-                ))
-            }
-
-            PhysicalOp::Distinct { input } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::DistinctIterator::new(input_iter))
-            }
-
-            PhysicalOp::Sort { input, keys } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::SortIterator::new(input_iter, keys.clone()))
-            }
-
-            PhysicalOp::Count { input } => {
-                let input_iter = self.build_op(input, profile, child_depth)?;
-                Box::new(iterators::CountIterator::new(input_iter))
-            }
-
-            PhysicalOp::Empty => Box::new(iterators::EmptyIterator),
-            PhysicalOp::SimilarToNode {
-                source_node,
-                property_key,
-                k,
-                label_filter,
-            } => self.execute_similar_to_node(
-                *source_node,
-                property_key,
-                *k,
-                label_filter.as_deref(),
-            )?,
-
-            // For unsupported operations, return error
-            _ => {
-                return Err(crate::core::error::Error::Query(
-                    crate::core::error::QueryError::SyntaxError {
-                        message: format!("Unsupported physical operator: {:?}", op.name()),
-                    },
-                ));
-            }
-        };
+        // Namespace scope (Issue #3349, PR2): push the scope filter down onto the
+        // SOURCE operators (scans, lookups, property/vector sources) rather than
+        // applying it as an outermost post-filter. Wrapping the leaf that produces
+        // entities guarantees every downstream operator -- LIMIT/SKIP, ORDER BY,
+        // DISTINCT, aggregation, and COUNT -- sees only in-scope rows, so a scoped
+        // `count()` reports the scoped cardinality (not the global one) and a
+        // scoped `LIMIT n` returns up to `n` *in-scope* rows (not `n` pre-filter
+        // rows of which some are then dropped). Graph traversal is deliberately
+        // NOT wrapped here: `IndexedTraversal` enforces the boundary at build time
+        // (never bridging an out-of-scope edge/node) and its own input source is
+        // wrapped by this same recursion, so its start node is scope-checked
+        // (Issue #3349 A4) and its emitted targets are already in-scope.
+        let iter = self.maybe_scope_source(op, iter);
 
         // Instrument this operator when profiling.
         Ok(match handle {
             Some(h) => Box::new(ProfilingIterator::new(iter, h)),
             None => iter,
         })
+    }
+
+    /// Wrap a **source-leaf** operator's iterator in the namespace-scope entity
+    /// filter (Issue #3349, PR2) when a restricting scope is attached; otherwise
+    /// return it unchanged so the namespace-agnostic path pays nothing.
+    ///
+    /// Only leaf operators that *produce* entities are wrapped (scans, id
+    /// lookups, property scans, and vector/temporal sources). Intermediate and
+    /// combining operators are never wrapped: their entity rows always originate
+    /// at a wrapped source (or at an already-boundary-filtered traversal), so
+    /// double-filtering is avoided. See [`is_scoped_source_leaf`].
+    fn maybe_scope_source(
+        &self,
+        op: &PhysicalOp,
+        iter: Box<dyn ResultIterator>,
+    ) -> Box<dyn ResultIterator> {
+        match &self.scope {
+            Some(scope) if self.scope_is_restricting() && is_scoped_source_leaf(op) => {
+                Box::new(iterators::ScopeFilterIterator::new(
+                    iter,
+                    Arc::clone(scope),
+                    self.resolved_scope.clone(),
+                    Arc::clone(&self.current),
+                ))
+            }
+            _ => iter,
+        }
     }
 
     fn execute_hnsw_search(
@@ -665,6 +902,130 @@ impl QueryExecutor {
     }
 }
 
+/// Returns `true` when the row stream produced by `op` is composed of edge rows,
+/// i.e. the subtree is rooted at an [`PhysicalOp::EdgeScan`] reached through only
+/// row-preserving unary operators (Issue #3622).
+///
+/// Used to decide whether a `Filter`/`Sort` above the subtree should evaluate
+/// property predicates / sort keys against the edge's own properties. `EdgeScan`
+/// is emitted **only** by the SQL `FROM edges` lane (AQL/Cypher traverse edges
+/// via `TraversalIterator`, which yields target *nodes*), so this is a
+/// zero-false-positive proxy for "pure edge stream where every bare property key
+/// unambiguously refers to the edge". The walked unary ops preserve edge rows
+/// unchanged (`ProjectIterator` rewrites only node rows). Any other operator --
+/// including binary set ops, aggregation, and node/temporal scans -- is treated
+/// as not edge-typed, so the conservative default is the existing pass-through /
+/// node-only behavior.
+/// Whether `op` is a **source leaf** that produces entity rows directly from
+/// storage and therefore must have the namespace scope filter applied to it
+/// (Issue #3349, PR2). These are the scans, id lookups, property scans, and
+/// vector/temporal sources. Every entity row in a plan originates at one of
+/// these leaves (or at a boundary-filtered [`PhysicalOp::IndexedTraversal`],
+/// which is handled separately and is intentionally excluded here), so wrapping
+/// exactly these leaves pushes the scope filter below LIMIT/SKIP/ORDER BY/COUNT
+/// without any double-filtering.
+///
+/// `Empty` produces no rows, so it is not wrapped. `IndexedTraversal` is
+/// excluded (it enforces the boundary at build time and its own input source is
+/// wrapped by the recursion). Combining/intermediate operators are excluded
+/// because their inputs are already scoped.
+fn is_scoped_source_leaf(op: &PhysicalOp) -> bool {
+    matches!(
+        op,
+        PhysicalOp::NodeLookup { .. }
+            | PhysicalOp::NodeScan { .. }
+            | PhysicalOp::EdgeScan { .. }
+            | PhysicalOp::HnswSearch { .. }
+            | PhysicalOp::TemporalNodeLookup { .. }
+            | PhysicalOp::TemporalVectorSearch { .. }
+            | PhysicalOp::TemporalNodeScan { .. }
+            | PhysicalOp::TemporalNodeRangeScan { .. }
+            | PhysicalOp::SimilarToNode { .. }
+            | PhysicalOp::PropertyScan { .. }
+    )
+}
+
+fn subtree_yields_edges(op: &PhysicalOp) -> bool {
+    match op {
+        PhysicalOp::EdgeScan { .. } => true,
+        PhysicalOp::Filter { input, .. }
+        | PhysicalOp::Sort { input, .. }
+        | PhysicalOp::Limit { input, .. }
+        | PhysicalOp::Project { input, .. }
+        | PhysicalOp::Distinct { input, .. }
+        | PhysicalOp::VectorRerank { input, .. } => subtree_yields_edges(input),
+        _ => false,
+    }
+}
+
+/// Whether the physical plan references an edge variable -- i.e. contains a
+/// [`Predicate::EdgeScoped`] leaf in any `Filter` or a [`SortKey::EdgeProperty`]
+/// key in any `Sort` (Issue #3622). Computed once at the plan root so the
+/// `IndexedTraversal` iterator only attaches the traversed edge to its rows
+/// (an extra reconstruct per row) when an edge-property `WHERE` / `ORDER BY`
+/// actually needs it; otherwise traversal behavior is byte-identical.
+fn plan_needs_edge_binding(op: &PhysicalOp) -> bool {
+    use crate::query::ir::{Predicate, SortKey};
+
+    fn predicate_has_edge_scoped(p: &Predicate) -> bool {
+        match p {
+            Predicate::EdgeScoped(_) => true,
+            Predicate::And(v) | Predicate::Or(v) => v.iter().any(predicate_has_edge_scoped),
+            Predicate::Not(inner) => predicate_has_edge_scoped(inner),
+            _ => false,
+        }
+    }
+
+    match op {
+        PhysicalOp::Filter { input, predicate } => {
+            predicate_has_edge_scoped(predicate) || plan_needs_edge_binding(input)
+        }
+        PhysicalOp::Sort { input, keys } => {
+            keys.iter()
+                .any(|(k, _)| matches!(k, SortKey::EdgeProperty(_)))
+                || plan_needs_edge_binding(input)
+        }
+        // Single-input pass-through operators: recurse into the child.
+        PhysicalOp::IndexedTraversal { input, .. }
+        | PhysicalOp::Limit { input, .. }
+        | PhysicalOp::Project { input, .. }
+        | PhysicalOp::ProjectProvenance { input, .. }
+        | PhysicalOp::Distinct { input, .. }
+        | PhysicalOp::Count { input, .. }
+        | PhysicalOp::Aggregate { input, .. }
+        | PhysicalOp::VectorRerank { input, .. }
+        | PhysicalOp::TemporalTrack { input, .. }
+        | PhysicalOp::TemporalWindowAggregate { input, .. }
+        | PhysicalOp::TemporalAlign { input, .. }
+        | PhysicalOp::Materialize { input, .. }
+        | PhysicalOp::OptionalApply { input, .. } => plan_needs_edge_binding(input),
+        // Binary set operators: either branch may carry the reference.
+        PhysicalOp::HashJoin { left, right, .. }
+        | PhysicalOp::Union { left, right, .. }
+        | PhysicalOp::Intersect { left, right, .. }
+        | PhysicalOp::Except { left, right, .. } => {
+            plan_needs_edge_binding(left) || plan_needs_edge_binding(right)
+        }
+        // Leaf sources (scans, similarity source) carry no edge-scoped
+        // reference. Every input-bearing operator is enumerated above, so a
+        // future single-input op that could sit over a Filter/Sort will fail to
+        // compile-match here rather than silently defaulting to `false`
+        // (edge-scoped -> all-false / edge sort-key -> null: a silent-wrong
+        // hazard). Keep this list exhaustive with the enum.
+        PhysicalOp::Empty
+        | PhysicalOp::NodeLookup { .. }
+        | PhysicalOp::NodeScan { .. }
+        | PhysicalOp::EdgeScan { .. }
+        | PhysicalOp::HnswSearch { .. }
+        | PhysicalOp::TemporalNodeLookup { .. }
+        | PhysicalOp::TemporalVectorSearch { .. }
+        | PhysicalOp::TemporalNodeScan { .. }
+        | PhysicalOp::TemporalNodeRangeScan { .. }
+        | PhysicalOp::SimilarToNode { .. }
+        | PhysicalOp::PropertyScan { .. } => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -766,6 +1127,7 @@ mod tests {
             max_buffer_size: 1000,
             parallel: true,
             timeout_ms: 5000,
+            ..ExecutionConfig::default()
         };
 
         assert_eq!(config.max_buffer_size, 1000);
@@ -779,7 +1141,7 @@ mod tests {
         let executor = QueryExecutor::new(current, historical);
 
         // Just verify it was created
-        assert_eq!(executor._config.max_buffer_size, 10_000);
+        assert_eq!(executor.config.max_buffer_size, 10_000);
     }
 
     #[test]
@@ -789,11 +1151,12 @@ mod tests {
             max_buffer_size: 500,
             parallel: true,
             timeout_ms: 1000,
+            ..ExecutionConfig::default()
         };
         let executor = QueryExecutor::with_config(current, historical, config);
 
-        assert_eq!(executor._config.max_buffer_size, 500);
-        assert!(executor._config.parallel);
+        assert_eq!(executor.config.max_buffer_size, 500);
+        assert!(executor.config.parallel);
     }
 
     #[test]
@@ -838,6 +1201,129 @@ mod tests {
         let rows: Vec<_> = results.collect_all().expect("Collection failed");
 
         assert_eq!(rows.len(), 2); // Alice and Bob
+    }
+
+    // ==================== Per-query resource limits (Issue #3368 engine
+    // lane) wiring: ExecutionConfig.limits -> QueryExecutor::execute ====
+
+    fn scan_person_plan() -> PhysicalPlan {
+        PhysicalPlan {
+            root: PhysicalOp::NodeScan {
+                label: Some("Person".to_string()),
+                estimated_rows: 100,
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        }
+    }
+
+    #[test]
+    fn execute_with_unlimited_config_is_unaffected() {
+        let (current, historical, _alice, _bob) = create_test_storage_with_data();
+        let executor = QueryExecutor::new(current, historical);
+
+        let results = executor
+            .execute(scan_person_plan())
+            .expect("execution failed");
+        let rows = results.collect_all().expect("collection failed");
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn execute_installs_row_guard_when_limits_configured() {
+        let (current, historical, _alice, _bob) = create_test_storage_with_data();
+        let limits = crate::query::limits::QueryResourceLimits {
+            max_rows: Some(1),
+            ..crate::query::limits::QueryResourceLimits::unlimited()
+        };
+        let config = ExecutionConfig {
+            limits,
+            ..ExecutionConfig::default()
+        };
+        let executor = QueryExecutor::with_config(current, historical, config);
+
+        let results = executor
+            .execute(scan_person_plan())
+            .expect("execution failed");
+        let err = results
+            .collect_all()
+            .expect_err("row cap of 1 over 2 matching nodes must fail");
+        match err {
+            crate::core::error::Error::Query(
+                crate::core::error::QueryError::ResourceExhausted {
+                    dimension,
+                    retriable,
+                    ..
+                },
+            ) => {
+                assert_eq!(dimension, "result_rows");
+                assert!(!retriable);
+            }
+            other => panic!("expected ResourceExhausted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_installs_timeout_guard_when_deadline_already_passed() {
+        let (current, historical, _alice, _bob) = create_test_storage_with_data();
+        let limits = crate::query::limits::QueryResourceLimits {
+            deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+            ..crate::query::limits::QueryResourceLimits::unlimited()
+        };
+        let config = ExecutionConfig {
+            limits,
+            ..ExecutionConfig::default()
+        };
+        let executor = QueryExecutor::with_config(current, historical, config);
+
+        let results = executor
+            .execute(scan_person_plan())
+            .expect("execution failed");
+        let err = results
+            .collect_all()
+            .expect_err("a deadline already in the past must fail immediately");
+        match err {
+            crate::core::error::Error::Query(
+                crate::core::error::QueryError::ResourceExhausted {
+                    dimension,
+                    retriable,
+                    ..
+                },
+            ) => {
+                assert_eq!(dimension, "wall_clock_timeout");
+                assert!(retriable);
+            }
+            other => panic!("expected ResourceExhausted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_profiled_also_honors_limits() {
+        let (current, historical, _alice, _bob) = create_test_storage_with_data();
+        let limits = crate::query::limits::QueryResourceLimits {
+            max_rows: Some(1),
+            ..crate::query::limits::QueryResourceLimits::unlimited()
+        };
+        let config = ExecutionConfig {
+            limits,
+            ..ExecutionConfig::default()
+        };
+        let executor = QueryExecutor::with_config(current, historical, config);
+
+        let (results, _registry) = executor
+            .execute_profiled(&scan_person_plan())
+            .expect("execution failed");
+        let err = results
+            .collect_all()
+            .expect_err("row cap of 1 over 2 matching nodes must fail");
+        assert!(matches!(
+            err,
+            crate::core::error::Error::Query(
+                crate::core::error::QueryError::ResourceExhausted { .. }
+            )
+        ));
     }
 
     #[test]
@@ -1045,6 +1531,248 @@ mod tests {
         let rows: Vec<_> = results.collect_all().expect("Collection failed");
 
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn test_subtree_yields_edges_detects_edge_rooted_streams() {
+        use crate::query::ir::{Predicate, SortKey};
+        // Bare EdgeScan is an edge stream.
+        let edge_scan = PhysicalOp::EdgeScan {
+            edge_type: None,
+            estimated_rows: 0,
+        };
+        assert!(subtree_yields_edges(&edge_scan));
+
+        // Filter/Sort/Limit over an EdgeScan preserve the edge typing.
+        let filtered = PhysicalOp::Filter {
+            input: Box::new(PhysicalOp::EdgeScan {
+                edge_type: None,
+                estimated_rows: 0,
+            }),
+            predicate: Predicate::True,
+        };
+        let sorted_over_filter = PhysicalOp::Sort {
+            input: Box::new(filtered),
+            keys: vec![(SortKey::Property("since".to_string()), true)],
+        };
+        assert!(subtree_yields_edges(&sorted_over_filter));
+
+        // A NodeScan-rooted stream (the AQL/Cypher shape) is NOT edge-typed.
+        let node_scan = PhysicalOp::NodeScan {
+            label: None,
+            estimated_rows: 0,
+        };
+        assert!(!subtree_yields_edges(&node_scan));
+        let filter_over_nodes = PhysicalOp::Filter {
+            input: Box::new(PhysicalOp::NodeScan {
+                label: None,
+                estimated_rows: 0,
+            }),
+            predicate: Predicate::True,
+        };
+        assert!(!subtree_yields_edges(&filter_over_nodes));
+    }
+
+    #[test]
+    fn test_plan_needs_edge_binding_detects_edge_var_references() {
+        use crate::query::ir::{Direction, Predicate, PredicateValue, SortKey};
+
+        let traversal = |input: PhysicalOp| PhysicalOp::IndexedTraversal {
+            input: Box::new(input),
+            direction: Direction::Outgoing,
+            label: Some("KNOWS".to_string()),
+            min_depth: 1,
+            depth: 1,
+            temporal_context: None,
+        };
+        let node_scan = || PhysicalOp::NodeScan {
+            label: Some("Person".to_string()),
+            estimated_rows: 0,
+        };
+
+        // Filter carrying an `EdgeScoped` leaf above a traversal -> needs binding.
+        let edge_where = PhysicalOp::Filter {
+            input: Box::new(traversal(node_scan())),
+            predicate: Predicate::EdgeScoped(Box::new(Predicate::Gt {
+                key: "since".to_string(),
+                value: PredicateValue::Int(2020),
+            })),
+        };
+        assert!(plan_needs_edge_binding(&edge_where));
+
+        // Sort with an `EdgeProperty` key (even nested under a Project) -> needs binding.
+        let edge_order = PhysicalOp::Sort {
+            input: Box::new(PhysicalOp::Project {
+                input: Box::new(traversal(node_scan())),
+                properties: vec!["name".to_string()],
+            }),
+            keys: vec![(SortKey::EdgeProperty("since".to_string()), false)],
+        };
+        assert!(plan_needs_edge_binding(&edge_order));
+
+        // A node-only WHERE + ORDER BY over the same traversal -> no binding.
+        let node_only = PhysicalOp::Sort {
+            input: Box::new(PhysicalOp::Filter {
+                input: Box::new(traversal(node_scan())),
+                predicate: Predicate::Gt {
+                    key: "age".to_string(),
+                    value: PredicateValue::Int(18),
+                },
+            }),
+            keys: vec![(SortKey::Property("age".to_string()), false)],
+        };
+        assert!(!plan_needs_edge_binding(&node_only));
+
+        // A bare traversal references no edge var.
+        assert!(!plan_needs_edge_binding(&traversal(node_scan())));
+    }
+
+    /// Planner-invariant guard (Issue #3622 review fix): every `Filter`/`Sort`
+    /// node in the physical plan for a SQL `FROM edges WHERE ... ORDER BY ...`
+    /// query must root an `EdgeScan` stream (through only row-preserving unary
+    /// ops), so `edge_mode` engages and edge properties are actually evaluated.
+    ///
+    /// If a future optimization inserts a non-whitelisted physical op between a
+    /// `Filter`/`Sort` and its rooting `EdgeScan`, `subtree_yields_edges` would
+    /// return `false`, `edge_mode` would silently turn off, and the lane would
+    /// return ALL edges (pass-through) instead of the filtered/sorted set. This
+    /// test fails LOUDLY in CI rather than letting that regress silently.
+    #[cfg(feature = "sql")]
+    #[test]
+    fn sql_edge_plan_filter_sort_subtrees_stay_edge_typed() {
+        use crate::query::planner::{QueryPlanner, Statistics};
+        use crate::sql::parse_sql;
+
+        // Walk the plan, asserting Filter/Sort subtrees are edge-typed and
+        // counting them so the assertion is not vacuous.
+        fn walk(op: &PhysicalOp, filters: &mut usize, sorts: &mut usize) {
+            match op {
+                PhysicalOp::Filter { input, .. } => {
+                    *filters += 1;
+                    assert!(
+                        subtree_yields_edges(input),
+                        "Filter over SQL `FROM edges` must root an edge stream; \
+                         a non-whitelisted op broke the invariant: {input:?}"
+                    );
+                }
+                PhysicalOp::Sort { input, .. } => {
+                    *sorts += 1;
+                    assert!(
+                        subtree_yields_edges(input),
+                        "Sort over SQL `FROM edges` must root an edge stream; \
+                         a non-whitelisted op broke the invariant: {input:?}"
+                    );
+                }
+                _ => {}
+            }
+            match op {
+                PhysicalOp::Filter { input, .. }
+                | PhysicalOp::Sort { input, .. }
+                | PhysicalOp::Limit { input, .. }
+                | PhysicalOp::Project { input, .. }
+                | PhysicalOp::Distinct { input, .. }
+                | PhysicalOp::VectorRerank { input, .. } => walk(input, filters, sorts),
+                _ => {}
+            }
+        }
+
+        let query = parse_sql("SELECT * FROM edges WHERE since > 2020 ORDER BY since DESC LIMIT 5")
+            .expect("parse edge SQL");
+        let planner = QueryPlanner::new(
+            Arc::new(Statistics::default()),
+            Arc::new(CurrentStorage::new()),
+        );
+        let plan = planner.plan(query).expect("plan edge SQL");
+
+        let (mut filters, mut sorts) = (0usize, 0usize);
+        walk(&plan.root, &mut filters, &mut sorts);
+        assert!(
+            filters >= 1 && sorts >= 1,
+            "the edge WHERE+ORDER BY plan must contain a Filter and a Sort \
+             (found {filters} filters, {sorts} sorts) -- otherwise the guard is vacuous"
+        );
+    }
+
+    /// AQL/Cypher edge-touching regression (Issue #3622 review fix): an AQL
+    /// traversal over `KNOWS` edges (a) returns the correct target nodes AND
+    /// (b) never lowers to `QueryOp::ScanEdges` -- the ONLY logical op that
+    /// becomes the physical `EdgeScan` that `subtree_yields_edges` keys
+    /// `edge_mode` on. So `edge_mode` can never engage for AQL/Cypher and
+    /// behavior is identical to trunk. This is the executable end-to-end
+    /// counterpart to the synthetic `subtree_yields_edges` unit assertion.
+    #[test]
+    fn aql_edge_traversal_never_enters_edge_mode() {
+        use crate::core::property::PropertyValue;
+        use crate::query::ir::QueryOp;
+        use crate::query::parse_query;
+
+        let db = crate::AletheiaDB::new().expect("create db");
+        let alice = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .expect("alice");
+        let bob = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .expect("bob");
+        let carol = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Carol").build(),
+            )
+            .expect("carol");
+        db.create_edge(
+            alice,
+            bob,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", 2020).build(),
+        )
+        .expect("edge alice->bob");
+        db.create_edge(
+            bob,
+            carol,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", 2021).build(),
+        )
+        .expect("edge bob->carol");
+
+        let query =
+            parse_query("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b").expect("parse AQL");
+        // (b) No `ScanEdges` => the physical plan has no `EdgeScan` => `edge_mode`
+        // stays off. If AQL/Cypher ever started sharing the SQL edge scan, this
+        // fails loudly before any silent semantic drift.
+        assert!(
+            !query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanEdges { .. })),
+            "AQL traversal must not emit ScanEdges (would wrongly enable edge_mode)"
+        );
+
+        // (a) Correct target nodes end-to-end (Alice->Bob, Bob->Carol).
+        let rows = db
+            .execute_query(query)
+            .expect("execute AQL")
+            .collect_all()
+            .expect("collect rows");
+        let mut names: Vec<String> = rows
+            .iter()
+            .filter_map(|r| r.entity.as_node())
+            .filter_map(|n| match n.get_property("name") {
+                Some(PropertyValue::String(s)) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["Bob".to_string(), "Carol".to_string()],
+            "AQL KNOWS traversal must return the correct target nodes (trunk behavior)"
+        );
     }
 
     #[test]

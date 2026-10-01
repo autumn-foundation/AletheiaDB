@@ -225,6 +225,44 @@ impl VersionId {
     pub const fn as_u64(self) -> u64 {
         self.0
     }
+
+    /// Build a *structural* version id from a generator sequence number
+    /// (Issue: valid-time supersession on update).
+    ///
+    /// Structural versions are the bookkeeping versions the write path appends
+    /// to keep the valid-time timeline partitioned when an update supersedes an
+    /// earlier version: the **carry-forward** of the predecessor over
+    /// `[old_valid_from, new_valid_from)`, and the **re-assertion** of the open
+    /// head after a backfill. They carry no new fact, so the pull changefeed
+    /// skips them. The marker is the reserved [`STRUCTURAL_VERSION_TAG`] bit, so
+    /// it survives every persistence format (WAL replay, index persistence,
+    /// cold tier, backup) without a format change.
+    #[inline]
+    pub(crate) fn structural(sequence: u64) -> Result<Self, StorageError> {
+        Self::new(strip_structural_tag(sequence) | STRUCTURAL_VERSION_TAG)
+    }
+
+    /// `true` if this id was minted by [`VersionId::structural`].
+    #[inline]
+    pub const fn is_structural(self) -> bool {
+        self.0 & STRUCTURAL_VERSION_TAG != 0
+    }
+}
+
+/// Reserved bit marking a *structural* (carry-forward / re-assertion)
+/// [`VersionId`]. See [`VersionId::structural`].
+///
+/// Sequential generators never reach this bit in practice (2^62 ids), and
+/// [`IdGenerator::reset_to`] / [`IdGenerator::ensure_at_least`] strip it, so a
+/// structural id observed while re-seeding a generator from persisted data can
+/// never push the generator into the tagged range.
+pub const STRUCTURAL_VERSION_TAG: u64 = 1 << 62;
+
+/// Strip the [`STRUCTURAL_VERSION_TAG`] bit, yielding the generator sequence
+/// number an id was minted from. Identity for every non-structural id.
+#[inline]
+pub const fn strip_structural_tag(id: u64) -> u64 {
+    id & !STRUCTURAL_VERSION_TAG
 }
 
 impl fmt::Display for VersionId {
@@ -478,8 +516,12 @@ impl IdGenerator {
     /// Uses `Ordering::SeqCst` to ensure all threads observe the reset consistently.
     /// This is critical during recovery when re-initializing generators.
     #[inline]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn reset_to(&self, value: u64) {
-        self.next_id.store(value, Ordering::SeqCst);
+        // Never seed into the structural-version tag range: a re-seed computed
+        // as `max(persisted ids) + 1` may have observed a structural id.
+        self.next_id
+            .store(strip_structural_tag(value), Ordering::SeqCst);
     }
 
     /// Ensure the generator's next value is at least the specified minimum.
@@ -504,6 +546,8 @@ impl IdGenerator {
     /// a globally consistent order of operations.
     #[inline]
     pub(crate) fn ensure_at_least(&self, min_value: u64) {
+        // See `reset_to`: strip the structural-version tag before seeding.
+        let min_value = strip_structural_tag(min_value);
         let mut current = self.next_id.load(Ordering::SeqCst);
         while min_value > current {
             match self.next_id.compare_exchange(
@@ -658,6 +702,34 @@ mod sentry_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structural_version_ids_are_tagged_and_distinct() {
+        let plain = VersionId::new(42).unwrap();
+        let structural = VersionId::structural(42).unwrap();
+        assert!(!plain.is_structural());
+        assert!(structural.is_structural());
+        assert_ne!(plain, structural);
+        assert_eq!(strip_structural_tag(structural.as_u64()), 42);
+        assert_eq!(strip_structural_tag(plain.as_u64()), 42);
+        // Minting from an already-tagged sequence does not double-tag.
+        assert_eq!(
+            VersionId::structural(structural.as_u64()).unwrap(),
+            structural
+        );
+    }
+
+    #[test]
+    fn id_generator_reseed_never_enters_structural_range() {
+        let generator = IdGenerator::new();
+        let structural = VersionId::structural(99).unwrap().as_u64();
+        generator.ensure_at_least(structural + 1);
+        assert_eq!(generator.current(), 100);
+        generator.reset_to(structural + 1);
+        assert_eq!(generator.current(), 100);
+        let next = generator.next().unwrap();
+        assert!(!VersionId::new(next).unwrap().is_structural());
+    }
 
     #[test]
     fn test_node_id_creation() {

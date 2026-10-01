@@ -86,16 +86,20 @@ pub mod graph;
 pub mod loader;
 pub mod manifest;
 /// Persistence operations implementation.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod operations;
 /// Index-layer key-rotation re-encryption engine (Issue #488).
+#[cfg(not(target_arch = "wasm32"))]
 pub mod reencrypt;
 pub mod strings;
 pub mod temporal;
 pub mod temporal_adjacency;
 /// Persistence mutation tracking.
 pub mod tracker;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod vector;
 /// Background persistence worker thread.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod worker;
 
 #[cfg(test)]
@@ -109,7 +113,9 @@ pub use api::{
 pub use error::{IndexPersistenceError, Result};
 pub use formats::*;
 pub use loader::IndexPersistenceManager;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 pub use reencrypt::{IndexKeyRotation, RotationError, RotationProgress, RotationStatus};
 
 /// Current manifest format version.
@@ -151,10 +157,18 @@ pub const TEMPORAL_ADJACENCY_MAGIC: [u8; 4] = *b"GTAJ";
 /// Magic bytes for vector metadata files.
 pub const VECTOR_META_MAGIC: [u8; 4] = *b"GVEC";
 
-/// Maximum number of strings allowed in the string interner (DoS protection).
-/// ~100K strings should be sufficient for most databases while preventing
-/// memory exhaustion attacks.
-pub const MAX_STRING_COUNT: u64 = 100_000;
+/// Backstop floor for the number of strings allowed when loading a persisted
+/// string interner (DoS protection).
+///
+/// Raised from 100_000 to 10_000_000 (Issue: configurable interner cap) to move
+/// in lockstep with the runtime intern cap
+/// ([`DEFAULT_MAX_INTERNED_STRINGS`](crate::core::interning::DEFAULT_MAX_INTERNED_STRINGS));
+/// otherwise a database that interned more than the old default would save fine
+/// but fail to reload. This constant is only a **floor**: the effective load
+/// limit is `max(MAX_STRING_COUNT, GLOBAL_INTERNER.max_capacity())`, so a
+/// deployment that raised `persistence.max_interned_strings` above this floor
+/// can still reopen its data (see `strings::validate_string_interner`).
+pub const MAX_STRING_COUNT: u64 = 10_000_000;
 
 /// Maximum length of a single string in bytes (DoS protection).
 /// Increased from 1MB to 10MB to support business scenarios:
@@ -296,7 +310,25 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
     // Atomically replace target with temp
     fs::rename(&temp_path, path)?;
 
+    // Durably persist the rename itself: without an fsync of the containing
+    // directory, a crash after the rename can lose the new directory entry even
+    // though the file's data was fsync'd, resurrecting the old target or leaving
+    // no target at all (Issue #488 P0.2). Best-effort: a directory that cannot
+    // be fsync'd (e.g. some network filesystems) must not fail the write.
+    if let Some(parent) = path.parent() {
+        fsync_dir(parent);
+    }
+
     Ok(())
+}
+
+/// Best-effort fsync of a directory so a preceding `rename`/`create` in it is
+/// durable across a crash. Errors are swallowed: not every filesystem supports
+/// directory fsync, and a failed dir-sync must never fail the enclosing write.
+pub(crate) fn fsync_dir(dir: &std::path::Path) {
+    if let Ok(handle) = std::fs::File::open(dir) {
+        let _ = handle.sync_all();
+    }
 }
 
 /// Load graph, temporal, and vector indexes in parallel for faster startup.
@@ -346,6 +378,7 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
 ///     vec![],
 /// )?;
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_indexes_parallel(
     graph_path: &std::path::Path,
     temporal_path: Option<&std::path::Path>,
@@ -365,6 +398,7 @@ pub fn load_indexes_parallel(
 /// directory is unaffected). Kept in lockstep with the cipher-aware loaders so
 /// this alternate parallel entry point never fails closed on an encrypted
 /// directory.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_indexes_parallel_with_cipher(
     graph_path: &std::path::Path,
     temporal_path: Option<&std::path::Path>,

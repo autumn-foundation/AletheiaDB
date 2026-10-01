@@ -73,6 +73,7 @@ What other options were evaluated?
 | [ADR-0022](0022-multi-property-vector-index.md) | Multi-Property Vector Index | 2026-01-15 | vector, index |
 | [ADR-0023](0023-index-persistence-layer.md) | Index Persistence Layer | 2026-01-16 | storage, performance |
 | [ADR-0024](0024-hybrid-logical-clock-timestamps.md) | Hybrid Logical Clock Timestamps | 2026-01-20 | core, temporal, distributed |
+| [ADR-0061](0061-append-only-valid-time-supersession.md) | Append-Only Valid-Time Supersession on Update | 2026-10-01 | temporal, storage, core |
 
 ### Proposed
 
@@ -81,7 +82,7 @@ What other options were evaluated?
 | [ADR-0012](0012-configurable-durability-modes.md) | Configurable Durability Modes | 2026-01-01 | storage, durability, performance |
 | [ADR-0013](0013-tiered-storage-architecture.md) | Tiered Storage Architecture | 2026-01-01 | storage, scalability, performance |
 | [ADR-0014](0014-graph-sharding-strategy.md) | Graph Sharding Strategy | 2026-01-01 | storage, scalability, distributed |
-| [ADR-0026](0026-encryption-at-rest.md) | Encryption-at-Rest Architecture | 2026-01-27 | security, storage, durability, encryption |
+| [ADR-0028](0028-encryption-at-rest.md) | Encryption-at-Rest Architecture | 2026-01-27 | security, storage, durability, encryption |
 
 ## Creating a New ADR
 

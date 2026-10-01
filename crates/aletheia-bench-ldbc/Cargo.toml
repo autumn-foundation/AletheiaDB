@@ -1,0 +1,24 @@
+[package]
+name = "aletheia-bench-ldbc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+authors = ["AletheiaDB Contributors"]
+description = "LDBC-style (not audited) benchmark suite for AletheiaDB: SNB interactive subset + temporal & vector extensions (Issue #3373)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints.rust]
+missing_docs = "warn"
+
+[dependencies]
+# The shared AletheiaDB core. Mirrors the `crates/aletheia-server` path-dep
+# pattern. Default features (config-toml, audit-export, simsimd) give us the
+# public graph + temporal + vector query surface this suite exercises.
+aletheiadb = { path = "../.." }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[[bin]]
+name = "ldbc-bench"
+path = "src/bin/ldbc_bench.rs"

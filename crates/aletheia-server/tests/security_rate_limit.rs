@@ -323,15 +323,18 @@ async fn over_limit_429_is_structured_envelope_not_raw_text() {
         .expect("read body");
     let v: Value = serde_json::from_slice(&bytes)
         .expect("wrapped 429 body must be structured JSON, not raw governor text");
-    assert_eq!(v["success"], json!(false));
-    assert_eq!(v["code"], "RESOURCE_EXHAUSTED", "8b code: {v}");
+    assert!(
+        v.get("success").is_none(),
+        "flat `success` field dropped: {v}"
+    );
+    assert_eq!(v["error"]["code"], "RESOURCE_EXHAUSTED", "8b code: {v}");
     assert_eq!(
-        v["retriable"],
+        v["error"]["retriable"],
         json!(true),
         "rate-limit 429 is retriable: {v}"
     );
     assert!(
-        v["error"].is_string(),
+        v["error"]["message"].is_string(),
         "carries a human-readable message: {v}"
     );
     let raw = String::from_utf8_lossy(&bytes);

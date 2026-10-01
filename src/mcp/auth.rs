@@ -36,8 +36,9 @@
 //! Key management (create/list/revoke) is served by the HTTP admin surface
 //! (Phase 1: `POST/GET /admin/keys`, `POST /admin/keys/revoke`). Point both
 //! surfaces at the same persisted store path (`{data_dir}/auth/keys.json`)
-//! and keys minted over HTTP are usable here. No MCP-side lifecycle tools
-//! exist yet (and therefore no `Admin`-class MCP tools).
+//! and keys minted over HTTP are usable here. No MCP-side *key-lifecycle*
+//! tools exist yet. The `Admin`-class MCP tools that do exist are the GDPR
+//! crypto-shred surface (`designate_subject` / `erase_subject`, Issue #3359).
 //!
 //! The documented classification lives in
 //! `docs/guides/access-control-matrix.md`; a conformance test mechanically
@@ -78,12 +79,25 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     ("get_incoming_edges", AccessClass::Read),
     ("traverse", AccessClass::Read),
     ("find_similar", AccessClass::Read),
+    // Embedding generation & text semantic search (Issue #2906) — read-only.
+    ("embed_query", AccessClass::Read),
+    ("embed_text", AccessClass::Read),
+    ("semantic_search", AccessClass::Read),
+    // Semantic-search analysis tools (Issue #2907) — read-only.
+    ("semantic_path", AccessClass::Read),
+    ("concept_analogy", AccessClass::Read),
+    ("concept_mean", AccessClass::Read),
+    ("find_duplicate_candidates", AccessClass::Read),
+    ("semantic_horizon", AccessClass::Read),
+    ("context_aspects", AccessClass::Read),
     ("list_vector_indexes", AccessClass::Read),
     ("list_unique_constraints", AccessClass::Read),
     ("get_node_at_time", AccessClass::Read),
     ("get_edge_at_time", AccessClass::Read),
     ("find_nodes_at_time", AccessClass::Read),
     ("list_changes", AccessClass::Read),
+    // Push-changefeed long-poll — read-only (Issue #3375).
+    ("await_changes", AccessClass::Read),
     ("get_node_at_valid_time", AccessClass::Read),
     ("get_node_at_transaction_time", AccessClass::Read),
     ("get_node_history", AccessClass::Read),
@@ -92,6 +106,19 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     ("get_edge_at_transaction_time", AccessClass::Read),
     ("get_edge_history", AccessClass::Read),
     ("diff_edge_versions", AccessClass::Read),
+    // Belief-revision audit (Issue #3362) — read-only.
+    ("get_belief_revisions", AccessClass::Read),
+    // Temporal drift-alarm reads (Issue #3367) — read-only.
+    ("list_drift_monitors", AccessClass::Read),
+    ("query_drift_alarms", AccessClass::Read),
+    // Contradiction genealogy (Issue #3352) — read-only.
+    ("contradiction_genealogy", AccessClass::Read),
+    ("find_contradictions", AccessClass::Read),
+    // Counterfactual replay (Issue #3357) — read-only (view, real DB unmutated).
+    ("counterfactual_replay", AccessClass::Read),
+    // Trust propagation reads (Issue #3382) — read-only.
+    ("trust_breakdown", AccessClass::Read),
+    ("list_trust_policies", AccessClass::Read),
     ("hybrid_query", AccessClass::Read),
     ("query", AccessClass::Read),
     ("get_schema", AccessClass::Read),
@@ -104,6 +131,9 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     // Provenance hash chain verification / anchor export — read-only (Issue #3351).
     ("verify_chain", AccessClass::Read),
     ("export_chain_head", AccessClass::Read),
+    // Namespace discovery — read-only (Issue #3349, PR3b).
+    ("list_namespaces", AccessClass::Read),
+    ("describe_namespace", AccessClass::Read),
     // ---- Metrics: operational health/stats.
     ("database_stats", AccessClass::Metrics),
     // ---- Write: graph mutations plus index/constraint state changes.
@@ -119,8 +149,22 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     ("apply_batch", AccessClass::Write),
     ("enable_vector_index", AccessClass::Write),
     ("enable_unique_constraint", AccessClass::Write),
-    // ---- Admin: none yet. Key lifecycle is served by the HTTP admin
+    // Embedding-backed writes (Issue #2906).
+    ("create_node_with_embedding", AccessClass::Write),
+    ("update_node_embedding", AccessClass::Write),
+    // Namespace creation — a write (Issue #3349, PR3b).
+    ("create_namespace", AccessClass::Write),
+    // Temporal drift-alarm writes (Issue #3367).
+    ("create_drift_monitor", AccessClass::Write),
+    ("delete_drift_monitor", AccessClass::Write),
+    ("resolve_drift_alarm", AccessClass::Write),
+    // ---- Admin: GDPR crypto-shred designation & irreversible erasure
+    // (Issue #3359, Slice 4b) — the first Admin-class MCP tools. Erasure
+    // destroys per-subject key material, an irreversible privileged op.
+    // Key lifecycle (create/list/revoke) remains served by the HTTP admin
     // surface (Phase 1) over the shared persisted store.
+    ("designate_subject", AccessClass::Admin),
+    ("erase_subject", AccessClass::Admin),
 ];
 
 /// Look up the [`AccessClass`] a tool requires. `None` for unknown tool
@@ -285,6 +329,24 @@ pub(crate) fn permission_denied_error(role: Role, class: AccessClass) -> McpErro
     .details(json!({
         "required_class": class.to_string(),
         "principal_role": role.to_string(),
+    }))
+}
+
+/// A `FAILED_PRECONDITION` error for a write/admin-class tool call rejected
+/// because the node is a read-only replica (Issue #3355). Non-retriable: the
+/// identical call against this node can never succeed, the caller must
+/// redirect to the primary. Carries `{node_role: "replica", reason:
+/// "read_only_replica"}` so a caller/LLM can branch on it without parsing
+/// `message`.
+pub(crate) fn read_only_replica_error() -> McpError {
+    McpError::new(
+        McpErrorCode::FailedPrecondition,
+        "write rejected: this node is a read-only replica; writes must go to the primary",
+    )
+    .retriable(false)
+    .details(json!({
+        "node_role": "replica",
+        "reason": "read_only_replica",
     }))
 }
 

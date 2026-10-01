@@ -21,6 +21,7 @@
 
 use aletheiadb::Error;
 use aletheiadb::api::transaction::WriteOps;
+use aletheiadb::index::adjacency_maintenance::AdjacencyMaintenanceConfig;
 use aletheiadb::{AletheiaDB, CurrentStorage, PropertyMapBuilder};
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -30,7 +31,8 @@ fn bench_single_hop_target(c: &mut Criterion) {
     let mut group = c.benchmark_group("target_single_hop");
 
     // Create a small graph for single-hop testing
-    let storage = CurrentStorage::new();
+    let storage =
+        CurrentStorage::with_adjacency_maintenance(AdjacencyMaintenanceConfig::disabled());
     let node1 = storage
         .create_node("Person", PropertyMapBuilder::new().insert("id", 1).build())
         .unwrap();
@@ -60,7 +62,8 @@ fn bench_3_hop_target(c: &mut Criterion) {
     let mut group = c.benchmark_group("target_3_hop");
 
     // Create a chain for 3-hop testing: n1 -> n2 -> n3 -> n4
-    let storage = CurrentStorage::new();
+    let storage =
+        CurrentStorage::with_adjacency_maintenance(AdjacencyMaintenanceConfig::disabled());
     let mut nodes = Vec::new();
     for i in 0..4 {
         nodes.push(
@@ -114,7 +117,8 @@ fn bench_batch_insertion_target(c: &mut Criterion) {
 
     group.bench_function("insert_1000_edges", |b| {
         b.iter(|| {
-            let storage = CurrentStorage::new();
+            let storage =
+                CurrentStorage::with_adjacency_maintenance(AdjacencyMaintenanceConfig::disabled());
 
             // Create 100 nodes
             let nodes: Vec<_> = (0..100)

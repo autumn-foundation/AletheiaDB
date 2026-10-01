@@ -183,8 +183,36 @@ impl Parser {
     ///           limit_clause?
     /// ```
     fn parse_query(&mut self) -> Result<QueryAst, ParseError> {
-        // Parse optional temporal clause
-        let temporal = self.parse_temporal_clause()?;
+        // Parse optional prefix modifiers (Issue #3349, PR2b). The temporal
+        // (`AS OF` / `BETWEEN`) and namespace (`USE / IN NAMESPACE`) clauses are
+        // both cross-cutting prefixes and may appear in either order; at most one
+        // of each is allowed (a duplicate is a structured parse error rather than
+        // a silent last-wins).
+        let mut temporal = None;
+        let mut namespace = None;
+        loop {
+            if self.check(&Token::As) || self.check(&Token::Between) {
+                if temporal.is_some() {
+                    return Err(self.error(
+                        "Duplicate temporal clause (only one AS OF / BETWEEN is allowed)"
+                            .to_string(),
+                        Some("MATCH / SIMILAR / FIND".to_string()),
+                    ));
+                }
+                temporal = self.parse_temporal_clause()?;
+            } else if self.check_kw("USE") || self.check(&Token::In) {
+                if namespace.is_some() {
+                    return Err(self.error(
+                        "Duplicate namespace clause (only one USE / IN NAMESPACE is allowed)"
+                            .to_string(),
+                        Some("MATCH / SIMILAR / FIND".to_string()),
+                    ));
+                }
+                namespace = Some(self.parse_namespace_clause()?);
+            } else {
+                break;
+            }
+        }
 
         // Parse main source clause (MATCH or vector search)
         let source = self.parse_source_clause()?;
@@ -193,6 +221,44 @@ impl Parser {
         let mut query = QueryAst::new(source);
         if let Some(t) = temporal {
             query = query.with_temporal(t);
+        }
+        if let Some(ns) = namespace {
+            query = query.with_namespace(ns);
+        }
+
+        // Parse an optional temporal aggregation window clause (Issue #3363).
+        // When present it is self-contained (it carries its own aggregate
+        // `RETURN`), so no further read clauses are parsed and the query must
+        // end after it.
+        if self.check_kw("WINDOW") {
+            let window = self.parse_window_clause()?;
+            query = query.with_window(window);
+            if !self.is_at_end() {
+                return Err(self.error(
+                    "Unexpected tokens after WINDOW ... RETURN (WHERE/ORDER/SKIP/LIMIT \
+                     are not supported with a temporal aggregation window)"
+                        .to_string(),
+                    Some("end of query".to_string()),
+                ));
+            }
+            return Ok(query);
+        }
+
+        // Parse an optional temporal join / align clause (Issue #3379). Like
+        // WINDOW it is self-contained (carries its own `RETURN`), so no further
+        // read clauses are parsed and the query must end after it.
+        if self.check_kw("ALIGN") {
+            let align = self.parse_align_clause()?;
+            query = query.with_align(align);
+            if !self.is_at_end() {
+                return Err(self.error(
+                    "Unexpected tokens after ALIGN ... RETURN (WHERE/ORDER/SKIP/LIMIT \
+                     are not supported with a temporal join)"
+                        .to_string(),
+                    Some("end of query".to_string()),
+                ));
+            }
+            return Ok(query);
         }
 
         // Parse optional RANK BY SIMILARITY clause
@@ -291,6 +357,306 @@ impl Parser {
         let end = self.parse_timestamp()?;
 
         Ok(TemporalClause::Between { start, end })
+    }
+
+    // =========================================================
+    // Namespace Scope Clause (Issue #3349, PR2b)
+    // =========================================================
+
+    /// Parse a namespace scope clause (`USE / IN NAMESPACE ...`).
+    ///
+    /// The leading `USE` / `IN` keyword has already been detected by the caller
+    /// (the prefix loop in [`parse_query`](Self::parse_query)); it is consumed
+    /// here.
+    ///
+    /// # Grammar
+    /// ```text
+    /// namespace_clause ::= ("USE" | "IN") "ALL" "NAMESPACES"
+    ///                    | ("USE" | "IN") "NAMESPACE" ns_name ("," ns_name)*
+    /// ns_name          ::= string_literal | identifier
+    /// ```
+    ///
+    /// `USE`, `NAMESPACE`, `ALL`, and `NAMESPACES` are **contextual** keywords
+    /// (matched against `Token::Identifier`, like the `WINDOW` / `ALIGN` clauses),
+    /// so they are not reserved and existing queries using those words as
+    /// labels/variables keep parsing unchanged. `IN` is the reserved `Token::In`
+    /// (also used by the `WHERE ... IN [...]` predicate), unambiguous in this
+    /// prefix position. Namespace names carry `:` / `/` / `.` / `-`, none of which
+    /// lex as identifiers, so a name is normally a string literal; a bare
+    /// identifier is also accepted for simple names.
+    ///
+    /// # Examples
+    /// - `USE NAMESPACE 'agent:planner'` (single)
+    /// - `USE NAMESPACE 'agent:planner', 'shared'` (union)
+    /// - `USE ALL NAMESPACES` (no filter)
+    /// - `IN NAMESPACE 'agent:planner'` (`IN` synonym)
+    fn parse_namespace_clause(&mut self) -> Result<NamespaceClause, ParseError> {
+        // Consume the leading keyword (USE contextual, or reserved IN).
+        if self.check(&Token::In) {
+            self.advance();
+        } else {
+            self.expect_kw("USE")?;
+        }
+
+        // `ALL NAMESPACES` — the no-filter selector.
+        if self.check_kw("ALL") {
+            self.advance();
+            self.expect_kw("NAMESPACES")?;
+            return Ok(NamespaceClause::All);
+        }
+
+        self.expect_kw("NAMESPACE")?;
+
+        let mut names = vec![self.parse_namespace_name()?];
+        while self.check(&Token::Comma) {
+            self.advance();
+            names.push(self.parse_namespace_name()?);
+        }
+
+        Ok(NamespaceClause::Names(names))
+    }
+
+    /// Parse a single namespace name: a string literal (the usual form, since
+    /// names carry `:` / `/` / `.` / `-`) or a bare identifier (for simple
+    /// names). Charset / length / reserved validation happens in the converter
+    /// via [`Namespace::new`](crate::core::namespace::Namespace::new).
+    fn parse_namespace_name(&mut self) -> Result<String, ParseError> {
+        match self.current() {
+            Some(Token::StringLiteral(s)) => {
+                let s = s.clone();
+                self.advance();
+                Ok(s)
+            }
+            Some(Token::Identifier(s)) => {
+                let s = s.clone();
+                self.advance();
+                Ok(s)
+            }
+            _ => Err(self.error(
+                "Expected a namespace name (a quoted string or identifier) after NAMESPACE"
+                    .to_string(),
+                Some("'namespace-name'".to_string()),
+            )),
+        }
+    }
+
+    // =========================================================
+    // Temporal Aggregation Window Clause (Issue #3363)
+    // =========================================================
+
+    /// Parse a temporal aggregation window clause.
+    ///
+    /// # Grammar
+    /// ```text
+    /// window_clause ::= "WINDOW" integer unit
+    ///                   "OVER" "VALID_TIME" "FROM" timestamp "TO" timestamp
+    ///                   ("AS" "OF" "SYSTEM_TIME" timestamp)?
+    ///                   "RETURN" window_agg ("," window_agg)*
+    /// unit          ::= identifier   (minute|hour|day|week|month|quarter|year, +s)
+    /// window_agg    ::= func "(" agg_arg ")" ("AS" identifier)?
+    /// func          ::= "COUNT" | identifier   (SUM|AVG|MIN|MAX|CHANGES)
+    /// agg_arg       ::= "*" | identifier ("." identifier)?
+    /// ```
+    fn parse_window_clause(&mut self) -> Result<WindowClause, ParseError> {
+        self.expect_kw("WINDOW")?;
+
+        // <count> <unit>
+        let count = match self.current() {
+            Some(Token::IntegerLiteral(n)) => {
+                let n = *n;
+                self.advance();
+                n
+            }
+            _ => {
+                return Err(self.error(
+                    "Expected an integer window size after WINDOW".to_string(),
+                    Some("integer".to_string()),
+                ));
+            }
+        };
+        let unit = self.parse_identifier().map_err(|_| {
+            self.error(
+                "Expected a window unit (e.g. day, week, month) after the window size".to_string(),
+                Some("unit".to_string()),
+            )
+        })?;
+
+        // OVER VALID_TIME FROM <ts> TO <ts>
+        self.expect_kw("OVER")?;
+        self.expect_kw("VALID_TIME")?;
+        self.expect_kw("FROM")?;
+        let range_start = self.parse_timestamp()?;
+        self.expect(&Token::To)?;
+        let range_end = self.parse_timestamp()?;
+
+        // Optional AS OF SYSTEM_TIME <ts>
+        let as_of_system_time = if self.check(&Token::As) {
+            self.advance(); // AS
+            self.expect(&Token::Of)?;
+            self.expect_kw("SYSTEM_TIME")?;
+            Some(self.parse_timestamp()?)
+        } else {
+            None
+        };
+
+        // RETURN <agg> [, <agg>]*
+        self.expect(&Token::Return)?;
+        let mut aggregates = vec![self.parse_window_agg_item()?];
+        while self.check(&Token::Comma) {
+            self.advance();
+            aggregates.push(self.parse_window_agg_item()?);
+        }
+
+        Ok(WindowClause {
+            count,
+            unit,
+            range_start,
+            range_end,
+            as_of_system_time,
+            aggregates,
+        })
+    }
+
+    /// Parse one `func(arg) [AS alias]` window aggregate item.
+    fn parse_window_agg_item(&mut self) -> Result<WindowReturnItem, ParseError> {
+        // Function name: COUNT is a reserved token; the rest are identifiers.
+        let func = if self.check(&Token::Count) {
+            self.advance();
+            "COUNT".to_string()
+        } else {
+            self.parse_identifier().map_err(|_| {
+                self.error(
+                    "Expected an aggregate function name (COUNT/SUM/AVG/MIN/MAX/CHANGES)"
+                        .to_string(),
+                    Some("aggregate function".to_string()),
+                )
+            })?
+        };
+
+        self.expect(&Token::LeftParen)?;
+        let arg = if self.check(&Token::Star) {
+            self.advance();
+            WindowAggArg::Star
+        } else {
+            let var = self.parse_identifier()?;
+            if self.check(&Token::Dot) {
+                self.advance();
+                let key = self.parse_identifier()?;
+                WindowAggArg::Property { var, key }
+            } else {
+                WindowAggArg::Entity { var }
+            }
+        };
+        self.expect(&Token::RightParen)?;
+
+        let alias = if self.check(&Token::As) {
+            self.advance();
+            Some(self.parse_identifier()?)
+        } else {
+            None
+        };
+
+        Ok(WindowReturnItem { func, arg, alias })
+    }
+
+    // =========================================================
+    // Temporal Join / Align Clause (Issue #3379)
+    // =========================================================
+
+    /// Parse a temporal join / align clause.
+    ///
+    /// # Grammar
+    /// ```text
+    /// align_clause ::= "ALIGN" mode
+    ///                  "OVER" "VALID_TIME" "FROM" timestamp "TO" timestamp
+    ///                  ("AS" "OF" "SYSTEM_TIME" timestamp)?
+    ///                  "RETURN" align_item ("," align_item)*
+    /// mode         ::= "EVENTS" "DRIVER" identifier
+    ///                | "OVERLAP"
+    /// align_item   ::= identifier ("." identifier)? ("AS" identifier)?
+    /// ```
+    fn parse_align_clause(&mut self) -> Result<AlignClause, ParseError> {
+        self.expect_kw("ALIGN")?;
+
+        // mode: EVENTS DRIVER <var> | OVERLAP
+        let (mode, driver) = if self.check_kw("EVENTS") {
+            self.advance();
+            self.expect_kw("DRIVER")?;
+            let var = self.parse_identifier().map_err(|_| {
+                self.error(
+                    "Expected the driving-entity variable after DRIVER".to_string(),
+                    Some("variable".to_string()),
+                )
+            })?;
+            (AlignMode::Events, Some(var))
+        } else if self.check_kw("OVERLAP") {
+            self.advance();
+            (AlignMode::Overlap, None)
+        } else {
+            return Err(self.error(
+                "Expected an alignment mode (EVENTS DRIVER <var> | OVERLAP) after ALIGN"
+                    .to_string(),
+                Some("EVENTS or OVERLAP".to_string()),
+            ));
+        };
+
+        // OVER VALID_TIME FROM <ts> TO <ts>
+        self.expect_kw("OVER")?;
+        self.expect_kw("VALID_TIME")?;
+        self.expect_kw("FROM")?;
+        let range_start = self.parse_timestamp()?;
+        self.expect(&Token::To)?;
+        let range_end = self.parse_timestamp()?;
+
+        // Optional AS OF SYSTEM_TIME <ts>
+        let as_of_system_time = if self.check(&Token::As) {
+            self.advance(); // AS
+            self.expect(&Token::Of)?;
+            self.expect_kw("SYSTEM_TIME")?;
+            Some(self.parse_timestamp()?)
+        } else {
+            None
+        };
+
+        // RETURN <item> [, <item>]*
+        self.expect(&Token::Return)?;
+        let mut items = vec![self.parse_align_item()?];
+        while self.check(&Token::Comma) {
+            self.advance();
+            items.push(self.parse_align_item()?);
+        }
+
+        Ok(AlignClause {
+            mode,
+            driver,
+            range_start,
+            range_end,
+            as_of_system_time,
+            items,
+        })
+    }
+
+    /// Parse one `var[.key] [AS alias]` align return item.
+    fn parse_align_item(&mut self) -> Result<AlignReturnItem, ParseError> {
+        let var = self.parse_identifier().map_err(|_| {
+            self.error(
+                "Expected a bound variable in the ALIGN RETURN list".to_string(),
+                Some("variable".to_string()),
+            )
+        })?;
+        let key = if self.check(&Token::Dot) {
+            self.advance();
+            Some(self.parse_identifier()?)
+        } else {
+            None
+        };
+        let alias = if self.check(&Token::As) {
+            self.advance();
+            Some(self.parse_identifier()?)
+        } else {
+            None
+        };
+        Ok(AlignReturnItem { var, key, alias })
     }
 
     fn parse_timestamp(&mut self) -> Result<TimestampLiteral, ParseError> {
@@ -1468,6 +1834,32 @@ impl Parser {
             found: self.current().cloned(),
         }
     }
+
+    // =========================================================
+    // Contextual keyword helpers (Issue #3363)
+    //
+    // The temporal aggregation window clause introduces several words
+    // (`WINDOW`, `OVER`, `VALID_TIME`, `SYSTEM_TIME`, `FROM`) that are matched
+    // *contextually* against `Token::Identifier` rather than being reserved in
+    // the lexer, so existing queries whose labels/variables happen to use those
+    // words keep parsing unchanged.
+    // =========================================================
+
+    /// True if the current token is an identifier equal (case-insensitively) to
+    /// `kw`.
+    fn check_kw(&self, kw: &str) -> bool {
+        matches!(self.current(), Some(Token::Identifier(s)) if s.eq_ignore_ascii_case(kw))
+    }
+
+    /// Consume a contextual keyword, or error.
+    fn expect_kw(&mut self, kw: &str) -> Result<(), ParseError> {
+        if self.check_kw(kw) {
+            self.advance();
+            Ok(())
+        } else {
+            Err(self.error(format!("Expected `{}`", kw), Some(kw.to_uppercase())))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1484,6 +1876,109 @@ mod tests {
 
         assert!(matches!(query.source, SourceClause::Match(_)));
         assert!(query.return_clause.is_some());
+    }
+
+    // =====================================================
+    // Namespace Scope Clause (Issue #3349, PR2b)
+    // =====================================================
+
+    #[test]
+    fn parse_use_namespace_single() {
+        let query = Parser::parse("USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(
+            query.namespace,
+            Some(NamespaceClause::Names(vec!["agent:a".to_string()]))
+        );
+        assert!(matches!(query.source, SourceClause::Match(_)));
+    }
+
+    #[test]
+    fn parse_use_namespace_union() {
+        let query =
+            Parser::parse("USE NAMESPACE 'agent:a', 'shared' MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(
+            query.namespace,
+            Some(NamespaceClause::Names(vec![
+                "agent:a".to_string(),
+                "shared".to_string()
+            ]))
+        );
+    }
+
+    #[test]
+    fn parse_use_all_namespaces() {
+        let query = Parser::parse("USE ALL NAMESPACES MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(query.namespace, Some(NamespaceClause::All));
+    }
+
+    #[test]
+    fn parse_in_namespace_synonym() {
+        let query = Parser::parse("IN NAMESPACE 'agent:a' MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(
+            query.namespace,
+            Some(NamespaceClause::Names(vec!["agent:a".to_string()]))
+        );
+    }
+
+    #[test]
+    fn parse_namespace_bare_identifier_name() {
+        // A simple name (no `:` / `/`) may be a bare identifier.
+        let query = Parser::parse("USE NAMESPACE shared MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(
+            query.namespace,
+            Some(NamespaceClause::Names(vec!["shared".to_string()]))
+        );
+    }
+
+    #[test]
+    fn parse_namespace_after_temporal() {
+        // Both prefixes, temporal first.
+        let query =
+            Parser::parse("AS OF 1000000 USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n")
+                .unwrap();
+        assert!(query.temporal.is_some());
+        assert_eq!(
+            query.namespace,
+            Some(NamespaceClause::Names(vec!["agent:a".to_string()]))
+        );
+    }
+
+    #[test]
+    fn parse_namespace_before_temporal() {
+        // Both prefixes, namespace first (order-independent).
+        let query =
+            Parser::parse("USE NAMESPACE 'agent:a' AS OF 1000000 MATCH (n:Person) RETURN n")
+                .unwrap();
+        assert!(query.temporal.is_some());
+        assert_eq!(
+            query.namespace,
+            Some(NamespaceClause::Names(vec!["agent:a".to_string()]))
+        );
+    }
+
+    #[test]
+    fn parse_no_namespace_clause_is_none() {
+        let query = Parser::parse("MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(query.namespace, None);
+    }
+
+    #[test]
+    fn parse_namespace_missing_name_is_error() {
+        assert!(Parser::parse("USE NAMESPACE MATCH (n:Person) RETURN n").is_err());
+    }
+
+    #[test]
+    fn parse_namespace_missing_keyword_is_error() {
+        // `USE` not followed by NAMESPACE / ALL.
+        assert!(Parser::parse("USE 'agent:a' MATCH (n:Person) RETURN n").is_err());
+    }
+
+    #[test]
+    fn parse_duplicate_namespace_clause_is_error() {
+        assert!(
+            Parser::parse("USE NAMESPACE 'agent:a' USE NAMESPACE 'agent:b' MATCH (n) RETURN n")
+                .is_err()
+        );
     }
 
     #[test]
@@ -2438,5 +2933,71 @@ mod sentry_tests {
 
         // Element 1 is the relationship
         assert_eq!(patterns[0].elements[1], expected_rel);
+    }
+
+    // =====================================================
+    // Temporal Join / Align Clause Tests (Issue #3379)
+    // =====================================================
+
+    #[test]
+    fn test_parse_align_events_mode() {
+        let query = Parser::parse(
+            "MATCH (o:Purchase)-[:PLACED_BY]->(c:Customer) \
+             ALIGN EVENTS DRIVER o \
+             OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2025-01-01T00:00:00Z' \
+             AS OF SYSTEM_TIME '2024-06-01T00:00:00Z' \
+             RETURN o.total, c.tier AS tier",
+        )
+        .expect("parses");
+        let align = query.align.expect("has align clause");
+        assert_eq!(align.mode, AlignMode::Events);
+        assert_eq!(align.driver.as_deref(), Some("o"));
+        assert!(align.as_of_system_time.is_some());
+        assert_eq!(align.items.len(), 2);
+        assert_eq!(align.items[0].var, "o");
+        assert_eq!(align.items[0].key.as_deref(), Some("total"));
+        assert_eq!(align.items[1].var, "c");
+        assert_eq!(align.items[1].alias.as_deref(), Some("tier"));
+        // A terminal clause: no separate RETURN clause is parsed.
+        assert!(query.return_clause.is_none());
+    }
+
+    #[test]
+    fn test_parse_align_overlap_mode_no_driver() {
+        let query = Parser::parse(
+            "MATCH (p:Product) ALIGN OVERLAP \
+             OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2024-06-01T00:00:00Z' \
+             RETURN p.price",
+        )
+        .expect("parses");
+        let align = query.align.expect("has align clause");
+        assert_eq!(align.mode, AlignMode::Overlap);
+        assert!(align.driver.is_none());
+        assert!(align.as_of_system_time.is_none());
+        assert_eq!(align.items.len(), 1);
+        assert_eq!(align.items[0].var, "p");
+        assert_eq!(align.items[0].key.as_deref(), Some("price"));
+    }
+
+    #[test]
+    fn test_parse_align_rejects_trailing_clause_and_bad_mode() {
+        // No trailing read clauses after ALIGN ... RETURN.
+        assert!(
+            Parser::parse(
+                "MATCH (p:Product) ALIGN OVERLAP \
+             OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2024-06-01T00:00:00Z' \
+             RETURN p.price LIMIT 5",
+            )
+            .is_err()
+        );
+        // Unknown mode word.
+        assert!(
+            Parser::parse(
+                "MATCH (p:Product) ALIGN SIDEWAYS \
+             OVER VALID_TIME FROM '2024-01-01T00:00:00Z' TO '2024-06-01T00:00:00Z' \
+             RETURN p.price",
+            )
+            .is_err()
+        );
     }
 }

@@ -10,7 +10,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! aletheiadb = { version = "0.1", features = ["cypher"] }
+//! aletheiadb = { version = "0.2", features = ["cypher"] }
 //! ```
 //!
 //! # Architecture
@@ -63,6 +63,7 @@ pub use converter::{
     CypherConverter, CypherParameterValue, parse_cypher, parse_cypher_with_params,
 };
 pub use error::CypherError;
+pub(crate) use exec::statement_namespace;
 pub use exec::{CypherExecution, plan_cypher, plan_cypher_with_params};
 pub use lexer::{CypherLexer, Token, TokenKind};
 pub use parser::CypherParser;

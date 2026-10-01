@@ -204,7 +204,7 @@ db.query()
 - Physical operators include `property_key: Option<String>` for multi-property execution
 - Temporal indexes also support multi-property via same DashMap pattern
 
-See [ADR-0022](docs/adr/0022-multi-property-vector-index.md) for complete architecture details.
+See [ADR-0022](adr/0022-multi-property-vector-index.md) for complete architecture details.
 
 ## Implementation Plan
 
@@ -999,9 +999,9 @@ src/query/
 - Comprehensive benchmarks in `benches/hybrid_query.rs`
 
 **Documentation**:
-- [ADR-0019: Hybrid Query Planner](docs/adr/0019-hybrid-query-planner.md)
-- [ADR-0021: Hybrid Query Execution Engine](docs/adr/0021-hybrid-query-execution.md)
-- [Hybrid Query User Guide](docs/guides/hybrid-query-guide.md)
+- [ADR-0019: Hybrid Query Planner](adr/0019-hybrid-query-planner.md)
+- [ADR-0021: Hybrid Query Execution Engine](adr/0021-hybrid-query-execution.md)
+- [Hybrid Query User Guide](guides/hybrid-query-guide.md)
 
 ### Phase 5: Persistence & Performance
 **Estimated effort**: 2-3 days

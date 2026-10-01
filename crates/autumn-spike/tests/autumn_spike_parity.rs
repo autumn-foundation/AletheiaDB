@@ -124,7 +124,7 @@ async fn case_a_unauthenticated_returns_401_parity() {
     let (q_status, q_body) = query_get_node(db, store, node_id.as_u64(), None).await;
     assert_eq!(s_status, 401);
     assert_eq!(s_status, q_status);
-    assert_eq!(s_body["code"], "UNAUTHENTICATED");
+    assert_eq!(s_body["error"]["code"], "UNAUTHENTICATED");
     assert_eq!(
         s_body, q_body,
         "unauth error body must be byte-identical to POST /query"
@@ -165,7 +165,7 @@ async fn case_c_metrics_forbidden_parity() {
     let (q_status, q_body) = query_get_node(db, store, node_id.as_u64(), Some(METRICS_TOKEN)).await;
     assert_eq!(s_status, 403);
     assert_eq!(s_status, q_status);
-    assert_eq!(s_body["code"], "PERMISSION_DENIED");
+    assert_eq!(s_body["error"]["code"], "PERMISSION_DENIED");
     // HTTP's flat envelope carries NO `details` (it is thinner than MCP's #3234
     // envelope — see the spike doc). Parity holds by construction.
     assert!(s_body.get("details").is_none());
@@ -185,7 +185,10 @@ async fn case_d_missing_node_not_found_parity() {
     let (q_status, q_body) = query_get_node(db, store, 999_999, Some(READER_TOKEN)).await;
     assert_eq!(s_status, 404);
     assert_eq!(s_status, q_status);
-    assert_eq!(s_body["success"], false);
+    assert!(
+        s_body.get("success").is_none(),
+        "flat `success` field dropped: {s_body}"
+    );
     assert_eq!(
         s_body, q_body,
         "404 error body must be byte-identical to POST /query"
@@ -218,9 +221,15 @@ async fn case_e2_non_numeric_id_structured_envelope() {
     let (status, body) = spike_get(&client, "abc", Some(READER_TOKEN)).await;
     assert_eq!(status, 400);
     // Flat envelope, not axum's plain-text default.
-    assert_eq!(body["success"], false);
     assert!(
-        body["error"].as_str().unwrap().contains("invalid node id"),
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("invalid node id"),
         "structured body expected: {body}"
     );
 }
@@ -346,11 +355,11 @@ async fn case_h_mcp_tools_call_auth_failure_reflected() {
     let text = body["result"]["content"][0]["text"]
         .as_str()
         .expect("tool text");
-    // Text is `handler returned HTTP 403: {<flat error body>}` — parse the JSON.
+    // Text is `handler returned HTTP 403: {<nested error body>}` — parse the JSON.
     let start = text.find('{').expect("embedded error json");
     let inner: Value = serde_json::from_str(&text[start..]).expect("inner error json");
     assert_eq!(
-        inner["code"], "PERMISSION_DENIED",
+        inner["error"]["code"], "PERMISSION_DENIED",
         "tool error must carry the #3234 code, not a substring: {text}"
     );
 

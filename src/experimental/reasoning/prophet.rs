@@ -28,7 +28,7 @@
 //!
 //! ```rust
 //! // [dependencies]
-//! // aletheiadb = { version = "0.1", features = ["nova"] }
+//! // aletheiadb = { version = "0.2", features = ["nova"] }
 //!
 //! # #[cfg(feature = "semantic-reasoning")]
 //! use aletheiadb::AletheiaDB;

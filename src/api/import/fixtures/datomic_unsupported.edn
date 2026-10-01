@@ -1,0 +1,5 @@
+[{:e 100 :a :company/name :v "Acme Corp" :tx 1000 :tx-instant #inst "2020-01-01T00:00:00Z" :op true}
+ {:e 63 :a :db/ident :v :person/name :tx 1000 :tx-instant #inst "2020-01-01T00:00:00Z" :op true}
+ {:e 63 :a :db.install/attribute :v 63 :tx 1000 :tx-instant #inst "2020-01-01T00:00:00Z" :op true}
+ {:e 70 :a :db/fn :v "fn-blob" :tx 1000 :tx-instant #inst "2020-01-01T00:00:00Z" :op true}
+ {:e 100 :a :db/excise :v 100 :tx 1005 :tx-instant #inst "2021-01-01T00:00:00Z" :op true}]

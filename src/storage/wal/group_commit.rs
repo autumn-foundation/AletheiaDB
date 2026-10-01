@@ -26,12 +26,451 @@
 //!
 //! The flush thread uses `.expect()` to panic on lock poisoning because silent
 //! degradation is worse than fail-fast behavior for background infrastructure.
+//!
+//! # Lock-acquisition hardening and the #3798 audit
+//!
+//! Issue #3798 reported a multi-hour, zero-CPU stall with several threads
+//! parked in `std::sync::Mutex::lock`, and named **re-entrant acquisition of
+//! this coordinator's state mutex** as the leading hypothesis. That hypothesis
+//! is **falsified** — see the call-site audit below. The hardening in this
+//! module exists for a different reason: the reported stall could not be
+//! attributed from the available evidence, so every acquisition now converts
+//! *any* future stall of this class into a structured, forensic error instead
+//! of a silent, permanent park.
+//!
+//! ## The committed call-site audit
+//!
+//! - All **eight** acquisitions of the state mutex written in this file route
+//!   through the single `lock_state` chokepoint: `register_transaction`,
+//!   `wait_for_flush`, `start_flush`, `finish_flush`, `current_batch_size`,
+//!   `current_epoch`, `flushed_epoch`, `should_flush`. There is no other
+//!   `state.lock()` anywhere in the crate. The one acquisition that is *not*
+//!   written here — and therefore not routed through `lock_state` — is the
+//!   re-lock `Condvar::wait_timeout` performs internally on wakeup; see the
+//!   lock-leaf contract below.
+//! - **No critical section calls another coordinator method.** `mark_flushed`
+//!   is `start_flush` *then* `finish_flush`: the first guard dies at that
+//!   method's return, so the two acquisitions are strictly sequential, never
+//!   nested.
+//! - The **only external callers** of the coordinator are
+//!   `src/api/transaction/write/mod.rs` (`wait_for_flush`) and
+//!   `src/storage/wal/concurrent_system.rs` (`register_transaction` from
+//!   `commit`, plus `current_batch_size`, `start_flush` and `finish_flush`
+//!   from the background flusher) — each a complete call that returns before
+//!   the next begins. The background flusher drives
+//!   `start_flush` / `finish_flush` **directly** rather than through
+//!   `mark_flushed`, precisely so a refused `finish_flush` can be told apart
+//!   from a refused `start_flush` and retried (Issue #3798). `mark_flushed`
+//!   consequently has **no production caller** any more; it is retained as
+//!   test and back-compatibility API, and its two acquisitions are still
+//!   sequential, so it changes nothing in this audit.
+//! - The guard type (`StateGuard`) **never escapes this module**, and its
+//!   `Deref` target `GroupCommitState` keeps every field private, so no
+//!   caller — internal or downstream — can hold the guard across a call back
+//!   into the coordinator.
+//!
+//! Re-entrant acquisition was therefore **impossible in the audited source**.
+//! Relatedly, flush-thread death leaves this mutex *unlocked and unpoisoned*,
+//! so it cannot be the primitive threads were parked on.
+//!
+//! ## The two confirmed mechanisms the audit found instead
+//!
+//! 1. **Unbounded ring-buffer append under a held commit-path lock.**
+//!    `WalRingBuffer::append_blocking` (`src/storage/wal/ring_buffer.rs`)
+//!    looped with no deadline while the buffer was full and not closed, and is
+//!    reached from the commit path (`src/api/transaction/write/wal.rs` →
+//!    `concurrent.rs` → `stripe.rs`). If the background flusher stops
+//!    draining, the stripes fill and that loop never ends.
+//!    **Fixed:** the append is now bounded by
+//!    `ConcurrentWalSystemConfig::max_append_block_ms` and fails with a
+//!    structured "ring buffer full / the flusher may be dead" `WalError`, and
+//!    the flusher publishes a heartbeat that
+//!    `ConcurrentWalSystem::is_healthy` consults.
+//! 2. **Every-committer amplification via the commit-path `current_timestamp`
+//!    mutex**, held across append + durability wait + apply
+//!    (`src/api/transaction/write/mod.rs`). Any single indefinite block
+//!    underneath it becomes an untimed, zero-CPU convoy of every other
+//!    committing thread. **Mitigation deferred:** that hold is deliberate and
+//!    documented at the site. The WAL transaction *frame format* itself
+//!    (Issue #3413 — `BeginTx`/`CommitTx`/`AbortTx`) has landed; what the
+//!    shortened hold still waits on is the **commit path emitting an abort
+//!    record** when a step after the append fails, tracked as Issue #3799.
+//!    Out of scope here.
+//!
+//! ## Lock-leaf contract
+//!
+//! The state mutex is a **leaf**: while it is held this module acquires
+//! nothing else — no file I/O, no second lock, no channel operation, no
+//! callback or foreign trait impl. The only blocking construct inside a
+//! critical section is `Condvar::wait_timeout` on the coordinator's *own*
+//! `flush_complete`, which releases the mutex while parked. `lock_state`
+//! itself only ever *sleeps* (it never takes another lock), so this mutex
+//! never participates in a lock cycle of its own.
+//!
+//! Two qualifications the audit is careful about:
+//!
+//! - **The acquisition bound does not cover the condvar re-lock.**
+//!   `Condvar::wait_timeout` re-acquires the mutex *internally* on wakeup,
+//!   before handing the guard back to `wait_for_flush`. That is an unbounded
+//!   `std` re-lock: it does not pass through `lock_state` and is therefore not
+//!   subject to `acquire_timeout_ms`. How long a waiter stays in the loop is
+//!   still bounded by the loop's own `deadline`, but the individual re-lock
+//!   inside `wait_timeout` is untimed. It is the one acquisition of this mutex
+//!   the bound does not cover.
+//! - **This mutex is a leaf; its callers are not.** The commit-path call sites
+//!   in `src/api/transaction/write/mod.rs` call `register_transaction` /
+//!   `wait_for_flush` **while holding the `current_timestamp` commit lock**, so
+//!   a thread blocked here does hold something every other committer needs —
+//!   that is exactly the #3798 amplifier described above. The leaf property is
+//!   a claim about this module's own critical sections, not about the commit
+//!   path that enters them.
+//!
+//! Any future change that breaks this contract reintroduces exactly the
+//! deadlock class the audit ruled out.
+//!
+//! ## Acquire-deadline rationale
+//!
+//! [`GroupCommitConfig::acquire_timeout_ms`] bounds acquisition of the state
+//! mutex. Its default (120_000) is deliberately **strictly greater** than the
+//! `timeout_max_ms` default (60_000) so a stuck *flusher* is always reported
+//! by the `wait_for_flush` deadlock detector first, and this bound only ever
+//! fires for a genuinely stuck *mutex*. It is **deadlock detection, NOT a
+//! performance SLA** — the same contract `timeout_max_ms` carries. Setting it
+//! to `0` disables the bound and restores legacy unbounded `Mutex::lock`.
+//!
+//! ## Durability-unknown caveat
+//!
+//! An acquisition timeout at a **commit-path** site (`register_transaction`,
+//! `wait_for_flush`) says so in its message: the in-flight transaction's WAL
+//! frame may already have been appended, so it **may still become durable and
+//! replay at recovery**. Such a failure must not be reported to a client as a
+//! clean abort. The frame format that would let the commit path say so
+//! precisely has already landed (Issue #3413, `AbortTx`); what is still
+//! missing is the commit path **emitting** that abort record when a step after
+//! the append fails, tracked as Issue #3799. Until then the outcome is
+//! genuinely unknown and is disclosed as such. Observation sites wrote nothing
+//! and therefore make no durability claim.
+//!
+//! ## Escalation flag
+//!
+//! Setting `ALETHEIADB_WAL_REENTRANCY_PANIC=1` makes a detected re-entrant
+//! acquisition **panic** instead of returning an error. It is intended for CI,
+//! where a latent lock-order bug should be un-ignorable rather than a handled
+//! `Result`. The environment is read once per process, but the resulting
+//! policy is stored **per coordinator** (at construction), so the flag and the
+//! tests that exercise re-entrancy coexist: each test pins the behavior it
+//! means to assert on its own coordinator instead of inheriting the job's
+//! environment.
 
 use std::collections::{BTreeSet, VecDeque};
-use std::sync::{Condvar, Mutex};
-use std::time::Duration;
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex, MutexGuard, OnceLock, TryLockError};
+use std::time::{Duration, Instant};
 
 use crate::core::error::{Error, StorageError};
+
+/// First sleep in the contended-acquisition probe ladder.
+///
+/// Deliberately a *sleep* and not `std::hint::spin_loop`: a thread that cannot
+/// take this mutex is, by construction, waiting on work another thread must
+/// finish. Burning a core to watch it would make the very starvation this
+/// module is meant to detect more likely.
+const ACQUIRE_PROBE_INITIAL: Duration = Duration::from_micros(50);
+
+/// Default bound on acquiring the group-commit state mutex (Issue #3798):
+/// two minutes.
+///
+/// Strictly greater than the `timeout_max_ms` default (60_000) so a stuck
+/// flusher is always reported by the `wait_for_flush` deadlock detector first
+/// (see the module's acquire-deadline rationale). Named so the user-facing
+/// [`crate::config::WalConfig::acquire_timeout_ms`] default cannot drift from
+/// this one.
+pub const DEFAULT_ACQUIRE_TIMEOUT_MS: u64 = 120_000;
+
+/// Ceiling of the exponential probe ladder.
+///
+/// Caps the worst-case overshoot past `acquire_timeout_ms` at one sleep — the
+/// bound is a deadlock detector, so ~25ms of imprecision on a multi-second
+/// deadline is irrelevant, while the cap keeps a long wait from degenerating
+/// into arbitrarily coarse polling.
+const ACQUIRE_PROBE_MAX: Duration = Duration::from_millis(25);
+
+/// Process-wide default for whether a detected re-entrant acquisition should
+/// panic instead of returning an error (`ALETHEIADB_WAL_REENTRANCY_PANIC=1`).
+///
+/// The environment is read exactly once per process — the value is a
+/// CI-hardening switch, so re-reading it per acquisition would put a `getenv`
+/// on the lock path for no behavioral gain — but each coordinator keeps its
+/// own copy (see `GroupCommitCoordinator::reentrancy_panic`), so a test can
+/// pin either behavior on its own instance no matter how CI is configured.
+static REENTRANCY_PANIC: OnceLock<bool> = OnceLock::new();
+
+/// Resolve (once per process) the default escalation policy.
+fn reentrancy_panic_from_env() -> bool {
+    *REENTRANCY_PANIC.get_or_init(|| {
+        std::env::var("ALETHEIADB_WAL_REENTRANCY_PANIC")
+            .map(|value| value == "1")
+            .unwrap_or(false)
+    })
+}
+
+/// Increment `waiters` for as long as this value lives.
+///
+/// An RAII guard rather than paired `fetch_add`/`fetch_sub` calls because the
+/// contended path has several exits (acquired, poisoned, timed out, unwinding
+/// panic) and a single missed decrement would permanently inflate the
+/// diagnostic — the one number an operator uses to judge how bad the pile-up
+/// really is.
+struct WaiterTicket<'a> {
+    waiters: &'a AtomicU64,
+}
+
+impl<'a> WaiterTicket<'a> {
+    fn take(waiters: &'a AtomicU64) -> Self {
+        waiters.fetch_add(1, Ordering::Relaxed);
+        Self { waiters }
+    }
+}
+
+impl Drop for WaiterTicket<'_> {
+    fn drop(&mut self) {
+        self.waiters.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Source of the next never-recycled thread token.
+///
+/// Starts at 1 because `0` is the "no owner" sentinel stored in
+/// [`GroupCommitCoordinator::owner`]. Tokens are never reused, so a token
+/// recorded in an error payload unambiguously identifies one thread for the
+/// lifetime of the process.
+static NEXT_THREAD_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    /// This thread's stable identity for re-entrancy detection.
+    ///
+    /// `std::thread::current().id()` is not usable here: `ThreadId` is opaque
+    /// and cannot be stored in an `AtomicU64`, and its values *are* recycled
+    /// once a thread is joined.
+    static THREAD_TOKEN: u64 = NEXT_THREAD_TOKEN.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Return this thread's never-recycled lock-ownership token (always non-zero).
+///
+/// Pure infrastructure: it has no effect on locking behavior on its own, and
+/// is the value the re-entrancy check compares against
+/// [`GroupCommitCoordinator::owner`].
+fn current_thread_token() -> u64 {
+    THREAD_TOKEN.with(|token| *token)
+}
+
+/// Which coordinator method is acquiring (or holding) the state mutex.
+///
+/// Recorded in diagnostics so a stuck acquisition names both the blocked call
+/// site and the holder's call site instead of an anonymous "mutex".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LockSite {
+    /// [`GroupCommitCoordinator::register_transaction`] — commit path.
+    RegisterTransaction,
+    /// [`GroupCommitCoordinator::wait_for_flush`] — commit path.
+    WaitForFlush,
+    /// [`GroupCommitCoordinator::start_flush`] — flusher path.
+    StartFlush,
+    /// [`GroupCommitCoordinator::finish_flush`] — flusher path.
+    FinishFlush,
+    /// [`GroupCommitCoordinator::current_batch_size`] — observation.
+    CurrentBatchSize,
+    /// [`GroupCommitCoordinator::current_epoch`] — observation.
+    CurrentEpoch,
+    /// [`GroupCommitCoordinator::flushed_epoch`] — observation.
+    FlushedEpoch,
+    /// [`GroupCommitCoordinator::should_flush`] — observation.
+    ShouldFlush,
+}
+
+impl LockSite {
+    /// Snake-case name of the method that owns this site.
+    ///
+    /// This exact spelling appears in the acquisition-failure error payloads,
+    /// so callers reading a log line can jump straight to the method.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            LockSite::RegisterTransaction => "register_transaction",
+            LockSite::WaitForFlush => "wait_for_flush",
+            LockSite::StartFlush => "start_flush",
+            LockSite::FinishFlush => "finish_flush",
+            LockSite::CurrentBatchSize => "current_batch_size",
+            LockSite::CurrentEpoch => "current_epoch",
+            LockSite::FlushedEpoch => "flushed_epoch",
+            LockSite::ShouldFlush => "should_flush",
+        }
+    }
+
+    /// Atomic-storable encoding (never `0`, which means "no site recorded").
+    pub(crate) fn as_u64(self) -> u64 {
+        match self {
+            LockSite::RegisterTransaction => 1,
+            LockSite::WaitForFlush => 2,
+            LockSite::StartFlush => 3,
+            LockSite::FinishFlush => 4,
+            LockSite::CurrentBatchSize => 5,
+            LockSite::CurrentEpoch => 6,
+            LockSite::FlushedEpoch => 7,
+            LockSite::ShouldFlush => 8,
+        }
+    }
+
+    /// Inverse of [`LockSite::as_u64`] (`None` for the `0` "no site" sentinel).
+    fn from_u64(encoded: u64) -> Option<Self> {
+        match encoded {
+            1 => Some(LockSite::RegisterTransaction),
+            2 => Some(LockSite::WaitForFlush),
+            3 => Some(LockSite::StartFlush),
+            4 => Some(LockSite::FinishFlush),
+            5 => Some(LockSite::CurrentBatchSize),
+            6 => Some(LockSite::CurrentEpoch),
+            7 => Some(LockSite::FlushedEpoch),
+            8 => Some(LockSite::ShouldFlush),
+            _ => None,
+        }
+    }
+
+    /// Render a recorded holder site for a diagnostic payload.
+    ///
+    /// The holder token and site are sampled without the mutex (that is the
+    /// point — the reporter could not take it), so `0`/"none" is a legitimate
+    /// answer: the holder may have released between the failed probe and the
+    /// sample.
+    fn holder_name(encoded: u64) -> &'static str {
+        match LockSite::from_u64(encoded) {
+            Some(site) => site.as_str(),
+            None => "none",
+        }
+    }
+
+    /// Whether a failed acquisition at this site leaves durability in doubt.
+    ///
+    /// True only for the two **commit-path** sites. An observation site wrote
+    /// nothing, so telling its caller that durability is unknown would be a
+    /// false alarm an operator (or an LLM reading the error) would escalate for
+    /// nothing.
+    fn discloses_durability(self) -> bool {
+        matches!(self, LockSite::RegisterTransaction | LockSite::WaitForFlush)
+    }
+}
+
+/// Owner-token tracking, released independently of (and before) the mutex.
+///
+/// Split out of [`StateGuard`] so field drop order alone guarantees the token
+/// is cleared while the mutex is still held — no `Drop` impl on `StateGuard`
+/// itself, which keeps [`StateGuard::surrender`] a plain move.
+struct OwnerSlot<'a> {
+    coordinator: &'a GroupCommitCoordinator,
+    site: LockSite,
+}
+
+impl<'a> OwnerSlot<'a> {
+    /// Record this thread as the holder of the coordinator's state mutex.
+    ///
+    /// Only ever called by the thread that just acquired the mutex, so these
+    /// two relaxed stores race with nothing: the mutex itself is the mutual
+    /// exclusion, and a reader that samples the pair without it is a
+    /// diagnostic reporter that already knows the values are a snapshot.
+    fn arm(coordinator: &'a GroupCommitCoordinator, site: LockSite) -> Self {
+        coordinator
+            .owner
+            .store(current_thread_token(), Ordering::Relaxed);
+        coordinator
+            .owner_site
+            .store(site.as_u64(), Ordering::Relaxed);
+        Self { coordinator, site }
+    }
+}
+
+impl Drop for OwnerSlot<'_> {
+    fn drop(&mut self) {
+        // Cleared here — and therefore, thanks to `StateGuard`'s field order,
+        // while the mutex is STILL HELD. Clearing after the unlock would leave
+        // a window in which another thread owns the mutex while this thread's
+        // token is still published; if that thread were this thread again
+        // (a legitimate immediate re-acquire), it would see its own token and
+        // refuse a perfectly correct acquisition as re-entrant.
+        //
+        // A thread never observes a stale copy of ITS OWN token for the
+        // reverse reason: per-location coherence means a relaxed load cannot
+        // return a value older than that thread's own prior relaxed store, and
+        // tokens are unique per thread, so no other thread can publish it.
+        //
+        // The site published must still be the site this slot armed: only the
+        // mutex holder writes `owner_site`, and between our `arm` and this
+        // `drop` the holder is us. A mismatch means some future code path
+        // re-armed ownership behind the guard's back.
+        debug_assert_eq!(
+            self.coordinator.owner_site.load(Ordering::Relaxed),
+            self.site.as_u64(),
+            "group-commit owner bookkeeping diverged from the armed site"
+        );
+        self.coordinator.owner.store(0, Ordering::Relaxed);
+        self.coordinator.owner_site.store(0, Ordering::Relaxed);
+    }
+}
+
+/// RAII wrapper around the group-commit state mutex guard.
+///
+/// Derefs to [`GroupCommitState`], so the call sites read exactly as they did
+/// when they locked the mutex directly.
+pub(crate) struct StateGuard<'a> {
+    /// FIELD ORDER IS LOAD-BEARING: struct fields drop in declaration order,
+    /// so `owner` clears the holder token BEFORE `inner` unlocks the mutex.
+    /// Reversed, another thread could acquire the mutex and still observe a
+    /// stale owner token — a false re-entrancy report.
+    owner: OwnerSlot<'a>,
+    inner: MutexGuard<'a, GroupCommitState>,
+}
+
+impl<'a> StateGuard<'a> {
+    /// Re-arm ownership tracking around an already-held raw `MutexGuard`.
+    ///
+    /// Used by [`GroupCommitCoordinator::lock_state`] and by `wait_for_flush`
+    /// when `Condvar::wait_timeout` hands the guard back.
+    fn reassemble(
+        coordinator: &'a GroupCommitCoordinator,
+        site: LockSite,
+        inner: MutexGuard<'a, GroupCommitState>,
+    ) -> Self {
+        Self {
+            owner: OwnerSlot::arm(coordinator, site),
+            inner,
+        }
+    }
+
+    /// Give up ownership tracking and hand back the raw `MutexGuard`.
+    ///
+    /// `Condvar::wait_timeout` consumes a `MutexGuard`, and a thread parked in
+    /// the condvar holds no lock — so it must not be recorded as the owner for
+    /// the duration of the wait. Destructuring (rather than a `Drop` impl on
+    /// `StateGuard`) is what makes this a plain move with no panic path.
+    fn surrender(self) -> MutexGuard<'a, GroupCommitState> {
+        let StateGuard { owner, inner } = self;
+        drop(owner);
+        inner
+    }
+}
+
+impl Deref for StateGuard<'_> {
+    type Target = GroupCommitState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl DerefMut for StateGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
 
 /// Coordinates group commit batching and waiting.
 ///
@@ -99,6 +538,76 @@ pub struct GroupCommitCoordinator {
     flush_complete: Condvar,
     /// Configuration
     config: GroupCommitConfig,
+
+    // ---- Lock-acquisition instrumentation (Issue #3798) --------------------
+    //
+    // Every field here exists so that a *failed* acquisition can describe the
+    // coordinator without taking the very mutex it could not take. All of them
+    // are written and read with `Relaxed` ordering: none participates in a
+    // happens-before relationship, because none is ever consulted for a control
+    // decision except `owner`, whose only decision (am I already the holder?)
+    // is answered from this thread's own last store.
+    /// Thread token of the current [`StateGuard`] holder (0 = unheld).
+    owner: AtomicU64,
+    /// [`LockSite::as_u64`] of the current holder (0 = none recorded).
+    owner_site: AtomicU64,
+    /// Threads currently blocked trying to acquire the state mutex.
+    waiters: AtomicU64,
+    /// Acquisitions that could not be satisfied by the uncontended fast path.
+    contended_acquires: AtomicU64,
+    /// Re-entrant acquisitions refused (see [`GroupCommitCoordinator::reentrancy_detections`]).
+    reentrancy_detections: AtomicU64,
+    /// Acquisitions abandoned at the deadline (see [`GroupCommitCoordinator::acquire_timeouts`]).
+    acquire_timeouts: AtomicU64,
+    /// Relaxed write-through mirror of `state.current_epoch`.
+    ///
+    /// DIAGNOSTICS ONLY — written inside the critical section that mutates the
+    /// real field, read only when building an error payload. NEVER read for a
+    /// control decision: it can be arbitrarily stale, and treating it as the
+    /// truth would reintroduce exactly the epoch races `start_flush` exists to
+    /// prevent.
+    mirror_current_epoch: AtomicU64,
+    /// Relaxed write-through mirror of `state.flushed_epoch`.
+    ///
+    /// DIAGNOSTICS ONLY — never read for a control decision (see
+    /// `mirror_current_epoch`); durability is decided under the mutex.
+    mirror_flushed_epoch: AtomicU64,
+    /// Relaxed write-through mirror of `state.batch_count`.
+    ///
+    /// DIAGNOSTICS ONLY — never read for a control decision (see
+    /// `mirror_current_epoch`); `should_flush` reads the real field.
+    mirror_batch_count: AtomicU64,
+    /// Runtime-overridable copy of [`GroupCommitConfig::acquire_timeout_ms`].
+    ///
+    /// Held as an atomic (rather than read from `config`) so tests can shrink
+    /// the deadline on an already-constructed coordinator.
+    acquire_timeout_ms: AtomicU64,
+    /// Whether a detected re-entrant acquisition escalates to a panic.
+    ///
+    /// Resolved from `ALETHEIADB_WAL_REENTRANCY_PANIC` once per coordinator,
+    /// at construction — per coordinator rather than per process so a test can
+    /// pin either behavior on its own instance without fighting an environment
+    /// variable the whole binary shares (Issue #3798 review round).
+    reentrancy_panic: std::sync::atomic::AtomicBool,
+
+    /// Test-only: make the NEXT acquisition at this [`LockSite::as_u64`] fail
+    /// exactly as an exhausted acquisition budget would (`0` = no injection,
+    /// cleared by the failure it causes).
+    ///
+    /// Racing a real acquisition timeout into one specific site is not
+    /// reproducible — the window between `start_flush` and `finish_flush` is
+    /// microseconds wide — so the failure is injected instead of raced.
+    #[cfg(test)]
+    test_fail_next_acquire_site: AtomicU64,
+
+    /// When true, `finish_flush` probes whether the state mutex is free at the
+    /// instant it calls `notify_all` (see `test_pre_notify_try_lock_ok`).
+    #[cfg(test)]
+    test_pre_notify_probe: std::sync::atomic::AtomicBool,
+    /// Result of the most recent pre-notify probe: 0 = unset, 1 = the mutex was
+    /// free (guard already dropped), 2 = it would have blocked (guard still held).
+    #[cfg(test)]
+    test_pre_notify_try_lock_ok: AtomicU64,
 }
 
 /// Configuration for group commit behavior.
@@ -119,6 +628,19 @@ pub struct GroupCommitConfig {
     pub timeout_max_ms: u64,
     /// Maximum number of recent errors to keep in history.
     pub recent_errors_capacity: usize,
+
+    /// Bound on acquiring the group-commit state mutex itself, in milliseconds.
+    ///
+    /// This is a **deadlock detection mechanism, NOT a performance SLA** — the
+    /// same contract `timeout_max_ms` carries for `wait_for_flush`. The default
+    /// (120_000) is deliberately far larger than the `timeout_max_ms` default
+    /// (60_000) so that a stuck *flusher* is always reported by the
+    /// `wait_for_flush` deadlock detector first, and this bound only ever fires
+    /// for a genuinely stuck *mutex*.
+    ///
+    /// `0` disables the bound and restores legacy unbounded blocking
+    /// acquisition (`Mutex::lock`).
+    pub acquire_timeout_ms: u64,
 }
 
 impl Default for GroupCommitConfig {
@@ -131,11 +653,16 @@ impl Default for GroupCommitConfig {
             timeout_min_ms: 10000,
             timeout_max_ms: 60000,
             recent_errors_capacity: 1024,
+            acquire_timeout_ms: DEFAULT_ACQUIRE_TIMEOUT_MS,
         }
     }
 }
 
-struct GroupCommitState {
+/// `pub(crate)` only because it is the `Deref` target of the `pub(crate)`
+/// [`StateGuard`]; every field stays private to this module, so no code
+/// outside can read or mutate group-commit state without going through the
+/// coordinator's API.
+pub(crate) struct GroupCommitState {
     /// Current epoch (increments on each flush)
     current_epoch: u64,
     /// Number of transactions in current batch
@@ -192,6 +719,7 @@ impl GroupCommitCoordinator {
     /// let coordinator = GroupCommitCoordinator::with_config(config);
     /// ```
     pub fn with_config(config: GroupCommitConfig) -> Self {
+        let acquire_timeout_ms = AtomicU64::new(config.acquire_timeout_ms);
         Self {
             state: Mutex::new(GroupCommitState {
                 current_epoch: 1, // Start at 1 so flushed_epoch=0 means "nothing flushed yet"
@@ -203,7 +731,298 @@ impl GroupCommitCoordinator {
             }),
             flush_complete: Condvar::new(),
             config,
+            owner: AtomicU64::new(0),
+            owner_site: AtomicU64::new(0),
+            waiters: AtomicU64::new(0),
+            contended_acquires: AtomicU64::new(0),
+            reentrancy_detections: AtomicU64::new(0),
+            acquire_timeouts: AtomicU64::new(0),
+            // Mirrors start matching the initial state above.
+            mirror_current_epoch: AtomicU64::new(1),
+            mirror_flushed_epoch: AtomicU64::new(0),
+            mirror_batch_count: AtomicU64::new(0),
+            acquire_timeout_ms,
+            reentrancy_panic: std::sync::atomic::AtomicBool::new(reentrancy_panic_from_env()),
+            #[cfg(test)]
+            test_fail_next_acquire_site: AtomicU64::new(0),
+            #[cfg(test)]
+            test_pre_notify_probe: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            test_pre_notify_try_lock_ok: AtomicU64::new(0),
         }
+    }
+
+    /// Acquire the group-commit state mutex through the single chokepoint.
+    ///
+    /// Every method on this coordinator locks `state` through here so that
+    /// ownership tracking, contention accounting, and the acquisition bound
+    /// have exactly one implementation to get right.
+    ///
+    /// # Acquisition protocol
+    ///
+    /// 1. **Re-entrancy check** (always first, never blocks): one relaxed load.
+    ///    A thread that already holds the guard is refused immediately rather
+    ///    than being allowed to block on a mutex it owns — `Mutex` is not
+    ///    reentrant, so that block never ends.
+    /// 2. **Uncontended fast path**: a single `try_lock`. No clock read, no
+    ///    counter bump, no allocation — this is the commit path.
+    /// 3. **Contended path**: a bounded probe ladder (yield once, then sleeps
+    ///    from 50µs doubling to a 25ms cap) until `acquire_timeout_ms` elapses.
+    ///    `0` restores legacy unbounded `Mutex::lock`.
+    ///
+    /// # Errors
+    ///
+    /// - `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// - `StorageError::WalError` naming the re-entrancy, for an acquisition
+    ///   attempted by the thread that already holds the guard.
+    /// - `StorageError::WalError` carrying a forensic snapshot, for an
+    ///   acquisition that exceeds `acquire_timeout_ms`.
+    pub(crate) fn lock_state(&self, site: LockSite) -> Result<StateGuard<'_>, Error> {
+        // ---- Step 0 (test builds only): injected acquisition failure -------
+        #[cfg(test)]
+        if self.test_fail_next_acquire_site.load(Ordering::Relaxed) == site.as_u64() {
+            self.test_fail_next_acquire_site.store(0, Ordering::Relaxed);
+            self.acquire_timeouts.fetch_add(1, Ordering::Relaxed);
+            let budget = self.acquire_timeout_ms.load(Ordering::Relaxed);
+            return Err(self.abandon_acquisition(site, Duration::ZERO, budget));
+        }
+
+        // ---- Step 1: re-entrancy, before anything that could block ---------
+        let me = current_thread_token();
+        if self.owner.load(Ordering::Relaxed) == me {
+            return Err(self.refuse_reentrant_acquisition(site, me));
+        }
+
+        // ---- Step 2: uncontended fast path ---------------------------------
+        match self.state.try_lock() {
+            Ok(guard) => return Ok(StateGuard::reassemble(self, site, guard)),
+            Err(TryLockError::Poisoned(_)) => return Err(Self::poisoned()),
+            Err(TryLockError::WouldBlock) => {}
+        }
+
+        // ---- Step 3: contended path ----------------------------------------
+        let budget_ms = self.acquire_timeout_ms.load(Ordering::Relaxed);
+        if budget_ms == 0 {
+            // Documented escape hatch: an operator who disables the bound gets
+            // genuine blocking, not a bound with a different number.
+            let guard = self.state.lock().map_err(|_| Self::poisoned())?;
+            return Ok(StateGuard::reassemble(self, site, guard));
+        }
+
+        // An absurd budget (`u64::MAX` ms) makes `Instant + Duration`
+        // unrepresentable, and the unchecked add PANICS. `acquire_timeout_ms`
+        // is a `u64` an operator can set to anything, and a misconfigured
+        // number crashing a commit-path thread would be strictly worse than
+        // the deadlock it guards against -- so an unrepresentable deadline
+        // degrades to the same unbounded acquisition `0` selects
+        // (Issue #3798 review round 2).
+        let start = Instant::now();
+        let Some(deadline) = start.checked_add(Duration::from_millis(budget_ms)) else {
+            let guard = self.state.lock().map_err(|_| Self::poisoned())?;
+            return Ok(StateGuard::reassemble(self, site, guard));
+        };
+
+        self.contended_acquires.fetch_add(1, Ordering::Relaxed);
+        // RAII: the decrement must survive every exit below, including an
+        // unwinding panic, or `waiters` drifts upward forever.
+        let _ticket = WaiterTicket::take(&self.waiters);
+
+        // One yield first: under honest contention the holder's critical
+        // section here is tens of nanoseconds, so the lock is almost always
+        // free by the time we are rescheduled — and this keeps the common case
+        // off the sleep ladder entirely.
+        std::thread::yield_now();
+
+        let mut backoff = ACQUIRE_PROBE_INITIAL;
+        loop {
+            match self.state.try_lock() {
+                Ok(guard) => return Ok(StateGuard::reassemble(self, site, guard)),
+                Err(TryLockError::Poisoned(_)) => return Err(Self::poisoned()),
+                Err(TryLockError::WouldBlock) => {}
+            }
+
+            if Instant::now() >= deadline {
+                self.acquire_timeouts.fetch_add(1, Ordering::Relaxed);
+                return Err(self.abandon_acquisition(site, start.elapsed(), budget_ms));
+            }
+
+            std::thread::sleep(backoff);
+            backoff = (backoff * 2).min(ACQUIRE_PROBE_MAX);
+        }
+    }
+
+    /// The one place the poisoned-lock error is spelled, so every acquisition
+    /// path reports the identical `resource` the pre-#3798 code did.
+    fn poisoned() -> Error {
+        Error::Storage(StorageError::LockPoisoned {
+            resource: "group_commit_state".to_string(),
+        })
+    }
+
+    /// The `wait_for_flush` deadlock-detector error, spelled once.
+    ///
+    /// Both exits of the wait loop (deadline already past on entry, and
+    /// deadline reached after a condvar wake) must report the identical
+    /// wording, because that string is what an operator greps for.
+    fn flush_wait_timeout(epoch: u64, flushed_epoch: u64) -> Error {
+        Error::Storage(StorageError::WalError {
+            reason: format!(
+                "Group commit timeout waiting for epoch {} (current flushed: {})",
+                epoch, flushed_epoch
+            ),
+        })
+    }
+
+    /// Render the diagnostics mirrors as the trailing fragment shared by every
+    /// acquisition-failure payload.
+    ///
+    /// Sampled WITHOUT the mutex, so the three values need not be mutually
+    /// consistent — see the field docs: they are a triage lead, never an
+    /// authoritative read of coordinator state.
+    fn mirror_snapshot(&self) -> String {
+        format!(
+            "[state mirrors: current_epoch={}, flushed_epoch={}, batch_count={}]",
+            self.mirror_current_epoch.load(Ordering::Relaxed),
+            self.mirror_flushed_epoch.load(Ordering::Relaxed),
+            self.mirror_batch_count.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Count, log, and describe a refused re-entrant acquisition.
+    ///
+    /// Never blocks, never poisons the mutex: re-entrancy is a *caller* bug,
+    /// and the caller is the one holding the guard, so it is still in a
+    /// position to unwind cleanly if it handles the error.
+    fn refuse_reentrant_acquisition(&self, site: LockSite, token: u64) -> Error {
+        self.reentrancy_detections.fetch_add(1, Ordering::Relaxed);
+
+        let thread = std::thread::current();
+        let reason = format!(
+            "refused a re-entrant acquisition of group_commit_state at site '{site}': \
+             this thread (thread token {token}, name '{name}') already holds the guard, \
+             taken at site '{holder_site}'. Blocking here would self-deadlock, so the \
+             acquisition is refused instead. Fix the caller: release the guard before \
+             re-entering the coordinator. {mirrors}",
+            site = site.as_str(),
+            name = thread.name().unwrap_or("<unnamed>"),
+            holder_site = LockSite::holder_name(self.owner_site.load(Ordering::Relaxed)),
+            mirrors = self.mirror_snapshot(),
+        );
+
+        super::log_wal_diagnostic(&reason);
+
+        if self.reentrancy_panic.load(Ordering::Relaxed) {
+            // CI hardening only (ALETHEIADB_WAL_REENTRANCY_PANIC=1): turn a
+            // latent lock-order bug into an immediate, un-ignorable failure.
+            panic!("{reason}");
+        }
+
+        Error::Storage(StorageError::WalError { reason })
+    }
+
+    /// Log and describe an acquisition abandoned at its deadline.
+    ///
+    /// The payload is sampled WITHOUT the mutex — that is the whole point, the
+    /// reporter could not take it — so every value here is a snapshot that may
+    /// already be stale. It is a lead for a human or an LLM triaging a wedged
+    /// process, never an authoritative read of coordinator state.
+    fn abandon_acquisition(&self, site: LockSite, waited: Duration, budget_ms: u64) -> Error {
+        let durability = if site.discloses_durability() {
+            // Commit-path sites only. The caller cannot tell whether its
+            // transaction reached the WAL, so it must not report a clean
+            // failure to its own client.
+            " durability status UNKNOWN for the in-flight transaction: it may still become \
+             durable and replay at recovery, so do NOT report it as cleanly failed."
+        } else {
+            // An observation site wrote nothing; claiming durability is at risk
+            // would be a false alarm an operator would escalate for nothing.
+            ""
+        };
+
+        let reason = format!(
+            "timed out acquiring group_commit_state at site '{site}': possible deadlock. \
+             waited {waited}µs of the configured acquire_timeout_ms={budget_ms}; \
+             holder thread token {holder} at site '{holder_site}'; waiters {waiters}; \
+             contended_acquires {contended}. {mirrors}.{durability}",
+            site = site.as_str(),
+            waited = waited.as_micros(),
+            holder = self.owner.load(Ordering::Relaxed),
+            holder_site = LockSite::holder_name(self.owner_site.load(Ordering::Relaxed)),
+            waiters = self.waiters.load(Ordering::Relaxed),
+            contended = self.contended_acquires.load(Ordering::Relaxed),
+            mirrors = self.mirror_snapshot(),
+        );
+
+        super::log_wal_diagnostic(&reason);
+
+        Error::Storage(StorageError::WalError { reason })
+    }
+
+    /// Number of re-entrant acquisitions refused since process start.
+    ///
+    /// A non-zero value is always a bug in the caller: some code path holds
+    /// the state guard and calls back into the coordinator on the same thread.
+    /// It is exposed (rather than only logged) so a health check or soak test
+    /// can assert it stays at zero.
+    pub fn reentrancy_detections(&self) -> u64 {
+        self.reentrancy_detections.load(Ordering::Relaxed)
+    }
+
+    /// Number of acquisitions abandoned at the deadline since process start.
+    ///
+    /// Non-zero means the state mutex was held for longer than
+    /// [`GroupCommitConfig::acquire_timeout_ms`] — i.e. a suspected deadlock,
+    /// not ordinary contention.
+    pub fn acquire_timeouts(&self) -> u64 {
+        self.acquire_timeouts.load(Ordering::Relaxed)
+    }
+
+    /// Number of acquisitions that could not be satisfied by the uncontended
+    /// fast path since process start.
+    ///
+    /// This is the *denominator* the other two counters need. Ordinary
+    /// contention makes this rise steadily while
+    /// [`Self::acquire_timeouts`] stays at zero — healthy load. A suspected
+    /// deadlock looks different: `acquire_timeouts` moves at all, and this
+    /// counter jumps as every other thread piles up behind the wedged holder.
+    /// Reading one without the other cannot tell those apart.
+    pub fn contended_acquires(&self) -> u64 {
+        self.contended_acquires.load(Ordering::Relaxed)
+    }
+
+    /// The acquisition bound currently in force, in milliseconds (`0` =
+    /// unbounded).
+    ///
+    /// Exposed so a configuration test can prove the knob actually reached the
+    /// coordinator rather than being silently replaced by the default.
+    pub fn acquire_timeout_ms(&self) -> u64 {
+        self.acquire_timeout_ms.load(Ordering::Relaxed)
+    }
+
+    /// Shrink (or disable, with `0`) the acquisition bound on a live
+    /// coordinator so tests do not have to wait out the two-minute default.
+    #[cfg(test)]
+    pub(crate) fn set_acquire_timeout_ms_for_test(&self, ms: u64) {
+        self.acquire_timeout_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Pin this coordinator's re-entrancy escalation, overriding whatever
+    /// `ALETHEIADB_WAL_REENTRANCY_PANIC` said at construction.
+    ///
+    /// Tests of BOTH behaviors can then coexist in one binary, and a CI job
+    /// that exports the variable no longer breaks the tests that pin the `Err`
+    /// path (Issue #3798 review round).
+    #[cfg(test)]
+    pub(crate) fn set_reentrancy_panic_for_test(&self, on: bool) {
+        self.reentrancy_panic.store(on, Ordering::Relaxed);
+    }
+
+    /// Make the next acquisition at `site` fail as an exhausted acquisition
+    /// budget would, once. See `test_fail_next_acquire_site`.
+    #[cfg(test)]
+    pub(crate) fn fail_next_acquisition_at_for_test(&self, site: LockSite) {
+        self.test_fail_next_acquire_site
+            .store(site.as_u64(), Ordering::Relaxed);
     }
 
     /// Create a new GroupCommitCoordinator with default configuration.
@@ -232,16 +1051,24 @@ impl GroupCommitCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// - `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// - `StorageError::WalError` if this thread already holds the state guard
+    ///   (re-entrancy detection), or if the acquisition exceeds
+    ///   `acquire_timeout_ms`; setting that to `0` removes the timeout mode.
+    /// - An acquisition timeout here is a **commit-path** failure: the
+    ///   transaction's WAL frame may already be appended, so durability is
+    ///   unknown and the error must not be reported as a clean abort (see the
+    ///   module's durability-unknown caveat).
     pub fn register_transaction(&self) -> Result<(u64, bool), Error> {
-        let mut state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let mut state = self.lock_state(LockSite::RegisterTransaction)?;
 
         state.batch_count += 1;
         let epoch = state.current_epoch;
+
+        // Diagnostics mirror, written inside the critical section so it can
+        // never describe a batch_count that was never real.
+        self.mirror_batch_count
+            .store(state.batch_count as u64, Ordering::Relaxed);
 
         // Check if we should trigger immediate flush (batch full)
         let should_flush = state.batch_count >= self.config.max_batch_size;
@@ -275,6 +1102,15 @@ impl GroupCommitCoordinator {
     /// Returns an error if:
     /// - The flush for this epoch failed
     /// - The wait times out (indicates a stuck flush thread or excessive system load)
+    /// - The coordinator lock is poisoned (`StorageError::LockPoisoned`)
+    /// - The state-mutex acquisition is re-entrant, or exceeds
+    ///   `acquire_timeout_ms` (`0` removes that timeout mode) —
+    ///   `StorageError::WalError` in both cases
+    ///
+    /// This is a **commit-path** site: both the flush timeout and an
+    /// acquisition timeout leave durability **unknown** (the WAL frame may
+    /// already be appended), so neither may be reported as a clean abort — see
+    /// the module's durability-unknown caveat.
     ///
     /// # Examples
     ///
@@ -285,11 +1121,7 @@ impl GroupCommitCoordinator {
     /// coordinator.wait_for_flush(epoch).unwrap();
     /// ```
     pub fn wait_for_flush(&self, epoch: u64) -> Result<(), Error> {
-        let mut state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let mut state = self.lock_state(LockSite::WaitForFlush)?;
 
         // Deadlock detection timeout (NOT a performance SLA)
         let base_timeout =
@@ -317,35 +1149,30 @@ impl GroupCommitCoordinator {
             };
 
             if remaining.as_nanos() == 0 {
-                return Err(Error::Storage(StorageError::WalError {
-                    reason: format!(
-                        "Group commit timeout waiting for epoch {} (current flushed: {})",
-                        epoch, state.flushed_epoch
-                    ),
-                }));
+                return Err(Self::flush_wait_timeout(epoch, state.flushed_epoch));
             }
+
+            // Hand the RAW guard to the condvar: a thread parked in
+            // `wait_timeout` has released the mutex and holds nothing, so it
+            // must not stay published as the owner. Were it left armed, this
+            // thread's own next acquisition — the one right after the wait
+            // returns — would be misreported as re-entrant, turning a correct
+            // commit path into a permanent error.
+            let raw = state.surrender();
 
             let (new_state, timeout_result) = self
                 .flush_complete
-                .wait_timeout(state, remaining)
-                .map_err(|_| {
-                    Error::Storage(StorageError::LockPoisoned {
-                        resource: "group_commit_state".to_string(),
-                    })
-                })?;
+                .wait_timeout(raw, remaining)
+                .map_err(|_| Self::poisoned())?;
 
-            state = new_state;
+            // Re-arm: the mutex is held again from here on.
+            state = StateGuard::reassemble(self, LockSite::WaitForFlush, new_state);
 
             // Check if we timed out (either by Condvar result OR by deadline)
             if (timeout_result.timed_out() || std::time::Instant::now() >= deadline)
                 && state.flushed_epoch < epoch
             {
-                return Err(Error::Storage(StorageError::WalError {
-                    reason: format!(
-                        "Group commit timeout waiting for epoch {} (current flushed: {})",
-                        epoch, state.flushed_epoch
-                    ),
-                }));
+                return Err(Self::flush_wait_timeout(epoch, state.flushed_epoch));
             }
         }
 
@@ -389,18 +1216,29 @@ impl GroupCommitCoordinator {
     /// # Returns
     ///
     /// The epoch number that is being flushed.
+    ///
+    /// # Errors
+    ///
+    /// - `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// - `StorageError::WalError` for a re-entrant acquisition, or for one
+    ///   exceeding `acquire_timeout_ms` (`0` removes that timeout mode).
+    ///
+    /// A flush-thread site, not a commit-path one, so no durability-unknown
+    /// caveat attaches to these errors.
     pub fn start_flush(&self) -> Result<u64, Error> {
-        let mut state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let mut state = self.lock_state(LockSite::StartFlush)?;
 
         let epoch_to_flush = state.current_epoch;
 
         // Advance current epoch immediately so new transactions go to the next one
         state.current_epoch += 1;
         state.batch_count = 0;
+
+        // Diagnostics mirrors, inside the critical section that moved the real
+        // fields (see the field docs: never read for a control decision).
+        self.mirror_current_epoch
+            .store(state.current_epoch, Ordering::Relaxed);
+        self.mirror_batch_count.store(0, Ordering::Relaxed);
 
         Ok(epoch_to_flush)
     }
@@ -413,12 +1251,18 @@ impl GroupCommitCoordinator {
     ///
     /// * `epoch` - The epoch that was flushed (returned by `start_flush`).
     /// * `result` - The result of the flush operation.
+    ///
+    /// # Errors
+    ///
+    /// - `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// - `StorageError::WalError` for a re-entrant acquisition, or for one
+    ///   exceeding `acquire_timeout_ms` (`0` removes that timeout mode).
+    ///
+    /// A failure here publishes no durability frontier and wakes no waiter, so
+    /// the caller must retry it (the flush loop keeps the epoch as
+    /// `pending_finish`) or the frontier wedges.
     pub fn finish_flush(&self, epoch: u64, result: Result<(), Error>) -> Result<(), Error> {
-        let mut state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let mut state = self.lock_state(LockSite::FinishFlush)?;
 
         // Store error if any
         if let Err(e) = result {
@@ -451,7 +1295,46 @@ impl GroupCommitCoordinator {
             next_epoch += 1;
         }
 
-        // Wake all waiting transactions
+        // Diagnostics mirror of the durability frontier. `current_epoch` is
+        // deliberately NOT touched here: this method does not move it, and a
+        // mirror that drifted from its field would be worse than no mirror.
+        self.mirror_flushed_epoch
+            .store(state.flushed_epoch, Ordering::Relaxed);
+
+        // Release the mutex BEFORE waking anyone.
+        //
+        // Notifying under the guard means every woken waiter immediately
+        // blocks again on the mutex this thread still owns — a thundering herd
+        // against a held lock, and on the #3798 bounded path a pile-up that can
+        // burn the waiters' own acquisition budget.
+        //
+        // No wakeup can be lost by notifying after the release. Any waiter is
+        // in exactly one of two states:
+        //   (a) parked inside `wait_timeout` — it is registered on the condvar
+        //       before it released the mutex, so `notify_all` reaches it; or
+        //   (b) not yet parked (or already woken) — it must re-acquire the
+        //       mutex to evaluate `while state.flushed_epoch < epoch`, and the
+        //       updated `flushed_epoch` is published by this unlock, so it
+        //       observes the advance and never waits for an epoch that has
+        //       already been flushed.
+        // The condition is re-checked under the mutex on every loop turn, so a
+        // missed *signal* can never become a missed *state change*.
+        drop(state);
+
+        #[cfg(test)]
+        if self
+            .test_pre_notify_probe
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            // Deterministic, single-threaded probe of exactly that property:
+            // can the mutex be taken at the instant `notify_all` runs?
+            let observed = match self.state.try_lock() {
+                Ok(_) => 1,
+                Err(_) => 2,
+            };
+            self.test_pre_notify_try_lock_ok
+                .store(observed, Ordering::Relaxed);
+        }
         self.flush_complete.notify_all();
 
         Ok(())
@@ -465,6 +1348,14 @@ impl GroupCommitCoordinator {
     ///
     /// It is kept for backward compatibility with existing tests but `start_flush`
     /// and `finish_flush` should be used in production.
+    ///
+    /// # Errors
+    ///
+    /// Propagates whatever `start_flush` or `finish_flush` returns: lock
+    /// poisoning, a re-entrant acquisition, or an acquisition exceeding
+    /// `acquire_timeout_ms` (`0` removes that timeout mode). Because the two
+    /// acquisitions are sequential, a failure of the second leaves the epoch
+    /// advanced but unflushed.
     pub fn mark_flushed(&self, result: Result<(), Error>) -> Result<(), Error> {
         let epoch = self.start_flush()?;
         self.finish_flush(epoch, result)
@@ -477,7 +1368,10 @@ impl GroupCommitCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned,
+    /// or `StorageError::WalError` for a re-entrant acquisition or one
+    /// exceeding `acquire_timeout_ms` (`0` removes that timeout mode). An
+    /// observation site writes nothing, so it makes no durability claim.
     ///
     /// # Examples
     ///
@@ -489,11 +1383,7 @@ impl GroupCommitCoordinator {
     /// assert_eq!(size, 0);
     /// ```
     pub fn current_batch_size(&self) -> Result<usize, Error> {
-        let state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let state = self.lock_state(LockSite::CurrentBatchSize)?;
         Ok(state.batch_count)
     }
 
@@ -504,7 +1394,10 @@ impl GroupCommitCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned,
+    /// or `StorageError::WalError` for a re-entrant acquisition or one
+    /// exceeding `acquire_timeout_ms` (`0` removes that timeout mode). An
+    /// observation site writes nothing, so it makes no durability claim.
     ///
     /// # Examples
     ///
@@ -516,11 +1409,7 @@ impl GroupCommitCoordinator {
     /// assert_eq!(epoch, 1); // Starts at 1
     /// ```
     pub fn current_epoch(&self) -> Result<u64, Error> {
-        let state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let state = self.lock_state(LockSite::CurrentEpoch)?;
         Ok(state.current_epoch)
     }
 
@@ -531,7 +1420,10 @@ impl GroupCommitCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned,
+    /// or `StorageError::WalError` for a re-entrant acquisition or one
+    /// exceeding `acquire_timeout_ms` (`0` removes that timeout mode). An
+    /// observation site writes nothing, so it makes no durability claim.
     ///
     /// # Examples
     ///
@@ -543,11 +1435,7 @@ impl GroupCommitCoordinator {
     /// assert_eq!(flushed, 0); // Nothing flushed yet
     /// ```
     pub fn flushed_epoch(&self) -> Result<u64, Error> {
-        let state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let state = self.lock_state(LockSite::FlushedEpoch)?;
         Ok(state.flushed_epoch)
     }
 
@@ -558,7 +1446,10 @@ impl GroupCommitCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned,
+    /// or `StorageError::WalError` for a re-entrant acquisition or one
+    /// exceeding `acquire_timeout_ms` (`0` removes that timeout mode). An
+    /// observation site writes nothing, so it makes no durability claim.
     ///
     /// # Examples
     ///
@@ -570,11 +1461,7 @@ impl GroupCommitCoordinator {
     /// assert_eq!(flush_now, false);
     /// ```
     pub fn should_flush(&self) -> Result<bool, Error> {
-        let state = self.state.lock().map_err(|_| {
-            Error::Storage(StorageError::LockPoisoned {
-                resource: "group_commit_state".to_string(),
-            })
-        })?;
+        let state = self.lock_state(LockSite::ShouldFlush)?;
         Ok(state.batch_count >= self.config.max_batch_size)
     }
 
@@ -600,7 +1487,524 @@ impl GroupCommitCoordinator {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::Barrier;
+    use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
     use std::thread;
+
+    /// Upper bound on how long any cross-thread probe may take to answer.
+    ///
+    /// Every assertion in this module is a *fast* one (microseconds of real
+    /// work, or a deliberately shortened 200ms acquisition bound), so five
+    /// seconds is pure slack for a loaded CI runner.
+    const WATCHDOG: Duration = Duration::from_secs(5);
+
+    /// Run `f` on a detached worker thread and hand back its result channel.
+    ///
+    /// WHY NOT `JoinHandle::join()`: the property under test is *"does this
+    /// call ever return?"*. A test that joined a thread stuck in
+    /// `Mutex::lock()` would hang the whole suite forever instead of failing,
+    /// so every cross-thread probe here goes through a channel with a
+    /// `recv_timeout`. Leaking a worker that never answers is deliberate and
+    /// acceptable: this is a test binary that exits when the suite finishes.
+    fn spawn_probe<T, F>(f: F) -> Receiver<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx
+    }
+
+    /// [`spawn_probe`] plus the watchdog wait, for the common case.
+    fn run_with_watchdog<T, F>(f: F) -> Result<T, RecvTimeoutError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        spawn_probe(f).recv_timeout(WATCHDOG)
+    }
+
+    /// Park a worker thread holding a [`StateGuard`] taken at `site`.
+    ///
+    /// Returns `(release, holder)`: send on `release` to let the holder drop
+    /// the guard, then join `holder`. The call does not return until the guard
+    /// is genuinely held, so callers never need a sleep to avoid a race.
+    fn hold_state_guard(
+        coord: &Arc<GroupCommitCoordinator>,
+        site: LockSite,
+    ) -> (mpsc::Sender<()>, thread::JoinHandle<()>) {
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (held_tx, held_rx) = mpsc::channel::<()>();
+        let coord = Arc::clone(coord);
+        let holder = thread::spawn(move || {
+            let _guard = coord.lock_state(site).expect("holder acquires the guard");
+            let _ = held_tx.send(());
+            // Bounded so a failing test cannot wedge the suite: far longer
+            // than WATCHDOG, so it never releases early either.
+            let _ = release_rx.recv_timeout(Duration::from_secs(60));
+        });
+        held_rx
+            .recv_timeout(WATCHDOG)
+            .expect("holder thread never reported holding the guard");
+        (release_tx, holder)
+    }
+
+    // ==================== Issue #3798: lock-acquisition hardening ====================
+    //
+    // These specs describe the coordinator AFTER #3798. Most of them fail
+    // today, by design; the two that pass are labelled in place, because a
+    // suite where "all new tests fail" is as untrustworthy as one where none
+    // do — the passing ones pin invariants the fix must NOT break.
+
+    /// A thread that already holds the state guard and calls back into the
+    /// coordinator must get a structured error, not a self-deadlock.
+    ///
+    /// RED: today `register_transaction` calls `Mutex::lock()` on a mutex this
+    /// very thread owns, which blocks forever — the watchdog fires and this
+    /// test fails on the `expect` below.
+    ///
+    /// The acquisition bound is shortened first so that an implementation
+    /// which only *bounds* acquisition (without detecting re-entrancy) still
+    /// fails here: the assertion is on the word "re-entrant", which a bare
+    /// timeout message does not contain. Re-entrancy is a caller bug that must
+    /// be reported immediately, not two minutes later.
+    ///
+    /// The escalation policy is pinned OFF on this coordinator, so the test
+    /// asserts the `Err` contract even in a CI job that exports
+    /// `ALETHEIADB_WAL_REENTRANCY_PANIC=1`. The panic half has its own test
+    /// (`test_reentrancy_escalates_to_panic_when_enabled`).
+    #[test]
+    fn test_reentrant_acquisition_returns_structured_error() {
+        let coord = Arc::new(GroupCommitCoordinator::with_defaults());
+        coord.set_acquire_timeout_ms_for_test(200);
+        coord.set_reentrancy_panic_for_test(false);
+
+        let probe = Arc::clone(&coord);
+        let outcome = run_with_watchdog(move || {
+            let _held = probe
+                .lock_state(LockSite::CurrentEpoch)
+                .expect("first acquisition succeeds");
+            // Same thread, guard still held: this is the re-entrant call.
+            probe.register_transaction()
+        });
+
+        let result = outcome.expect(
+            "current code self-deadlocks on re-entrant acquisition: the worker never \
+             returned within the watchdog window",
+        );
+        let err = result.expect_err("re-entrant acquisition must be refused, not granted");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("re-entrant"),
+            "error must name re-entrancy (a bare acquisition timeout is not good enough): {msg}"
+        );
+        assert!(
+            msg.contains("group_commit_state"),
+            "error must name the resource: {msg}"
+        );
+        assert!(
+            msg.contains("thread token"),
+            "error must report the offending thread token: {msg}"
+        );
+        assert_eq!(
+            coord.reentrancy_detections(),
+            1,
+            "the refusal must be counted"
+        );
+    }
+
+    /// Ownership tracking must not survive a condvar wait.
+    ///
+    /// `Condvar::wait_timeout` consumes the guard and unlocks the mutex while
+    /// the thread parks. If the owner token were left armed across that wait,
+    /// the very next acquisition by the same thread would be misreported as
+    /// re-entrant — turning a correct commit path into a permanent error.
+    ///
+    /// The first half of this test passes both before and after the fix (it is
+    /// the false-positive guard). The final step is the red-meaningful one: it
+    /// re-enters on purpose and demands the structured refusal, which today
+    /// deadlocks instead — hence the watchdog.
+    #[test]
+    fn test_owner_cleared_across_condvar_wait_then_same_thread_reacquires() {
+        let config = GroupCommitConfig {
+            max_delay_ms: 1,
+            max_batch_size: 100,
+            timeout_multiplier: 1,
+            timeout_base_ms: 10,
+            timeout_min_ms: 50,
+            timeout_max_ms: 60,
+            ..GroupCommitConfig::default()
+        };
+        let coord = Arc::new(GroupCommitCoordinator::with_config(config));
+        // The final phase re-enters on purpose and demands the `Err`: pin the
+        // escalation off so an ALETHEIADB_WAL_REENTRANCY_PANIC=1 job does not
+        // turn that into a panic on the probe thread.
+        coord.set_reentrancy_panic_for_test(false);
+
+        let (epoch, _) = coord.register_transaction().unwrap();
+
+        // Nobody flushes, so this parks in the condvar and times out (~50ms).
+        let waited = coord.wait_for_flush(epoch);
+        assert!(waited.is_err(), "expected the deadlock-detection timeout");
+        assert!(waited.unwrap_err().to_string().contains("timeout"));
+
+        // Same thread, immediately afterwards: both must be plain successes.
+        assert!(
+            coord.register_transaction().is_ok(),
+            "the waiter's own next acquisition must not be seen as re-entrant"
+        );
+        assert!(coord.current_epoch().is_ok());
+        assert_eq!(
+            coord.reentrancy_detections(),
+            0,
+            "a condvar wait is not a re-entrant acquisition"
+        );
+
+        // Genuine re-entrancy, by contrast, must still be refused — proving
+        // the clean pass above came from correct bookkeeping and not from the
+        // check being absent entirely.
+        let probe = Arc::clone(&coord);
+        let outcome = run_with_watchdog(move || {
+            let _held = probe
+                .lock_state(LockSite::CurrentEpoch)
+                .expect("acquisition succeeds");
+            probe.current_batch_size()
+        });
+        let result = outcome
+            .expect("current code self-deadlocks on re-entrant acquisition (no watchdog answer)");
+        let err = result.expect_err("re-entrant acquisition must be refused");
+        assert!(
+            err.to_string().contains("re-entrant"),
+            "expected a re-entrancy refusal, got: {err}"
+        );
+    }
+
+    /// With escalation ON, a re-entrant acquisition panics instead of
+    /// returning — the CI-hardening half of the contract.
+    ///
+    /// The coordinator here is a THROWAWAY: the panic unwinds while the outer
+    /// `StateGuard` is still held, which poisons that coordinator's mutex.
+    /// Sharing it with any other assertion would report the poison rather than
+    /// the re-entrancy.
+    #[test]
+    fn test_reentrancy_escalates_to_panic_when_enabled() {
+        let coord = Arc::new(GroupCommitCoordinator::with_defaults());
+        coord.set_acquire_timeout_ms_for_test(200);
+        coord.set_reentrancy_panic_for_test(true);
+
+        let probe = Arc::clone(&coord);
+        // On a worker thread, and behind the watchdog: an escalation that
+        // failed to fire would self-deadlock instead of panicking, and this
+        // test must fail rather than hang.
+        let outcome = run_with_watchdog(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _held = probe
+                    .lock_state(LockSite::CurrentEpoch)
+                    .expect("first acquisition succeeds");
+                let _ = probe.register_transaction();
+            }))
+        })
+        .expect("the re-entrant acquisition neither panicked nor returned within the watchdog");
+
+        let payload = outcome.expect_err("re-entrancy must panic once escalation is enabled");
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+            .unwrap_or_default();
+        assert!(
+            message.contains("re-entrant"),
+            "the panic must name re-entrancy, got: {message}"
+        );
+        assert_eq!(
+            coord.reentrancy_detections(),
+            1,
+            "the escalated refusal must still be counted"
+        );
+    }
+
+    /// Heavy honest contention must never be mistaken for a deadlock.
+    ///
+    /// NOTE: this test passed both before and after the #3798 hardening, on
+    /// purpose. It is the negative guard that keeps the bound from "detecting"
+    /// deadlocks that are really just eight threads doing their job, and would
+    /// catch an acquisition bound or owner bookkeeping that is too eager.
+    #[test]
+    fn test_no_false_reentrancy_or_timeout_under_concurrent_load() {
+        const THREADS: usize = 8;
+        const ITERS: usize = 2000;
+
+        let coord = Arc::new(GroupCommitCoordinator::with_defaults());
+        let barrier = Arc::new(Barrier::new(THREADS));
+
+        let mut handles = Vec::with_capacity(THREADS);
+        for thread_idx in 0..THREADS {
+            let coord = Arc::clone(&coord);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || -> Result<(), Error> {
+                barrier.wait();
+                for i in 0..ITERS {
+                    coord.register_transaction()?;
+                    coord.current_batch_size()?;
+                    // One thread also drives the flush path, so the observation
+                    // and flusher sites contend with the commit path too.
+                    if thread_idx == 0 && i % 100 == 0 {
+                        let epoch = coord.start_flush()?;
+                        coord.finish_flush(epoch, Ok(()))?;
+                    }
+                }
+                Ok(())
+            }));
+        }
+
+        // Safe to join: none of these threads holds a guard across a call, so
+        // no ordering of them can deadlock even on today's code.
+        for handle in handles {
+            handle
+                .join()
+                .expect("worker panicked")
+                .expect("no acquisition may fail under honest contention");
+        }
+
+        assert_eq!(
+            coord.reentrancy_detections(),
+            0,
+            "contention is not re-entrancy"
+        );
+        assert_eq!(
+            coord.acquire_timeouts(),
+            0,
+            "contention is not a suspected deadlock"
+        );
+        // The counter that measures ordinary contention must be readable, and
+        // must stay consistent with the deadlock counter: every abandoned
+        // acquisition is by definition also a contended one.
+        assert!(
+            coord.contended_acquires() >= coord.acquire_timeouts(),
+            "contended_acquires ({}) cannot be below acquire_timeouts ({})",
+            coord.contended_acquires(),
+            coord.acquire_timeouts()
+        );
+    }
+
+    /// When another thread really is wedged holding the guard, the blocked
+    /// caller must be told enough to diagnose it without a debugger.
+    ///
+    /// RED: today the second caller blocks in `Mutex::lock()` forever and the
+    /// watchdog fires.
+    ///
+    /// `register_transaction` is on the commit path, so the message must also
+    /// disclose that durability is UNKNOWN — the caller cannot tell whether
+    /// its transaction will be replayed at recovery, and must not report a
+    /// clean failure to its own client.
+    #[test]
+    fn test_acquisition_returns_diagnosable_error_when_guard_held_elsewhere() {
+        let coord = Arc::new(GroupCommitCoordinator::with_defaults());
+        coord.set_acquire_timeout_ms_for_test(200);
+
+        let (release, holder) = hold_state_guard(&coord, LockSite::StartFlush);
+
+        let probe = Arc::clone(&coord);
+        let outcome = run_with_watchdog(move || probe.register_transaction());
+
+        let result = outcome.expect(
+            "current code blocks forever behind a wedged holder: the acquisition is unbounded",
+        );
+        let err = result.expect_err("acquisition behind a wedged holder must fail, not hang");
+        let msg = err.to_string();
+        for needle in [
+            "group_commit_state",
+            "register_transaction",
+            "possible deadlock",
+            "waited",
+            "holder thread token",
+            "waiters",
+            "contended_acquires",
+            "current_epoch",
+            "flushed_epoch",
+            "batch_count",
+            "durability status UNKNOWN",
+        ] {
+            assert!(
+                msg.contains(needle),
+                "diagnostic payload is missing {needle:?}: {msg}"
+            );
+        }
+        assert_eq!(coord.acquire_timeouts(), 1, "the timeout must be counted");
+        assert!(
+            coord.contended_acquires() >= 1,
+            "the acquisition went down the contended path, so the counter that measures \
+             ordinary contention must be readable and non-zero here -- without it a rising \
+             `contended_acquires` cannot be told apart from a suspected deadlock"
+        );
+
+        let _ = release.send(());
+        holder.join().expect("holder panicked");
+    }
+
+    /// The durability disclosure belongs ONLY to the commit-path sites.
+    ///
+    /// `current_batch_size` is an observation: nothing was written, so telling
+    /// its caller that "durability is unknown" would be a false alarm that an
+    /// operator (or an LLM reading the error) would escalate for nothing.
+    ///
+    /// RED: today the observation call blocks forever and the watchdog fires.
+    #[test]
+    fn test_acquisition_timeout_on_flush_side_site_has_no_durability_disclosure() {
+        let coord = Arc::new(GroupCommitCoordinator::with_defaults());
+        coord.set_acquire_timeout_ms_for_test(200);
+
+        let (release, holder) = hold_state_guard(&coord, LockSite::StartFlush);
+
+        let probe = Arc::clone(&coord);
+        let outcome = run_with_watchdog(move || probe.current_batch_size());
+
+        let result = outcome.expect(
+            "current code blocks forever behind a wedged holder: the acquisition is unbounded",
+        );
+        let err = result.expect_err("acquisition behind a wedged holder must fail, not hang");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("durability status UNKNOWN"),
+            "an observation site wrote nothing, so it must not claim durability is at risk: {msg}"
+        );
+        assert!(
+            msg.contains("group_commit_state"),
+            "error must name the resource: {msg}"
+        );
+        assert!(
+            msg.contains(LockSite::CurrentBatchSize.as_str()),
+            "error must name the blocked site: {msg}"
+        );
+
+        let _ = release.send(());
+        holder.join().expect("holder panicked");
+    }
+
+    /// An absurd `acquire_timeout_ms` must never panic a commit-path thread.
+    ///
+    /// The bound is a plain `u64` of milliseconds an operator can set to
+    /// anything, and `Instant + Duration` PANICS on overflow. Whether
+    /// `u64::MAX` ms actually overflows is platform-dependent, so the portable
+    /// contract is the one asserted: the acquisition completes normally once
+    /// the holder lets go, rather than dying on the deadline computation
+    /// (Issue #3798 review round 2).
+    #[test]
+    fn test_absurd_acquire_timeout_does_not_panic_the_acquisition() {
+        let coord = Arc::new(GroupCommitCoordinator::with_defaults());
+        coord.set_acquire_timeout_ms_for_test(u64::MAX);
+
+        // Hold the guard briefly so the probe is forced onto the contended
+        // path, where the deadline is computed at all.
+        let (release, holder) = hold_state_guard(&coord, LockSite::StartFlush);
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            let _ = release.send(());
+        });
+
+        let probe = Arc::clone(&coord);
+        let outcome = run_with_watchdog(move || probe.register_transaction());
+
+        let result = outcome
+            .expect("the acquisition never returned: an absurd bound must behave as unbounded");
+        result.expect("an absurd bound must acquire once the holder releases, not panic or fail");
+
+        releaser.join().expect("releaser panicked");
+        holder.join().expect("holder panicked");
+    }
+
+    /// The acquisition bound must never fire before the `wait_for_flush`
+    /// deadlock detector.
+    ///
+    /// It pins the ordering invariant so a later "let's make the timeout
+    /// snappier" tweak cannot silently make a stuck flusher surface as an
+    /// inscrutable lock error instead of the purpose-built group-commit
+    /// timeout.
+    #[test]
+    fn test_acquire_timeout_default_strictly_exceeds_wait_timeout_max() {
+        let config = GroupCommitConfig::default();
+        assert!(
+            config.acquire_timeout_ms > config.timeout_max_ms,
+            "acquire_timeout_ms ({}) must strictly exceed timeout_max_ms ({})",
+            config.acquire_timeout_ms,
+            config.timeout_max_ms
+        );
+    }
+
+    /// `acquire_timeout_ms = 0` is the documented escape hatch back to legacy
+    /// unbounded blocking.
+    ///
+    /// It keeps the opt-out honest: an operator who disables the bound must
+    /// get genuine blocking, not a bound with a different number.
+    #[test]
+    fn test_acquire_timeout_zero_restores_unbounded_blocking() {
+        let coord = Arc::new(GroupCommitCoordinator::with_defaults());
+        coord.set_acquire_timeout_ms_for_test(0);
+
+        let (release, holder) = hold_state_guard(&coord, LockSite::StartFlush);
+
+        // The probe announces itself immediately BEFORE it starts acquiring:
+        // without that handshake, `Empty` below could just mean the worker was
+        // never scheduled, and the test would pass without ever entering the
+        // `budget_ms == 0` branch.
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let probe = Arc::clone(&coord);
+        let rx = spawn_probe(move || {
+            let _ = started_tx.send(());
+            probe.register_transaction()
+        });
+        started_rx
+            .recv_timeout(WATCHDOG)
+            .expect("the probe thread never started acquiring");
+
+        // Longer than any plausible misfiring bound (the other tests use
+        // 200ms), and the guard is still held throughout.
+        thread::sleep(Duration::from_millis(400));
+        assert!(
+            matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+            "with the bound disabled the acquisition must still be blocking"
+        );
+
+        let _ = release.send(());
+        holder.join().expect("holder panicked");
+
+        let result = rx
+            .recv_timeout(WATCHDOG)
+            .expect("the blocked acquisition must complete once the guard is released");
+        assert!(
+            result.is_ok(),
+            "a blocking acquisition that finally wins the mutex must succeed: {result:?}"
+        );
+    }
+
+    /// `finish_flush` must release the state guard BEFORE notifying waiters.
+    ///
+    /// RED: today the guard is still held at `notify_all`, so every woken
+    /// waiter immediately blocks again on the mutex the notifier owns — a
+    /// thundering herd against a held lock, and the probe records 2.
+    ///
+    /// Fully deterministic and single-threaded: the probe try-locks from
+    /// inside `finish_flush` itself, so there is no timing window to lose.
+    #[test]
+    fn test_finish_flush_does_not_hold_state_guard_while_notifying() {
+        let coord = GroupCommitCoordinator::with_defaults();
+        coord
+            .test_pre_notify_probe
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let epoch = coord.start_flush().unwrap();
+        coord.finish_flush(epoch, Ok(())).unwrap();
+
+        assert_eq!(
+            coord.test_pre_notify_try_lock_ok.load(Ordering::Relaxed),
+            1,
+            "finish_flush still held the state guard while calling notify_all \
+             (probe: 1 = mutex free, 2 = would block, 0 = probe never ran)"
+        );
+    }
 
     // ==================== Original Tests (Updated for Result-based API) ====================
 
@@ -703,6 +2107,7 @@ mod tests {
             timeout_min_ms: 20,    // clamp min
             timeout_max_ms: 100,   // clamp max
             recent_errors_capacity: 1024,
+            ..GroupCommitConfig::default()
         };
         let coord = GroupCommitCoordinator::with_config(config);
 
@@ -813,6 +2218,7 @@ mod tests {
             timeout_min_ms: 20,
             timeout_max_ms: 100,
             recent_errors_capacity: 1024,
+            ..GroupCommitConfig::default()
         };
         let coord = GroupCommitCoordinator::with_config(config);
 
@@ -844,6 +2250,7 @@ mod tests {
             timeout_min_ms: 20,
             timeout_max_ms: 1000,
             recent_errors_capacity: 2, // Only keep 2 recent errors
+            ..GroupCommitConfig::default()
         };
         let coord = GroupCommitCoordinator::with_config(config);
 
@@ -950,6 +2357,7 @@ mod tests {
             timeout_min_ms: 50,    // clamp min -> 50ms
             timeout_max_ms: 200,   // clamp max -> 200ms
             recent_errors_capacity: 1024,
+            ..GroupCommitConfig::default()
         };
 
         let coord = Arc::new(GroupCommitCoordinator::with_config(config));

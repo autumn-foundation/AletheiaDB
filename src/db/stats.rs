@@ -71,6 +71,99 @@ pub struct DatabaseStats {
     /// Tamper-evident provenance hash chain status (Issue #3351). `enabled:
     /// false` with all-`None` fields when the chain is not configured.
     pub chain: ProvenanceChainStats,
+    /// Per-namespace current node/edge counts (Issue #3349). One entry per
+    /// registered or populated namespace, sorted by name; O(1) membership-index
+    /// reads. Empty on a database that only uses the implicit `default`
+    /// namespace with no explicit registrations (the `default` entry is still
+    /// present when it holds entities).
+    ///
+    /// Serialized on the MCP/HTTP `database_stats` JSON since PR3a (the
+    /// coordinated surface slice); each entry is `{name, node_count,
+    /// edge_count}`.
+    pub namespaces: Vec<crate::db::namespace_query::NamespaceCount>,
+    /// Push-changefeed subscription state, including the per-principal quota
+    /// breakdown (Issue #3678). This is the authenticated surface for the
+    /// per-principal detail deliberately kept OFF the bounded `/metrics`
+    /// exposition (which stays bounded-label-only).
+    pub changefeed: ChangefeedStats,
+    /// Replication role + (for a replica) progress/lag observability (Issue
+    /// #3355). `role` is an O(1) atomic read; `replica` is `None` on a
+    /// primary and populated on a streaming replica via the applier's shared
+    /// progress handle (applied LSN, entries behind, lag, state).
+    pub replication: ReplicationStats,
+}
+
+// Note (Issue #3368): engine-lane per-query resource-limit termination counters
+// are deliberately NOT part of the storage-layer `DatabaseStats`. They are a
+// query-execution concern, surfaced via the dedicated
+// [`AletheiaDB::query_limit_counters`] accessor (Rust API) and, on the MCP
+// surface, via the additive `resource_limits` block the `database_stats` tool
+// appends — keeping `DatabaseStats` the pure storage-tier snapshot the MCP
+// thin-aggregator contract asserts it is.
+
+/// Push-changefeed subscription state for the `database_stats` snapshot
+/// (Issue #3678). Reads the broadcaster registry under a brief read lock —
+/// O(live subscriptions), not a version scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct ChangefeedStats {
+    /// Total currently-live changefeed subscriptions across all principals and
+    /// the bare embedded path.
+    pub active_subscriptions: usize,
+    /// Per-principal live-subscription breakdown, sorted by principal id. Empty
+    /// when no principal-scoped subscriptions are live. This is the per-principal
+    /// quota visibility AC(e) surfaces on the authenticated JSON path rather than
+    /// as an unbounded `/metrics` label.
+    pub per_principal: Vec<PrincipalSubscriptionStat>,
+}
+
+/// One principal's live changefeed subscription count (Issue #3678).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct PrincipalSubscriptionStat {
+    /// The principal id (or the shared `"anonymous"` bucket).
+    pub principal: String,
+    /// The principal's currently-live subscription count.
+    pub active_subscriptions: usize,
+}
+
+/// Replication role + progress observability (Issue #3355).
+///
+/// `role` is an O(1) atomic read of [`AletheiaDB::node_role`]. `replica` is
+/// `None` on a primary; on a replica it is populated by the replication
+/// engine's shared progress handle -- a Slice B addition, so this Slice A
+/// skeleton always reports `None` there, even while `role == "replica"`.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct ReplicationStats {
+    /// This node's current role: `"primary"` or `"replica"`.
+    pub role: String,
+    /// Replica-only progress/lag observability. Always `None` on a primary.
+    pub replica: Option<ReplicaProgressStats>,
+}
+
+/// A replica's applied position and lag relative to its primary (Issue
+/// #3355). Populated starting with the Slice B replication engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct ReplicaProgressStats {
+    /// Applier state: `"connecting"`, `"streaming"`, `"resync_required"`, or
+    /// `"stopped"`.
+    pub state: String,
+    /// The last LSN this replica has fully applied.
+    pub last_applied_lsn: u64,
+    /// The primary's last-known flushed LSN, when reported by the feed.
+    pub primary_flushed_lsn: Option<u64>,
+    /// `primary_flushed_lsn - last_applied_lsn`, when both are known.
+    pub entries_behind: Option<u64>,
+    /// Estimated replication lag in milliseconds, when derivable.
+    pub lag_ms: Option<u64>,
+    /// The most recent applier error message, if any.
+    pub last_error: Option<String>,
 }
 
 /// Status of the opt-in provenance hash chain (Issue #3351).
@@ -236,8 +329,14 @@ pub struct WalStateStats {
     pub current_lsn: u64,
     /// Total WAL entries appended since startup. Atomic read.
     pub total_appends: u64,
-    /// `true` when the last WAL flush succeeded (no outstanding
-    /// consecutive flush errors). Atomic read.
+    /// `true` when the last WAL flush succeeded (no outstanding consecutive
+    /// flush errors) **and** the background flusher is still publishing its
+    /// heartbeat (Issue #3798). A flusher that died or wedged raises no error
+    /// at all — it simply stops draining — so a heartbeat that has gone stale
+    /// (no completed cycle for ten flush intervals, floored at five seconds,
+    /// measured on the monotonic clock) reports unhealthy on its own. A
+    /// durability mode that runs no flush thread has no heartbeat to go stale
+    /// and is never reported unhealthy for that reason. Atomic reads.
     pub healthy: bool,
 }
 
@@ -306,10 +405,14 @@ impl AletheiaDB {
         // Historical (lock order #3): take the read guard only long enough
         // to snapshot the cached counters and clone the tiered-storage
         // handle; tiered/cold counters are read after the guard is dropped.
+        #[cfg(not(target_arch = "wasm32"))]
         let (hist, tiered) = {
             let historical = self.historical.read();
             (historical.stats(), historical.tiered_storage_arc())
         };
+        // Ephemeral wasm profile is hot-only: no tiered/cold tier.
+        #[cfg(target_arch = "wasm32")]
+        let hist = self.historical.read().stats();
 
         let historical = HistoricalDepthStats {
             total_node_versions: hist.total_node_versions,
@@ -325,6 +428,7 @@ impl AletheiaDB {
             compression_ratio: hist.compression_ratio(),
         };
 
+        #[cfg(not(target_arch = "wasm32"))]
         let cold_storage = match tiered {
             Some(tiered) => {
                 let metrics = tiered.metrics();
@@ -348,6 +452,12 @@ impl AletheiaDB {
                 enabled: false,
                 details: None,
             },
+        };
+        // Ephemeral wasm profile is hot-only: the cold tier is never configured.
+        #[cfg(target_arch = "wasm32")]
+        let cold_storage = ColdStorageTierStats {
+            enabled: false,
+            details: None,
         };
 
         // Provenance hash chain (Issue #3351): O(1) reads of the in-memory head.
@@ -376,6 +486,50 @@ impl AletheiaDB {
             },
         };
 
+        // Per-namespace counts (Issue #3349): O(1) membership-index reads.
+        let namespaces = self.namespace_counts();
+
+        // Changefeed subscription state (Issue #3678): a brief registry read,
+        // O(live subscriptions). The per-principal breakdown is the authenticated
+        // surface for the fairness quota — never a `/metrics` label, and its
+        // identity roster is admin-gated at the MCP/HTTP `database_stats`
+        // handlers. Both the aggregate total and the per-principal rows are read
+        // under a SINGLE registry read lock so the snapshot cannot straddle two
+        // instants under concurrent subscribe/deregister.
+        let (active_subscriptions, per_principal_counts) =
+            self.changefeed.subscription_count_and_per_principal();
+        let changefeed = ChangefeedStats {
+            active_subscriptions,
+            per_principal: per_principal_counts
+                .into_iter()
+                .map(
+                    |(principal, active_subscriptions)| PrincipalSubscriptionStat {
+                        principal,
+                        active_subscriptions,
+                    },
+                )
+                .collect(),
+        };
+
+        // Replication role (Issue #3355): an O(1) atomic read. `replica` is
+        // populated from the replication engine's shared progress handle
+        // (Slice B) when this node is currently a replica; always `None` on a
+        // primary (including a promoted-back-to-primary former replica) and,
+        // on the wasm32 ephemeral profile (no replication engine there),
+        // always `None`.
+        #[cfg(not(target_arch = "wasm32"))]
+        let replica_progress = if self.is_replica() {
+            self.replication_progress()
+        } else {
+            None
+        };
+        #[cfg(target_arch = "wasm32")]
+        let replica_progress = None;
+        let replication = ReplicationStats {
+            role: self.node_role().to_string(),
+            replica: replica_progress,
+        };
+
         DatabaseStats {
             current: CurrentStateStats {
                 node_count: current_stats.node_count,
@@ -385,7 +539,22 @@ impl AletheiaDB {
             cold_storage,
             wal,
             chain,
+            namespaces,
+            changefeed,
+            replication,
         }
+    }
+
+    /// Snapshot of engine-lane per-query resource-limit termination/rejection
+    /// counters (Issue #3368 observability): wall-clock-timeout, result-row, and
+    /// estimated-memory terminations plus over-ceiling override rejections.
+    /// Process-lifetime relaxed atomic reads (no locks, no version scan), so it
+    /// is safe to poll frequently. This is the Rust-API observability surface
+    /// for the engine lane; the MCP `database_stats` tool exposes the same
+    /// counts in its additive `resource_limits` block.
+    #[must_use]
+    pub fn query_limit_counters(&self) -> crate::query::limits::LimitCountersSnapshot {
+        self.limit_counters.snapshot()
     }
 }
 

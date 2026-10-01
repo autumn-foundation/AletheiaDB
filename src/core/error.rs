@@ -42,6 +42,12 @@ pub enum Error {
     /// Derivation-lineage validation errors (Issue #3371).
     #[error("Lineage error: {0}")]
     Lineage(crate::core::lineage::LineageError),
+    /// Namespace validation / registry errors (Issue #3349).
+    #[error("Namespace error: {0}")]
+    Namespace(crate::core::namespace::NamespaceError),
+    /// Multi-tenant lifecycle / quota errors (Issue #3365).
+    #[error("Tenant error: {0}")]
+    Tenant(crate::core::tenant::TenantError),
     /// Query-related errors.
     #[error("Query error: {0}")]
     Query(QueryError),
@@ -58,6 +64,7 @@ pub enum Error {
     #[error("I/O error: {0}")]
     Io(io::Error),
     /// Backup or restore errors.
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Backup error: {0}")]
     Backup(crate::storage::backup::BackupError),
     /// Feature not yet implemented.
@@ -93,6 +100,8 @@ impl Error {
                 Error::Temporal(_) => crate::observability::ErrorCategory::Temporal,
                 Error::Provenance(_) => crate::observability::ErrorCategory::Other,
                 Error::Lineage(_) => crate::observability::ErrorCategory::Other,
+                Error::Namespace(_) => crate::observability::ErrorCategory::Other,
+                Error::Tenant(_) => crate::observability::ErrorCategory::Other,
                 Error::Query(_) => crate::observability::ErrorCategory::Query,
                 Error::Transaction(_) => crate::observability::ErrorCategory::Transaction,
                 Error::Vector(_) => crate::observability::ErrorCategory::Vector,
@@ -156,6 +165,18 @@ impl From<crate::core::lineage::LineageError> for Error {
     }
 }
 
+impl From<crate::core::namespace::NamespaceError> for Error {
+    fn from(e: crate::core::namespace::NamespaceError) -> Self {
+        Error::Namespace(e)
+    }
+}
+
+impl From<crate::core::tenant::TenantError> for Error {
+    fn from(e: crate::core::tenant::TenantError) -> Self {
+        Error::Tenant(e)
+    }
+}
+
 impl From<QueryError> for Error {
     fn from(e: QueryError) -> Self {
         Error::Query(e)
@@ -168,6 +189,7 @@ impl From<io::Error> for Error {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<crate::storage::backup::BackupError> for Error {
     fn from(e: crate::storage::backup::BackupError) -> Self {
         Error::Backup(e)
@@ -317,6 +339,7 @@ impl std::fmt::Display for PersistenceErrorKind {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<&crate::storage::index_persistence::IndexPersistenceError> for PersistenceErrorKind {
     fn from(e: &crate::storage::index_persistence::IndexPersistenceError) -> Self {
         match e {
@@ -336,6 +359,9 @@ impl From<&crate::storage::index_persistence::IndexPersistenceError> for Persist
                 PersistenceErrorKind::InvalidMagic
             }
             crate::storage::index_persistence::IndexPersistenceError::SizeLimitExceeded {
+                ..
+            }
+            | crate::storage::index_persistence::IndexPersistenceError::InternerCapacityExceeded {
                 ..
             } => PersistenceErrorKind::SizeLimitExceeded,
             crate::storage::index_persistence::IndexPersistenceError::Io(_) => {
@@ -388,6 +414,73 @@ pub enum StorageError {
         /// The error reason
         reason: String,
     },
+    /// A runtime WAL keyring install was attempted while one is already present
+    /// (Issue #3616 PR3). Distinct from the generic [`WalError`](Self::WalError)
+    /// so the enable engine can classify this **precondition** failure as
+    /// `FAILED_PRECONDITION` (a caller cannot enable an already-encrypted WAL)
+    /// while genuine WAL I/O / seal-and-reopen faults keep falling through to
+    /// `INTERNAL`.
+    #[error("WAL keyring already installed: {reason}")]
+    WalKeyringAlreadyInstalled {
+        /// The rejection reason.
+        reason: String,
+    },
+    /// A runtime WAL keyring UNINSTALL was attempted while none is present
+    /// (Issue #3616 PR4). The mirror of
+    /// [`WalKeyringAlreadyInstalled`](Self::WalKeyringAlreadyInstalled): distinct
+    /// from the generic [`WalError`](Self::WalError) so the disable engine can
+    /// classify this **precondition** failure as `FAILED_PRECONDITION` (a caller
+    /// cannot disable encryption on an already-plaintext WAL) while genuine WAL
+    /// I/O / seal-and-reopen faults keep falling through to `INTERNAL`.
+    #[error("WAL keyring not installed: {reason}")]
+    WalKeyringNotInstalled {
+        /// The rejection reason.
+        reason: String,
+    },
+    /// A runtime INDEX keyring install was attempted while one is already present
+    /// (Issue #3708). The index-tier mirror of
+    /// [`WalKeyringAlreadyInstalled`](Self::WalKeyringAlreadyInstalled): distinct
+    /// from the generic [`InconsistentState`](Self::InconsistentState) so the
+    /// enable engine can classify this **precondition** failure as
+    /// `FAILED_PRECONDITION` (a caller cannot enable an already-encrypted index
+    /// tier) while genuine index I/O faults keep falling through to `INTERNAL`.
+    #[error("index keyring already installed: {reason}")]
+    IndexKeyringAlreadyInstalled {
+        /// The rejection reason.
+        reason: String,
+    },
+    /// A runtime COLD keyring install was attempted while one is already present
+    /// (Issue #3708). The cold-tier mirror of
+    /// [`IndexKeyringAlreadyInstalled`](Self::IndexKeyringAlreadyInstalled) and
+    /// [`WalKeyringAlreadyInstalled`](Self::WalKeyringAlreadyInstalled): distinct
+    /// from the generic [`InconsistentState`](Self::InconsistentState) so the
+    /// double-install **precondition** maps to `FAILED_PRECONDITION` rather than
+    /// `INTERNAL`, keeping all three tiers' install-seam rejections classified
+    /// alike.
+    #[error("cold keyring already installed: {reason}")]
+    ColdKeyringAlreadyInstalled {
+        /// The rejection reason.
+        reason: String,
+    },
+    /// Opening a data directory was refused because its unreplayed WAL tail is a
+    /// **pre-v13** (0.1.x) segment, which encodes node/edge labels as raw
+    /// process-local interner ids (Issue #3746).
+    ///
+    /// Replaying such a tail under a differently-ordered `GLOBAL_INTERNER` would
+    /// silently resolve those ids to the WRONG strings — corrupting the labels of
+    /// every entity recovered from the tail — and the original string was never
+    /// written to disk, so it cannot be recovered at replay time. Distinct from
+    /// the generic [`CorruptedData`](Self::CorruptedData) / [`WalError`](Self::WalError)
+    /// so this **precondition** failure classifies as `FAILED_PRECONDITION` (the
+    /// caller must drain/checkpoint the WAL on the old version before upgrading)
+    /// rather than `INTERNAL`, mirroring the keyring-precondition variants above.
+    /// It is non-retriable: reopening the same directory cannot succeed until the
+    /// operator drains the tail.
+    #[error("pre-v13 (0.1.x) WAL tail cannot be replayed safely: {reason}")]
+    PreV13WalTailRequiresMigration {
+        /// The refusal reason, including remediation guidance.
+        reason: String,
+    },
     /// Checkpoint error.
     #[error("Checkpoint error: {reason}")]
     CheckpointError {
@@ -438,6 +531,25 @@ pub enum StorageError {
         /// Maximum allowed
         limit: usize,
     },
+    /// A per-principal quota was exceeded (Issue #3678).
+    ///
+    /// Distinct from the global [`Self::CapacityExceeded`] so the two can be
+    /// classified differently: a per-principal quota breach is a **transient
+    /// fairness** limit (another of this principal's subscriptions may drop),
+    /// mapping to the MCP/HTTP `RESOURCE_EXHAUSTED` code with `retriable: true`,
+    /// whereas the global cap keeps its existing mapping. Raised when a principal
+    /// already holds `limit` concurrently-live changefeed subscriptions.
+    #[error(
+        "Per-principal quota exceeded for principal '{principal}': current={current}, limit={limit}"
+    )]
+    PrincipalQuotaExceeded {
+        /// The principal id whose quota was exceeded.
+        principal: String,
+        /// The principal's current live-subscription count.
+        current: usize,
+        /// The principal's configured maximum.
+        limit: usize,
+    },
     /// A Mutex lock was poisoned (a thread panicked while holding the lock).
     ///
     /// This indicates severe internal corruption. The affected resource cannot be
@@ -480,6 +592,7 @@ impl StorageError {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<crate::storage::index_persistence::IndexPersistenceError> for StorageError {
     fn from(e: crate::storage::index_persistence::IndexPersistenceError) -> Self {
         let kind = PersistenceErrorKind::from(&e);
@@ -704,6 +817,27 @@ pub enum QueryError {
         /// Optional hint on how to fix the issue
         hint: Option<String>,
     },
+    /// A per-query resource limit was exceeded (Issue #3368 engine lane).
+    ///
+    /// Raised cooperatively by [`crate::query::executor::iterators::ResourceGuardIterator`]
+    /// while draining a query's result stream. `dimension` is the stable
+    /// snake_case token from [`crate::query::limits::LimitDimension::as_str`]
+    /// (`"wall_clock_timeout"`, `"result_rows"`, or `"memory_bytes"`), so a
+    /// caller can branch on it without string-matching the display message.
+    /// `retriable` is `true` only for the wall-clock timeout (a read-only
+    /// re-run is safe); row/memory breaches are `false` (re-running the same
+    /// query deterministically breaches again).
+    #[error("query exceeded {dimension} limit of {limit} (consumed {consumed})")]
+    ResourceExhausted {
+        /// The stable dimension token that was breached.
+        dimension: &'static str,
+        /// The configured limit for that dimension.
+        limit: u64,
+        /// How much of the dimension's budget was actually consumed.
+        consumed: u64,
+        /// Whether retrying the same query is expected to succeed.
+        retriable: bool,
+    },
 }
 
 /// Format the `IndexNotFound` display message with optional hint.
@@ -787,6 +921,66 @@ pub enum TransactionError {
         /// The resource whose lock was poisoned
         resource: String,
     },
+    /// Compare-and-set (CAS) precondition failure (Issue #3577).
+    ///
+    /// A conditional write (`compare_and_set_node`/`compare_and_set_edge` or the
+    /// `claim_with_lease` convenience) found, at commit time under the
+    /// commit-serialization guard, that the entity's committed `current_version`
+    /// did not equal the caller-supplied `expected` version — and, for a lease
+    /// claim, the lease was not expired either.
+    ///
+    /// This is a **caller-fault precondition failure**, NOT a transient
+    /// serialization conflict: retrying the *same* call with the same stale
+    /// `expected` version can never succeed (the claim was lost to another
+    /// writer), so it is non-retriable. It maps to the MCP `FAILED_PRECONDITION`
+    /// code, deliberately distinct from the retriable `SerializationFailure`.
+    ///
+    /// `actual` is the entity's current head version at commit time, or `None`
+    /// when the entity does not exist (never created, or fully deleted).
+    #[error("{}", format_cas_mismatch(*expected, actual))]
+    CasMismatch {
+        /// The version the caller expected the entity's head to still be.
+        expected: VersionId,
+        /// The entity's actual committed head version, or `None` if absent.
+        actual: Option<VersionId>,
+    },
+    /// A fenced claim's supplied fence token was not strictly greater than the
+    /// entity's committed fence at commit time (DBOS Phase 3e).
+    ///
+    /// The monotonic fence guards against a zombie writer / stale-fence steal:
+    /// under the commit-serialization guard the committed fence is re-read, and
+    /// a claim is admitted only when `new_fence > stored`. A collision (two
+    /// stealers computing the same `new_fence` from a stale read) makes the
+    /// second one fail here.
+    ///
+    /// This is a **caller-fault precondition failure**, NOT a transient
+    /// conflict: the correct response is to re-read the current fence and
+    /// recompute a strictly-greater one, so it is non-retriable (maps to MCP
+    /// `FAILED_PRECONDITION`, like `CasMismatch`).
+    ///
+    /// # Crash-durable fence (Issue #3413)
+    ///
+    /// The fence re-check runs BEFORE the WAL append (under `current_timestamp`,
+    /// which is held across apply and serializes commits end-to-end), so a claim
+    /// rejected with `FenceTooLow` appends **no WAL frame** and is never
+    /// re-applied by crash recovery — the stale-steal the fence prevents live
+    /// stays prevented across a crash. (Previously the re-check ran after the WAL
+    /// frame was durable, so a rejection could replay on recovery; Issue #3413
+    /// WAL abort framing closed that, together with the sibling `CasMismatch` and
+    /// #3416 write-skew checks.)
+    #[error(
+        "fenced claim rejected: supplied fence {new_fence} for key '{fence_key}' is not strictly \
+         greater than the committed fence {stored}"
+    )]
+    FenceTooLow {
+        /// The property key holding the monotonic fence token.
+        fence_key: String,
+        /// The fence value the caller tried to install.
+        new_fence: i64,
+        /// The entity's committed fence at commit time (`i64::MIN` when absent /
+        /// non-integer, i.e. no fence was held).
+        stored: i64,
+    },
     /// Clock skew exceeds acceptable bounds.
     ///
     /// This occurs when the system clock jumps forward or backward by more than
@@ -804,6 +998,30 @@ pub enum TransactionError {
         /// Maximum allowed drift for this direction
         max_allowed: i64,
     },
+    /// The write was rejected because this node is a read-only replica
+    /// (Issue #3355).
+    ///
+    /// Raised at write-transaction construction
+    /// (`AletheiaDB::write_transaction`/`write_transaction_with_options`)
+    /// and, as a defensive recheck against a promotion/demotion race,
+    /// again at commit time
+    /// (`WriteTransaction::commit_with_timestamp_inner`). A caller hitting
+    /// this should redirect the write to the primary; it is never
+    /// retriable against this node as-is.
+    #[error("write rejected: this node is a read-only replica; writes must go to the primary")]
+    ReadOnlyReplica,
+}
+
+/// Format the `CasMismatch` display message (Issue #3577).
+fn format_cas_mismatch(expected: VersionId, actual: &Option<VersionId>) -> String {
+    match actual {
+        Some(current) => format!(
+            "compare-and-set failed: expected head version {expected}, but the entity's current version is {current}"
+        ),
+        None => format!(
+            "compare-and-set failed: expected head version {expected}, but the entity does not exist"
+        ),
+    }
 }
 
 /// Format the `ClockSkew` display message with computed direction.
@@ -863,6 +1081,135 @@ pub enum ConstraintError {
         /// The type name that is not supported.
         type_name: String,
     },
+    /// A create/update write violates a declared property-type schema
+    /// constraint (Issue #3378): the value's type does not match the declared
+    /// type for `label.property`.
+    #[error(
+        "Type constraint violation on {entity_kind} {label}.{property}: expected {expected_type}, got {actual_type}"
+    )]
+    TypeViolation {
+        /// `"node"` or `"edge"`.
+        entity_kind: String,
+        /// The node label or edge type.
+        label: String,
+        /// The offending property key.
+        property: String,
+        /// The declared (expected) type token. Always a stable `&'static str`
+        /// (from `DeclaredType::type_name`); kept static so this variant stays
+        /// small and does not bloat the crate `Error` (clippy `result_large_err`).
+        expected_type: &'static str,
+        /// The actual value's type token (from `PropertyValue::type_name`).
+        actual_type: &'static str,
+    },
+    /// A create/update write is missing one or more required keys declared by a
+    /// schema constraint (Issue #3378). A key present with a `Null` value counts
+    /// as missing when the constraint is `required` or non-`nullable`.
+    #[error(
+        "Missing required key(s) on {entity_kind} {label}: {}",
+        missing_keys.join(", ")
+    )]
+    MissingRequiredKey {
+        /// `"node"` or `"edge"`.
+        entity_kind: String,
+        /// The node label or edge type.
+        label: String,
+        /// The required keys that were absent or null.
+        missing_keys: Vec<String>,
+    },
+    /// Enabling schema constraints failed because current-state entities do not
+    /// conform (Issue #3378). Carries a machine-readable report: aggregated
+    /// violations, the non-conforming count, and a bounded id sample. Nothing
+    /// is declared when this is returned.
+    #[error(
+        "Cannot enable schema constraints on {entity_kind} {label}: {total_non_conforming} non-conforming entit{} (e.g. ids {sample_ids:?})",
+        if *total_non_conforming == 1 { "y" } else { "ies" }
+    )]
+    NonConformingOnEnable {
+        /// `"node"` or `"edge"`.
+        entity_kind: String,
+        /// The node label or edge type.
+        label: String,
+        /// Aggregated per-(property, reason) violations.
+        violations: Vec<crate::core::constraint::ConformanceViolation>,
+        /// Total number of non-conforming entities.
+        total_non_conforming: usize,
+        /// A bounded sample of non-conforming entity ids.
+        sample_ids: Vec<u64>,
+    },
+}
+
+impl ConstraintError {
+    /// Structured, machine-readable `details` for the schema-constraint
+    /// (Issue #3378) variants, shared by the MCP (#3234) and HTTP error
+    /// surfaces so both render byte-identical metadata under `error.details`.
+    ///
+    /// Returns `Some(..)` only for the schema-constraint variants —
+    /// [`Self::TypeViolation`], [`Self::MissingRequiredKey`], and
+    /// [`Self::NonConformingOnEnable`]. The uniqueness variants
+    /// ([`Self::UniqueViolation`] / [`Self::DuplicateOnEnable`] /
+    /// [`Self::UnsupportedKeyType`]) return `None`: their surface-specific
+    /// `details` (e.g. the MCP `UniqueViolation`'s `existing_node_id` plus
+    /// legacy top-level fields) are still built at their existing call sites,
+    /// so this method does not change their behavior.
+    ///
+    /// Every payload is **bounded**: `missing_keys` is exactly the declared
+    /// required keys that were absent, `NonConformingOnEnable`'s `sample_ids`
+    /// and each violation's `sample_ids` are already capped at
+    /// [`crate::core::constraint::MAX_CONFORMANCE_SAMPLE_IDS`], and the
+    /// aggregated `violations` list is one entry per distinct
+    /// `(property, reason)` — never a per-entity dump.
+    pub fn structured_details(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        match self {
+            ConstraintError::TypeViolation {
+                entity_kind,
+                label,
+                property,
+                expected_type,
+                actual_type,
+            } => Some(json!({
+                "entity_kind": entity_kind,
+                "label": label,
+                "property": property,
+                "expected_type": expected_type,
+                "actual_type": actual_type,
+            })),
+            ConstraintError::MissingRequiredKey {
+                entity_kind,
+                label,
+                missing_keys,
+            } => Some(json!({
+                "entity_kind": entity_kind,
+                "label": label,
+                // Always a JSON array, even for a single missing key, so a
+                // caller can iterate uniformly.
+                "missing_keys": missing_keys,
+            })),
+            ConstraintError::NonConformingOnEnable {
+                entity_kind,
+                label,
+                violations,
+                total_non_conforming,
+                sample_ids,
+            } => Some(json!({
+                "entity_kind": entity_kind,
+                "label": label,
+                "total_non_conforming": total_non_conforming,
+                "sample_ids": sample_ids,
+                "violations": violations
+                    .iter()
+                    .map(|v| json!({
+                        "property": v.property,
+                        "reason": v.reason,
+                        "sample_ids": v.sample_ids,
+                    }))
+                    .collect::<Vec<_>>(),
+            })),
+            ConstraintError::UniqueViolation { .. }
+            | ConstraintError::DuplicateOnEnable { .. }
+            | ConstraintError::UnsupportedKeyType { .. } => None,
+        }
+    }
 }
 
 /// Errors related to vector operations and validation.
@@ -1219,17 +1566,25 @@ mod tests {
 
     #[cfg(feature = "observability")]
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(metrics)]
     fn test_result_ext_records_storage_metric_once() {
-        crate::observability::METRICS.reset();
-
+        // Delta-based assertion (not absolute-count-after-`reset()`): the counter
+        // is a process-global singleton shared across the whole test binary, so an
+        // absolute assertion races any concurrent test that bumps the same counter.
+        // Reading immediately before and after the single `record_error_metric()`
+        // call and asserting the increment is exactly 1 preserves the "recorded
+        // exactly once (not double-counted)" intent while being robust to concurrent
+        // neighbors. The `metrics` serial group fences out the known same-counter
+        // bumpers so the delta window is clean (de-flake, Wave-8 Lane P).
         let err: Result<()> = Err(StorageError::NodeNotFound(NodeId::new(1).unwrap()).into());
-        let snapshot = crate::observability::METRICS.snapshot();
-        assert_eq!(snapshot.error_storage_total, 0);
-
+        let before = crate::observability::METRICS.snapshot().error_storage_total;
         let _ = err.record_error_metric();
-        let snapshot = crate::observability::METRICS.snapshot();
-        assert_eq!(snapshot.error_storage_total, 1);
+        let after = crate::observability::METRICS.snapshot().error_storage_total;
+        assert_eq!(
+            after - before,
+            1,
+            "record_error_metric must record exactly one storage error"
+        );
     }
 
     #[test]

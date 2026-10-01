@@ -242,6 +242,10 @@ pub enum UnaryOp {
     /// Project specific properties
     Project(Vec<String>),
 
+    /// Project provenance accessors as output columns (Issue #3354). Mirrors
+    /// [`super::ir::QueryOp::ProjectProvenance`].
+    ProjectProvenance(super::ir::ProvenanceProjection),
+
     /// Limit number of results
     Limit(usize),
 
@@ -303,6 +307,18 @@ pub enum UnaryOp {
         /// Aggregate expressions computed per group.
         aggregates: Vec<super::ir::AggregateSpec>,
     },
+
+    /// Temporal aggregation window (Issue #3363). Mirrors
+    /// [`super::ir::QueryOp::TemporalWindowAggregate`]: buckets each upstream
+    /// entity's valid-time history into tumbling windows and emits per-window
+    /// aggregate rows.
+    TemporalWindowAggregate(super::ir::TemporalWindowSpec),
+
+    /// Temporal join / align (Issue #3379). Mirrors
+    /// [`super::ir::QueryOp::TemporalAlign`]: aligns the upstream matched
+    /// participants at matching valid-time coordinates and emits per-coordinate
+    /// computed-column rows.
+    TemporalAlign(super::ir::TemporalAlignSpec),
 
     /// Left-outer application of an optional sub-pattern (`OPTIONAL MATCH`).
     ///

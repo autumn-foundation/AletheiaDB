@@ -520,3 +520,175 @@ fn prop_roundtrip_observationally_equivalent() {
         )
         .unwrap();
 }
+
+// ============================================================================
+// Test 9 — unique constraints survive backup/restore (Issue #3218 residue fix)
+// ============================================================================
+
+/// Regression: `.albk` backup must capture the WAL-persisted uniqueness
+/// constraint registry (Issue #3218). Before the fix, a fresh-WAL restore
+/// silently dropped every unique constraint — the restored DB happily accepted
+/// duplicate values that the original rejected.
+///
+/// After the fix, a backup→restore round-trip preserves the constraint AND its
+/// enforcement: a duplicate insert into the restored (ephemeral) DB is rejected.
+#[test]
+#[serial]
+fn roundtrip_preserves_and_enforces_unique_constraint() {
+    use aletheiadb::core::error::ConstraintError;
+
+    let db = AletheiaDB::new().unwrap();
+    db.unique_constraint("Person", "email").enable().unwrap();
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new().insert("email", "alice@x").build(),
+    )
+    .unwrap();
+
+    let tmp = TempDir::new().unwrap();
+    let backup_path = tmp.path().join("unique.albk");
+    db.backup(&backup_path).unwrap();
+
+    let restored = AletheiaDB::restore(&backup_path).unwrap();
+
+    // The constraint declaration must survive.
+    let constraints = restored.list_unique_constraints();
+    assert!(
+        constraints
+            .iter()
+            .any(|(l, p)| l == "Person" && p == "email"),
+        "Person/email unique constraint must survive restore, got: {constraints:?}"
+    );
+
+    // The restored duplicate value must still be REJECTED (reservation index
+    // rebuilt from the restored node).
+    let dup_existing = restored.create_node(
+        "Person",
+        PropertyMapBuilder::new().insert("email", "alice@x").build(),
+    );
+    let err = dup_existing.expect_err("duplicate of restored value must be rejected");
+    assert!(
+        matches!(
+            err.as_constraint(),
+            Some(ConstraintError::UniqueViolation { .. })
+        ),
+        "expected UniqueViolation for existing value, got: {err:?}"
+    );
+
+    // A brand-new value inserted post-restore is accepted, and re-inserting it
+    // is then rejected — proving the constraint is live, not just a static list.
+    restored
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("email", "bob@x").build(),
+        )
+        .expect("new distinct value must be accepted post-restore");
+    let dup_new = restored.create_node(
+        "Person",
+        PropertyMapBuilder::new().insert("email", "bob@x").build(),
+    );
+    assert!(
+        matches!(
+            dup_new
+                .expect_err("duplicate of new value must be rejected")
+                .as_constraint(),
+            Some(ConstraintError::UniqueViolation { .. })
+        ),
+        "constraint must enforce values written after restore"
+    );
+}
+
+/// A database with zero unique constraints must round-trip cleanly (no panic,
+/// empty constraint list on the restored side).
+#[test]
+#[serial]
+fn roundtrip_with_no_unique_constraints_is_clean() {
+    let (db, _, _) = build_sample_db();
+    let tmp = TempDir::new().unwrap();
+    let backup_path = tmp.path().join("none.albk");
+    db.backup(&backup_path).unwrap();
+
+    let restored = AletheiaDB::restore(&backup_path).unwrap();
+    assert!(
+        restored.list_unique_constraints().is_empty(),
+        "restore of a constraint-free DB must have no unique constraints"
+    );
+}
+
+/// Unique constraints and #3378 schema (type/required-key) constraints must
+/// BOTH survive the same backup→restore round-trip.
+#[test]
+#[serial]
+fn roundtrip_preserves_unique_and_schema_constraints_together() {
+    use aletheiadb::core::EntityKind;
+    use aletheiadb::core::constraint::DeclaredType;
+
+    let db = AletheiaDB::new().unwrap();
+    db.unique_constraint("Person", "email").enable().unwrap();
+    db.schema_constraint(EntityKind::Node, "Person")
+        .require_typed("age", DeclaredType::Integer)
+        .enable()
+        .unwrap();
+
+    let tmp = TempDir::new().unwrap();
+    let backup_path = tmp.path().join("both.albk");
+    db.backup(&backup_path).unwrap();
+
+    let restored = AletheiaDB::restore(&backup_path).unwrap();
+
+    assert!(
+        restored
+            .list_unique_constraints()
+            .iter()
+            .any(|(l, p)| l == "Person" && p == "email"),
+        "unique constraint must survive"
+    );
+    let schema = restored.list_schema_constraints();
+    assert!(
+        schema.iter().any(|d| d.label == "Person"
+            && d.properties
+                .iter()
+                .any(|p| p.property == "age" && p.required)),
+        "schema constraint must survive alongside the unique constraint, got: {schema:?}"
+    );
+}
+
+/// The durable restore path (`restore_to_data_dir`) must persist the
+/// re-declared unique constraint to the restored DB's WAL, so a subsequent
+/// reopen recovers it via normal WAL replay.
+#[test]
+#[serial]
+fn durable_restore_persists_unique_constraint_across_reopen() {
+    let db = AletheiaDB::new().unwrap();
+    db.unique_constraint("Person", "email").enable().unwrap();
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new().insert("email", "alice@x").build(),
+    )
+    .unwrap();
+
+    let tmp = TempDir::new().unwrap();
+    let backup_path = tmp.path().join("durable.albk");
+    db.backup(&backup_path).unwrap();
+
+    let data_dir = tmp.path().join("restored_data");
+    let restored = AletheiaDB::restore_to_data_dir(&backup_path, &data_dir).unwrap();
+    assert!(
+        restored
+            .list_unique_constraints()
+            .iter()
+            .any(|(l, p)| l == "Person" && p == "email"),
+        "durable restore must re-declare the unique constraint"
+    );
+    drop(restored);
+
+    // Reopen from disk — the constraint must come back via WAL replay.
+    let reopened = AletheiaDB::open(&data_dir).unwrap();
+    assert!(
+        reopened
+            .list_unique_constraints()
+            .iter()
+            .any(|(l, p)| l == "Person" && p == "email"),
+        "unique constraint must survive a reopen of the durably-restored DB"
+    );
+}

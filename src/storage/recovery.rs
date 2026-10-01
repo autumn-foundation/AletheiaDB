@@ -27,7 +27,9 @@
 use crate::core::constraint::ConstraintRegistry;
 use crate::core::error::Result;
 use crate::core::graph::{Edge, Node};
-use crate::core::id::{TxId, VersionId};
+use crate::core::id::{EdgeId, NodeId, TxId, VersionId, strip_structural_tag};
+use crate::core::interning::InternedString;
+use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
 use crate::core::version::VersionMetadata;
 use crate::storage::current::CurrentStorage;
@@ -114,6 +116,7 @@ use crate::storage::wal::{LSN, WalEntry, WalOperation};
 /// # Ok(())
 /// # }
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn replay_wal_into_storage(
     wal: &ConcurrentWalSystem,
     current: &CurrentStorage,
@@ -131,6 +134,7 @@ pub(crate) fn replay_wal_into_storage(
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn replay_wal_into_storage_with_constraints(
     wal: &ConcurrentWalSystem,
     current: &CurrentStorage,
@@ -152,6 +156,67 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
         next_version_id,
         constraint_registry,
     )
+}
+
+/// Advance the replay's next synthesized version id past `id`, ignoring the
+/// structural-version tag (a structural id must never push the synthesizer into
+/// the tagged range).
+#[inline]
+fn bump_next_version_id(next_version_id: u64, id: VersionId) -> u64 {
+    next_version_id.max(strip_structural_tag(id.as_u64()).saturating_add(1))
+}
+
+/// Mint a structural (carry-forward / re-assertion) version id for replay.
+///
+/// Consumes one sequence number from the replay synthesizer exactly as the
+/// live write path consumes one from the version-id generator per structural
+/// version, keeping replay's synthesized ids in step with the primary's
+/// allocation (the incremental-replication applier depends on this: jumping
+/// ahead would collide with ids logged in a later batch). The tag bit keeps a
+/// structural id disjoint from every ordinary id.
+fn mint_structural_version_id(next_version_id: &mut u64) -> Result<VersionId> {
+    let id = VersionId::structural(*next_version_id)?;
+    *next_version_id = next_version_id.saturating_add(1);
+    Ok(id)
+}
+
+/// If the node's head is a live structural re-assertion (a backfill left the
+/// open head re-asserted), return the state current storage must hold.
+#[allow(clippy::type_complexity)]
+fn live_structural_node_head(
+    historical: &HistoricalStorage,
+    node_id: NodeId,
+) -> Result<Option<(VersionId, InternedString, PropertyMap)>> {
+    let Some(head) = historical.get_current_node_version(node_id) else {
+        return Ok(None);
+    };
+    match historical.get_node_version(head) {
+        Some(v) if head.is_structural() && v.temporal.is_current() => Ok(Some((
+            head,
+            v.label,
+            historical.reconstruct_node_properties(head)?,
+        ))),
+        _ => Ok(None),
+    }
+}
+
+/// Edge counterpart of [`live_structural_node_head`].
+#[allow(clippy::type_complexity)]
+fn live_structural_edge_head(
+    historical: &HistoricalStorage,
+    edge_id: EdgeId,
+) -> Result<Option<(VersionId, InternedString, PropertyMap)>> {
+    let Some(head) = historical.get_current_edge_version(edge_id) else {
+        return Ok(None);
+    };
+    match historical.get_edge_version(head) {
+        Some(v) if head.is_structural() && v.temporal.is_current() => Ok(Some((
+            head,
+            v.label,
+            historical.reconstruct_edge_properties(head)?,
+        ))),
+        _ => Ok(None),
+    }
 }
 
 /// Apply an already-decoded WAL entry stream to storage (Issue #3429).
@@ -263,7 +328,7 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                     }
                     _ => VersionId::new(next_version_id)?,
                 };
-                next_version_id = next_version_id.max(version_id.as_u64() + 1);
+                next_version_id = bump_next_version_id(next_version_id, version_id);
 
                 if current_node.is_none() {
                     let node = Node::with_metadata(
@@ -351,7 +416,7 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                     }
                     _ => VersionId::new(next_version_id)?,
                 };
-                next_version_id = next_version_id.max(version_id.as_u64() + 1);
+                next_version_id = bump_next_version_id(next_version_id, version_id);
 
                 if current_edge.is_none() {
                     let edge = Edge::with_metadata(
@@ -396,24 +461,11 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                 valid_from,
                 provenance,
             } => {
-                next_version_id = next_version_id.max(version_id.as_u64() + 1);
+                next_version_id = bump_next_version_id(next_version_id, version_id);
 
                 let interned_label = label;
 
                 let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
-
-                let node = Node::with_metadata(
-                    node_id,
-                    interned_label,
-                    properties.clone(),
-                    version_id,
-                    metadata,
-                );
-
-                // Overwriting current state with the logged version is
-                // idempotent; always apply so a lagging graph snapshot
-                // converges to the logged state.
-                current.update_node_direct(node, commit_timestamp)?;
 
                 // Idempotent re-application guard (Issue #3419): updates log
                 // their version_id, so "this exact version already exists in
@@ -422,42 +474,63 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                 // the previous head — a self-referential delta chain that
                 // makes history reconstruction loop forever (observed
                 // empirically: get_node_history OOMs after a double replay).
-                if historical.get_node_version(version_id).is_none() {
-                    // DELIBERATELY KEPT — NOT redundant (Issue #3407). The
-                    // `add_node_version_with_provenance` below ALSO closes the
-                    // prior head via `close_previous_version_intervals`, but
-                    // that helper guards the tx-time close with a STRICT
-                    // `new_tx_start > prev_tx_start`. Two updates to the SAME
-                    // node in ONE transaction share a single framed
-                    // `commit_timestamp`, so the successor's tx start EQUALS the
-                    // intermediate version's tx start and the strict `>` SKIPS
-                    // the close — the intermediate would be left OPEN on replay
-                    // while the live path (unconditional close in
-                    // `api/transaction/write/apply.rs`) closes it to the empty
-                    // `[T, T)` interval. Leaving it open produces two versions
-                    // with overlapping open tx-intervals, so an
-                    // `AS OF SYSTEM_TIME = T` read could surface the superseded
-                    // version. This UNCONDITIONAL close keeps replay bit-for-bit
-                    // consistent with the live write path. Regression coverage:
-                    // `replay_double_update_same_node_in_one_tx_closes_intermediate`.
-                    if let Some(prev_version_id) = historical.get_current_node_version(node_id) {
-                        historical.close_node_version_transaction_time(
-                            prev_version_id,
-                            commit_timestamp,
-                        )?;
-                    }
-
-                    historical.add_node_version_with_provenance(
+                let current_state = if historical.get_node_version(version_id).is_none() {
+                    // Re-derive the live path's append-only valid-time
+                    // supersession (`apply_node_write`): the plan depends only
+                    // on the replayed history, so replay reproduces the same
+                    // slices. Structural (carry-forward / re-assertion) ids are
+                    // not logged; replay mints its own (tagged, so disjoint from
+                    // every ordinary id) in step with the live allocation.
+                    //
+                    // The superseded slice is closed EXPLICITLY inside
+                    // `apply_node_update` (never via the add-path's strict `>`
+                    // auto-close), so two updates of one node in ONE framed
+                    // transaction close the intermediate to the empty `[T, T)`
+                    // tx-interval exactly like the live path (Issue #3407;
+                    // `replay_double_update_same_node_in_one_tx_closes_intermediate`).
+                    let plan = historical.plan_node_update(node_id, valid_from);
+                    let carry_id = plan
+                        .carry_from
+                        .map(|_| mint_structural_version_id(&mut next_version_id))
+                        .transpose()?;
+                    let reassert_id = plan
+                        .reassert
+                        .map(|_| mint_structural_version_id(&mut next_version_id))
+                        .transpose()?;
+                    let applied = historical.apply_node_update(
                         node_id,
-                        version_id,
+                        &plan,
                         valid_from,
                         commit_timestamp,
+                        version_id,
+                        interned_label,
+                        properties.clone(),
+                        provenance.map(std::sync::Arc::new),
+                        carry_id,
+                        reassert_id,
+                    )?;
+                    applied.reasserted
+                } else {
+                    // Already applied: if a backfill re-asserted the open head,
+                    // current state is that head, not the logged backfill.
+                    live_structural_node_head(historical, node_id)?
+                };
+
+                // Overwriting current state is idempotent; always apply so a
+                // lagging graph snapshot converges to the replayed state.
+                let node = match current_state {
+                    Some((head_id, head_label, head_properties)) => {
+                        Node::with_metadata(node_id, head_label, head_properties, head_id, metadata)
+                    }
+                    None => Node::with_metadata(
+                        node_id,
                         interned_label,
                         properties,
-                        false, // not a tombstone
-                        provenance.map(std::sync::Arc::new),
-                    )?;
-                }
+                        version_id,
+                        metadata,
+                    ),
+                };
+                current.update_node_direct(node, commit_timestamp)?;
             }
             WalOperation::UpdateEdge {
                 edge_id,
@@ -467,7 +540,7 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                 valid_from,
                 provenance,
             } => {
-                next_version_id = next_version_id.max(version_id.as_u64() + 1);
+                next_version_id = bump_next_version_id(next_version_id, version_id);
 
                 let current_edge = current.get_edge(edge_id)?;
 
@@ -475,46 +548,58 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
 
                 let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
 
-                let edge = Edge::with_metadata(
-                    edge_id,
-                    interned_label,
-                    current_edge.source,
-                    current_edge.target,
-                    properties.clone(),
-                    version_id,
-                    metadata,
-                );
-
-                current.update_edge_direct(edge)?;
-
-                // Idempotent re-application guard (Issue #3419) — see the
-                // UpdateNode arm above for why an already-present version_id
-                // must not be appended to history a second time.
-                if historical.get_edge_version(version_id).is_none() {
-                    // DELIBERATELY KEPT — NOT redundant (Issue #3407); the
-                    // helper's strict `>` tx-time guard skips the close when two
-                    // updates to the same edge in ONE transaction share a framed
-                    // `commit_timestamp`. See the UpdateNode arm above.
-                    if let Some(prev_version_id) = historical.get_current_edge_version(edge_id) {
-                        historical.close_edge_version_transaction_time(
-                            prev_version_id,
-                            commit_timestamp,
-                        )?;
-                    }
-
-                    historical.add_edge_version_with_provenance(
+                // Idempotent re-application guard (Issue #3419) and
+                // append-only valid-time supersession — see the UpdateNode arm.
+                let current_state = if historical.get_edge_version(version_id).is_none() {
+                    let plan = historical.plan_edge_update(edge_id, valid_from);
+                    let carry_id = plan
+                        .carry_from
+                        .map(|_| mint_structural_version_id(&mut next_version_id))
+                        .transpose()?;
+                    let reassert_id = plan
+                        .reassert
+                        .map(|_| mint_structural_version_id(&mut next_version_id))
+                        .transpose()?;
+                    let applied = historical.apply_edge_update(
                         edge_id,
-                        version_id,
+                        &plan,
                         valid_from,
                         commit_timestamp,
+                        version_id,
+                        interned_label,
+                        current_edge.source,
+                        current_edge.target,
+                        properties.clone(),
+                        provenance.map(std::sync::Arc::new),
+                        carry_id,
+                        reassert_id,
+                    )?;
+                    applied.reasserted
+                } else {
+                    live_structural_edge_head(historical, edge_id)?
+                };
+
+                let edge = match current_state {
+                    Some((head_id, head_label, head_properties)) => Edge::with_metadata(
+                        edge_id,
+                        head_label,
+                        current_edge.source,
+                        current_edge.target,
+                        head_properties,
+                        head_id,
+                        metadata,
+                    ),
+                    None => Edge::with_metadata(
+                        edge_id,
                         interned_label,
                         current_edge.source,
                         current_edge.target,
                         properties,
-                        false, // not a tombstone
-                        provenance.map(std::sync::Arc::new),
-                    )?;
-                }
+                        version_id,
+                        metadata,
+                    ),
+                };
+                current.update_edge_direct(edge)?;
             }
             WalOperation::DeleteNode {
                 node_id,
@@ -573,11 +658,12 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                     // live path (unconditional close) closes it. This
                     // UNCONDITIONAL close keeps replay consistent with the live
                     // write path. See the UpdateNode arm above.
-                    if let Some(current_version_id) = historical_head {
-                        historical.close_node_version_transaction_time(
-                            current_version_id,
-                            commit_timestamp,
-                        )?;
+                    //
+                    // Close the head AND every other still-recorded valid-time
+                    // slice (carry-forwards), mirroring the live
+                    // `apply_node_delete`.
+                    if historical_head.is_some() {
+                        historical.close_all_node_slices(node_id, commit_timestamp)?;
                     }
 
                     // Honor the LOGGED tombstone version_id (Issue #3406) so the
@@ -590,7 +676,7 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                         Some(vid) => vid,
                         None => VersionId::new(next_version_id)?,
                     };
-                    next_version_id = next_version_id.max(tombstone_version_id.as_u64() + 1);
+                    next_version_id = bump_next_version_id(next_version_id, tombstone_version_id);
 
                     // Honor the LOGGED valid_from (possibly backdated, Issues
                     // #3221/#3400) — mirroring the live path's
@@ -666,11 +752,10 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                     // update-then-delete of the same edge in ONE transaction
                     // shares a framed `commit_timestamp`. See the DeleteNode /
                     // UpdateNode arms above.
-                    if let Some(current_version_id) = historical_head {
-                        historical.close_edge_version_transaction_time(
-                            current_version_id,
-                            commit_timestamp,
-                        )?;
+                    // Closes every still-recorded slice, mirroring
+                    // `apply_edge_delete`.
+                    if historical_head.is_some() {
+                        historical.close_all_edge_slices(edge_id, commit_timestamp)?;
                     }
 
                     // Honor the LOGGED tombstone version_id (Issue #3406); see
@@ -680,7 +765,7 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                         Some(vid) => vid,
                         None => VersionId::new(next_version_id)?,
                     };
-                    next_version_id = next_version_id.max(tombstone_version_id.as_u64() + 1);
+                    next_version_id = bump_next_version_id(next_version_id, tombstone_version_id);
 
                     // Honor the LOGGED valid_from (possibly backdated, Issues
                     // #3221/#3400) — mirroring the live path's
@@ -790,7 +875,7 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                         Some(vid) => vid,
                         None => VersionId::new(next_version_id)?,
                     };
-                    next_version_id = next_version_id.max(retraction_version_id.as_u64() + 1);
+                    next_version_id = bump_next_version_id(next_version_id, retraction_version_id);
 
                     historical.add_retracted_node_version_with_provenance(
                         node_id,
@@ -880,7 +965,7 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                         Some(vid) => vid,
                         None => VersionId::new(next_version_id)?,
                     };
-                    next_version_id = next_version_id.max(retraction_version_id.as_u64() + 1);
+                    next_version_id = bump_next_version_id(next_version_id, retraction_version_id);
 
                     historical.add_retracted_edge_version_with_provenance(
                         edge_id,
@@ -1213,6 +1298,10 @@ mod framing_tests {
             operation: op,
             checksum: 0,
             framed: true,
+            // In-memory test fixture; the pre-v13 refusal (Issue #3746) is
+            // enforced in the open/replay-window path, not in this replay unit,
+            // so the decoded segment version is irrelevant here.
+            segment_version: None,
         }
     }
 
@@ -1224,6 +1313,10 @@ mod framing_tests {
             operation: op,
             checksum: 0,
             framed: false,
+            // In-memory test fixture; the pre-v13 refusal (Issue #3746) is
+            // enforced in the open/replay-window path, not in this replay unit,
+            // so the decoded segment version is irrelevant here.
+            segment_version: None,
         }
     }
 

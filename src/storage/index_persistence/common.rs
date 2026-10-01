@@ -75,9 +75,18 @@ impl IndexKeyring {
         }
     }
 
-    /// A single-generation keyring pinned to an explicit `key_version` (strict
-    /// dispatch). Used by rotation tests to construct pinned/mixed keyrings.
-    #[cfg(test)]
+    /// A single-generation keyring pinned to an explicit `key_version`.
+    ///
+    /// Reads decrypt ANY header `key_version` with this one cipher (`match_any`,
+    /// byte-identical to [`Self::single`]); only the write-stamp / reported
+    /// [`current_version`](Self::current_version) is pinned to `key_version`.
+    /// This is the constructor the durable `open()` path uses to PROVISION the
+    /// keyring at the max on-disk key version (Issue #488 version-provisioning):
+    /// without it `open()` always reports `current_version == 1`, so a rotated
+    /// dataset's v2 files classify as "unknown" (a `verify` false-FAIL) and the
+    /// next rotation re-uses version 2 and wedges on the P0.3 identity check.
+    /// Callers that need strict per-version dispatch build the ring and then
+    /// [`add_generation`](Self::add_generation), which leaves `match_any`.
     pub(crate) fn single_versioned(cipher: Arc<dyn Cipher>, key_version: u32) -> Self {
         Self {
             inner: Arc::new(RwLock::new(KeyringInner {
@@ -86,7 +95,7 @@ impl IndexKeyring {
                     cipher,
                 }],
                 current_version: key_version,
-                match_any: false,
+                match_any: true,
             })),
         }
     }
@@ -118,6 +127,7 @@ impl IndexKeyring {
     }
 
     /// The version freshly written files are stamped with.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn current_version(&self) -> u32 {
         self.inner
             .read()
@@ -140,12 +150,14 @@ impl IndexKeyring {
 
     /// The current (write) cipher, if any (for callers that only need the
     /// cipher, e.g. checkpoint's single-generation writes).
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn current_cipher(&self) -> Option<Arc<dyn Cipher>> {
         self.current().map(|(c, _)| c)
     }
 
     /// Add a new generation, making it current. Switches the keyring to strict
     /// per-version dispatch. Used by the rotation engine at `begin`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn add_generation(&self, key_version: u32, cipher: Arc<dyn Cipher>) {
         let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         inner.match_any = false;
@@ -159,6 +171,7 @@ impl IndexKeyring {
 
     /// Retire every generation except `key_version`, which becomes the sole,
     /// current generation. Used by the rotation engine at `complete`/`cancel`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn retain_only(&self, key_version: u32) {
         let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         inner.generations.retain(|g| g.key_version == key_version);
@@ -169,6 +182,7 @@ impl IndexKeyring {
 
 /// Read the header `key_version` of an encrypted index buffer without
 /// decrypting. Returns `None` if `bytes` is not an encrypted index file.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn index_file_key_version(bytes: &[u8]) -> Option<u32> {
     if !is_encrypted_index(bytes) {
         return None;

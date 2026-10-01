@@ -26,8 +26,9 @@ use std::sync::Arc;
 
 /// A complete Cypher statement ready for planning and execution.
 ///
-/// Currently only `MATCH` is supported; `CREATE`, `MERGE`, `DELETE`, etc.
-/// will be added as additional variants in future phases.
+/// Reading (`MATCH`) and write (`CREATE` / `MERGE` / `SET` / `DELETE`)
+/// statements are supported; further clause types are added as new variants in
+/// future phases.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CypherStatement {
     /// A `MATCH` (or `OPTIONAL MATCH`) statement that reads from the graph.
@@ -42,6 +43,14 @@ pub enum CypherStatement {
         return_clause: CypherReturn,
         /// An optional temporal qualifier (e.g., `AS OF TIMESTAMP ...`).
         temporal: Option<CypherTemporal>,
+        /// An optional namespace read-scope qualifier
+        /// (`USE / IN NAMESPACE ...`, Issue #3349). When present the converter
+        /// lowers it to a
+        /// [`NamespaceScope`](crate::core::namespace::NamespaceScope) on the
+        /// produced [`Query`](crate::query::Query) IR; when absent the query
+        /// stays namespace-agnostic exactly as before (`scope: None`). It is a
+        /// prefix clause that composes with `temporal` in either source order.
+        namespace: Option<CypherNamespaceClause>,
         /// Zero or more intermediate `WITH` projections.
         with_clauses: Vec<CypherWith>,
         /// Zero or more subsequent `OPTIONAL MATCH` clauses.
@@ -106,6 +115,47 @@ pub enum CypherStatement {
     Write(CypherWriteStatement),
 }
 
+/// A parsed namespace read-scope clause (`USE / IN NAMESPACE ...`, Issue #3349).
+///
+/// This mirrors [`crate::query::ast::NamespaceClause`] on the AQL side. It is
+/// produced by the parser as a cross-cutting prefix (composing with the
+/// temporal clause in either order) and lowered by the converter into a
+/// [`NamespaceScope`](crate::core::namespace::NamespaceScope) on the query IR.
+/// Names are captured raw (a string literal or a bare identifier) and validated
+/// in the converter (charset / length / reserved rules via
+/// [`Namespace::new`](crate::core::namespace::Namespace::new)), so a malformed
+/// *name* surfaces as a structured `INVALID_ARGUMENT`, while a malformed *clause
+/// structure* is a parse error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CypherNamespaceClause {
+    /// `USE ALL NAMESPACES` (or the single selector name `all`) -- no filter.
+    All,
+    /// `USE NAMESPACE <name> [, <name>]*` -- a non-empty list of raw namespace
+    /// names (one ⇒ single scope, more ⇒ union).
+    Names(Vec<String>),
+}
+
+impl CypherNamespaceClause {
+    /// Whether this clause *narrows* the result set (i.e. imposes a real
+    /// namespace filter).
+    ///
+    /// [`All`](Self::All) -- and the lone bare selector name `all`, which the
+    /// converter treats identically to `USE ALL NAMESPACES` -- impose no filter
+    /// and are therefore **not** restricting. Every other name list is
+    /// restricting. This is the single source of truth for the fail-closed
+    /// rejection of a restricting clause on an execution path that cannot thread
+    /// the scope (a mutation, or the multi-variable pattern evaluator): dropping
+    /// such a clause silently would *widen* results and leak other namespaces,
+    /// so those paths reject a restricting clause rather than execute unscoped.
+    #[must_use]
+    pub fn is_restricting(&self) -> bool {
+        match self {
+            CypherNamespaceClause::All => false,
+            CypherNamespaceClause::Names(names) => !(names.len() == 1 && names[0] == "all"),
+        }
+    }
+}
+
 /// A complete Cypher write statement (Issue #560).
 ///
 /// Grammar (v1):
@@ -116,6 +166,8 @@ pub enum CypherStatement {
 /// write_clause := CREATE pattern_list
 ///               | SET set_item (',' set_item)*
 ///               | [DETACH] DELETE variable (',' variable)*
+///               | MERGE pattern (ON CREATE SET set_item (',' set_item)*
+///                               | ON MATCH SET set_item (',' set_item)*)*
 /// set_item   := variable '.' property '=' value
 /// ```
 #[derive(Debug, Clone, PartialEq)]
@@ -152,6 +204,18 @@ pub enum CypherWriteClause {
         detach: bool,
         /// The variables to delete (nodes or relationships).
         targets: Vec<String>,
+    },
+    /// `MERGE <pattern> [ON CREATE SET ...] [ON MATCH SET ...]` (Issue #3548) --
+    /// match the pattern if it already exists (per openCypher whole-pattern
+    /// semantics), otherwise create the entire pattern. `ON CREATE SET` applies
+    /// only on the create branch; `ON MATCH SET` only on the match branch.
+    Merge {
+        /// The single graph pattern to match-or-create.
+        pattern: CypherPattern,
+        /// Assignments applied only when the pattern is created.
+        on_create: Vec<CypherSetItem>,
+        /// Assignments applied only when the pattern is matched.
+        on_match: Vec<CypherSetItem>,
     },
 }
 

@@ -78,6 +78,29 @@
 //!   from `{data_dir}/auth/keys.json` — the same path the HTTP server uses,
 //!   so keys minted via the HTTP admin endpoints work here when both point
 //!   at the same data directory.
+//!
+//! # Daemon-client mode (Issue #2905)
+//!
+//! Setting `ALETHEIADB_DAEMON_URL` (or passing `--daemon-url <URL>`) switches
+//! this binary from *owning* a database to *relaying* to one:
+//!
+//! ```bash
+//! ALETHEIADB_DAEMON_URL=http://127.0.0.1:1963 \
+//! ALETHEIADB_MCP_API_KEY=$KEY \
+//!   aletheia-mcp
+//! ```
+//!
+//! In that mode the process never calls [`AletheiaDB::open_from_env`] and never
+//! touches local storage: JSON-RPC frames read on stdin are forwarded to the
+//! daemon's `/mcp` endpoint and its replies written back to stdout. Many MCP
+//! client sessions can therefore share one database through one daemon instead
+//! of each opening (or inventing) their own. The relay exits when its client
+//! disconnects; the daemon is the long-lived process.
+//!
+//! Without a daemon URL the binary keeps its original embedded behavior, which
+//! remains fully supported.
+//!
+//! See `docs/guides/daemon-mode.md`.
 
 use std::sync::Arc;
 
@@ -85,6 +108,7 @@ use rmcp::{ServiceExt, transport::stdio};
 
 use aletheiadb::AletheiaDB;
 use aletheiadb::auth::{AuthMode, AuthStore, Role, SecretString, auth_mode_from_env};
+use aletheiadb::mcp::proxy::{DaemonClientConfig, run_stdio_proxy};
 use aletheiadb::mcp::{AletheiaMcpServer, McpAuthConfig, validate_mcp_auth_startup};
 
 /// Read a secret-bearing env var into a redacted [`SecretString`], if set
@@ -118,8 +142,67 @@ fn build_auth_store() -> Result<AuthStore, String> {
     Ok(store)
 }
 
+/// Relay stdio MCP traffic to a daemon, opening no local storage.
+///
+/// Authentication and authorization are the **daemon's** decisions here: the
+/// session credential is forwarded as a bearer token and the daemon answers
+/// `UNAUTHENTICATED` / `PERMISSION_DENIED` exactly as it would for a direct
+/// HTTP client. Duplicating that logic in the relay could only ever disagree
+/// with the authority, so it is deliberately absent.
+async fn run_daemon_client(
+    config: DaemonClientConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    eprintln!(
+        "aletheia-mcp: daemon-client mode — relaying to {} (no local database is opened)",
+        config.endpoint()
+    );
+    if !config.has_api_key() {
+        eprintln!(
+            "aletheia-mcp: no ALETHEIADB_MCP_API_KEY set; the daemon will reject \
+             every call unless it runs in anonymous mode."
+        );
+    }
+
+    let stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    run_stdio_proxy(config, stdin, tokio::io::stdout()).await?;
+    // stdin EOF: the MCP client disconnected. Exiting here is what keeps proxy
+    // processes from accumulating (and, on Windows, pinning the executable).
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Daemon-client mode is decided FIRST and never falls back: a proxy that
+    // silently opened its own database when the daemon was unreachable would
+    // recreate exactly the divergent-state bug this mode exists to prevent
+    // (Issue #2905).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match DaemonClientConfig::resolve(&args) {
+        Ok(Some(config)) => return run_daemon_client(config).await,
+        Ok(None) => {}
+        Err(message) => {
+            eprintln!("aletheia-mcp refusing to start: {message}");
+            std::process::exit(1);
+        }
+    }
+
+    // Embedded mode owns storage — so refuse a data directory a live daemon
+    // already owns (Issue #2905). Without this check the most likely daemon
+    // misconfiguration (a client left without ALETHEIADB_DAEMON_URL while
+    // ALETHEIADB_DATA_DIR still points at the daemon's directory) silently
+    // produces a second writer, which is the corruption mode daemon mode
+    // exists to retire.
+    if let Some(dir) = aletheiadb::config::data_dir_from_env()
+        && let Some(pid) = aletheiadb::daemon_lock::live_owner(&dir)
+    {
+        eprintln!(
+            "aletheia-mcp refusing to start: {}\nTo use the daemon, set \
+             ALETHEIADB_DAEMON_URL (see docs/guides/daemon-mode.md).",
+            aletheiadb::daemon_lock::already_owned_message(&dir, pid)
+        );
+        std::process::exit(1);
+    }
+
     // Initialize the database. Persistence is selected by environment:
     //   ALETHEIADB_CONFIG=/path/to/config.toml   -> full TOML-driven config
     //   ALETHEIADB_DATA_DIR=/path                -> canonical durable layout

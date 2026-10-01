@@ -126,6 +126,34 @@ pub struct WalConfig {
     /// so setting this to `false` does not re-brick the writer at seed time.
     /// Default: true
     pub tolerate_torn_tail: bool,
+
+    /// Maximum time (milliseconds) a writer blocks on a full WAL ring buffer
+    /// before failing with a diagnosable error (Issue #3798).
+    ///
+    /// Bounds one append CALL (a batch shares one budget, it is not re-armed
+    /// per operation). A writer that blocks forever behind a dead or wedged
+    /// flush thread is indistinguishable from a hung process, which is what
+    /// this bound exists to prevent — it is stall DETECTION, not a latency
+    /// SLA, so the default is generous enough that healthy backpressure never
+    /// trips it.
+    ///
+    /// `0` restores the legacy unbounded block.
+    /// Default: 30_000 (30s)
+    pub max_append_block_ms: u64,
+
+    /// Bound (milliseconds) on acquiring the group-commit coordinator's state
+    /// mutex (Issue #3798).
+    ///
+    /// Deadlock DETECTION, not a performance SLA: the default is deliberately
+    /// larger than the coordinator's own flush-wait timeout, so a stuck
+    /// *flusher* is always reported first and this bound only fires for a
+    /// genuinely stuck *mutex*. Only meaningful for the GroupCommit /
+    /// AsyncBatched durability modes, which are the ones that run a
+    /// coordinator.
+    ///
+    /// `0` restores the legacy unbounded `Mutex::lock`.
+    /// Default: 120_000 (2 min)
+    pub acquire_timeout_ms: u64,
 }
 
 impl Default for WalConfig {
@@ -140,6 +168,8 @@ impl Default for WalConfig {
             segments_to_retain: 10,
             durability_mode: crate::storage::wal::DurabilityMode::group_commit_default(),
             tolerate_torn_tail: true,
+            max_append_block_ms: crate::storage::wal::concurrent::DEFAULT_MAX_APPEND_BLOCK_MS,
+            acquire_timeout_ms: crate::storage::wal::group_commit::DEFAULT_ACQUIRE_TIMEOUT_MS,
         }
     }
 }
@@ -342,6 +372,26 @@ impl WalConfigBuilder {
     /// failure aborts startup). See [`WalConfig::tolerate_torn_tail`].
     pub fn tolerate_torn_tail(mut self, tolerate: bool) -> Self {
         self.config.tolerate_torn_tail = tolerate;
+        self
+    }
+
+    /// Set the bound on blocking WAL appends, in milliseconds (Issue #3798).
+    ///
+    /// `0` restores the legacy unbounded block. Deliberately not validated
+    /// against zero: that value IS the documented escape hatch. See
+    /// [`WalConfig::max_append_block_ms`].
+    pub fn max_append_block_ms(mut self, ms: u64) -> Self {
+        self.config.max_append_block_ms = ms;
+        self
+    }
+
+    /// Set the bound on acquiring the group-commit state mutex, in
+    /// milliseconds (Issue #3798).
+    ///
+    /// `0` restores legacy unbounded acquisition. See
+    /// [`WalConfig::acquire_timeout_ms`].
+    pub fn acquire_timeout_ms(mut self, ms: u64) -> Self {
+        self.config.acquire_timeout_ms = ms;
         self
     }
 
@@ -800,6 +850,173 @@ impl Default for VectorIndexConfigBuilder {
     }
 }
 
+/// Asynchronous replication (TCP transport) configuration (Issue #3355,
+/// Slice C).
+///
+/// Disabled by default (`listen_addr`/`primary_addr` both `None`), so a
+/// database's behavior and on-disk layout are unchanged unless an operator
+/// opts in. Setting `listen_addr` makes `AletheiaDB::with_unified_config`
+/// automatically start a [`crate::storage::replication::ReplicationServer`]
+/// (serving `FetchEntries` streaming automatically; see
+/// `crate::storage::replication::tcp`'s module docs for the one caveat this
+/// entails for snapshot-bootstrap serving). Setting `primary_addr` makes it
+/// automatically call [`crate::db::AletheiaDB::start_replication`] with a
+/// [`crate::storage::replication::TcpSource`], entering read-only replica
+/// mode. The two may be set simultaneously (a serving replica).
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
+#[non_exhaustive]
+pub struct ReplicationConfig {
+    /// If set, `with_unified_config` starts a TCP [`crate::storage::replication::ReplicationServer`]
+    /// bound to this address (e.g. `"0.0.0.0:4460"`, or `"127.0.0.1:0"` to
+    /// let the OS assign a port for tests).
+    pub listen_addr: Option<String>,
+    /// If set, `with_unified_config` connects a [`crate::storage::replication::TcpSource`]
+    /// to this primary address and starts streaming replication, entering
+    /// read-only replica mode.
+    pub primary_addr: Option<String>,
+    /// Inline shared-secret auth token. Prefer [`Self::auth_token_env`] for
+    /// anything beyond local testing (an inline token risks being checked
+    /// into a config file). See [`Self::resolve_token`] for precedence.
+    pub auth_token: Option<String>,
+    /// Name of an environment variable to read the shared-secret auth token
+    /// from at startup. Takes precedence over [`Self::auth_token`] when set.
+    pub auth_token_env: Option<String>,
+    /// Replica applier poll interval, in milliseconds (how often to ask the
+    /// primary for new entries when caught up).
+    pub poll_interval_ms: u64,
+    /// Maximum WAL entries requested per replica `fetch_entries` call.
+    pub batch_max_entries: usize,
+}
+
+impl Default for ReplicationConfig {
+    fn default() -> Self {
+        Self {
+            listen_addr: None,
+            primary_addr: None,
+            auth_token: None,
+            auth_token_env: None,
+            poll_interval_ms: 50,
+            batch_max_entries: 500,
+        }
+    }
+}
+
+impl ReplicationConfig {
+    /// Fluent builder over [`ReplicationConfig::default`].
+    pub fn builder() -> ReplicationConfigBuilder {
+        ReplicationConfigBuilder::new()
+    }
+
+    /// Resolve the shared-secret auth token to use when starting a
+    /// [`crate::storage::replication::ReplicationServer`] or
+    /// [`crate::storage::replication::TcpSource`].
+    ///
+    /// Precedence: [`Self::auth_token_env`] (an environment variable name)
+    /// wins over the inline [`Self::auth_token`] when both are set. This
+    /// makes `auth_token_env` the preferred production path -- the token
+    /// itself never has to touch a config file -- while `auth_token` remains
+    /// available for local development/tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidValue`] if `auth_token_env` names a
+    /// variable that is unset or empty, or if neither field resolves to a
+    /// nonempty token. Callers are expected to invoke this only when at
+    /// least one of `listen_addr`/`primary_addr` is set (an operator turning
+    /// on replication without configuring a token is a startup-time
+    /// misconfiguration, not a silent anonymous-access fallback).
+    pub fn resolve_token(&self) -> std::result::Result<String, ConfigError> {
+        if let Some(var) = &self.auth_token_env {
+            return match std::env::var(var) {
+                Ok(v) if !v.is_empty() => Ok(v),
+                Ok(_) => Err(ConfigError::InvalidValue(format!(
+                    "replication.auth_token_env names environment variable '{var}', but it is \
+                     set to an empty string"
+                ))),
+                Err(_) => Err(ConfigError::InvalidValue(format!(
+                    "replication.auth_token_env names environment variable '{var}', but it is \
+                     not set"
+                ))),
+            };
+        }
+        match &self.auth_token {
+            Some(token) if !token.is_empty() => Ok(token.clone()),
+            _ => Err(ConfigError::InvalidValue(
+                "replication requires auth_token or auth_token_env to be set whenever \
+                 listen_addr or primary_addr is configured"
+                    .to_string(),
+            )),
+        }
+    }
+}
+
+/// Builder for [`ReplicationConfig`].
+#[must_use = "builders do nothing unless you call build()"]
+#[derive(Debug, Clone)]
+pub struct ReplicationConfigBuilder {
+    config: ReplicationConfig,
+}
+
+impl ReplicationConfigBuilder {
+    /// Create a new builder with default (fully disabled) values.
+    pub fn new() -> Self {
+        Self {
+            config: ReplicationConfig::default(),
+        }
+    }
+
+    /// Start a [`crate::storage::replication::ReplicationServer`] on this
+    /// address.
+    pub fn listen_addr(mut self, addr: impl Into<String>) -> Self {
+        self.config.listen_addr = Some(addr.into());
+        self
+    }
+
+    /// Stream replication from a primary at this address.
+    pub fn primary_addr(mut self, addr: impl Into<String>) -> Self {
+        self.config.primary_addr = Some(addr.into());
+        self
+    }
+
+    /// Set the inline shared-secret auth token (see [`ReplicationConfig::auth_token`]).
+    pub fn auth_token(mut self, token: impl Into<String>) -> Self {
+        self.config.auth_token = Some(token.into());
+        self
+    }
+
+    /// Name an environment variable to resolve the auth token from at
+    /// startup (see [`ReplicationConfig::auth_token_env`]).
+    pub fn auth_token_env(mut self, var: impl Into<String>) -> Self {
+        self.config.auth_token_env = Some(var.into());
+        self
+    }
+
+    /// Set the replica applier poll interval, in milliseconds.
+    pub fn poll_interval_ms(mut self, ms: u64) -> Self {
+        self.config.poll_interval_ms = ms;
+        self
+    }
+
+    /// Set the maximum WAL entries requested per replica fetch call.
+    pub fn batch_max_entries(mut self, n: usize) -> Self {
+        self.config.batch_max_entries = n;
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> ReplicationConfig {
+        self.config
+    }
+}
+
+impl Default for ReplicationConfigBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Unified configuration for AletheiaDB.
 ///
 /// This consolidates all configuration settings for the database,
@@ -829,6 +1046,33 @@ pub struct AletheiaDBConfig {
     /// default, so a database keeps byte-identical behavior and on-disk layout
     /// unless the chain is explicitly enabled.
     pub chain: crate::provenance_chain::ChainConfig,
+    /// Push-changefeed caps, including the per-principal subscription quota
+    /// (Issue #3678). Governs the global subscription cap, per-subscription
+    /// buffer, and the default + per-principal-override fairness limits enforced
+    /// by every changefeed surface (MCP `await_changes`, HTTP `/changes/await`
+    /// and `/changes/stream`).
+    pub changefeed: crate::core::changefeed_subscription::ChangefeedConfig,
+    /// Engine-lane per-query resource limits (Issue #3368): server default +
+    /// operator ceiling for wall-clock timeout, result-row cap, and memory
+    /// budget, enforced by [`crate::query::executor::QueryExecutor`] and
+    /// overridable per-call via [`crate::query::QueryBuilder::with_timeout`]/
+    /// [`with_max_rows`](crate::query::QueryBuilder::with_max_rows)/
+    /// [`with_memory_budget`](crate::query::QueryBuilder::with_memory_budget).
+    /// Defaults to [`EngineQueryLimitsConfig::default`](crate::query::limits::EngineQueryLimitsConfig::default)
+    /// (enabled, generous ceilings) so existing behavior is unaffected.
+    pub query_limits: crate::query::limits::EngineQueryLimitsConfig,
+    /// Asynchronous replication (TCP transport) configuration (Issue #3355,
+    /// Slice C). Disabled by default (both `listen_addr` and `primary_addr`
+    /// unset), so a database's behavior is unchanged unless an operator opts
+    /// in. See [`ReplicationConfig`] for what each field wires up.
+    pub replication: ReplicationConfig,
+    /// Background adjacency-index maintenance (Issue #3810). **Enabled by
+    /// default**: a shared, process-wide worker compacts the delta buffer into
+    /// the frozen CSR once writes go quiet, which is the only way reads reach
+    /// the ADR-0026 frozen fast path. Disable with
+    /// [`AdjacencyMaintenanceConfig::disabled`] to keep compaction strictly
+    /// explicit (`AletheiaDB::compact_adjacency`).
+    pub adjacency: crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig,
 }
 
 /// Builder for unified database configuration.
@@ -872,6 +1116,15 @@ impl AletheiaDBConfigBuilder {
         self
     }
 
+    /// Set the background adjacency-maintenance policy (Issue #3810).
+    pub fn adjacency(
+        mut self,
+        adjacency_config: crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig,
+    ) -> Self {
+        self.config.adjacency = adjacency_config;
+        self
+    }
+
     /// Set encryption at rest configuration.
     pub fn encryption(
         mut self,
@@ -888,6 +1141,32 @@ impl AletheiaDBConfigBuilder {
     /// chain over its recorded history.
     pub fn chain(mut self, chain_config: crate::provenance_chain::ChainConfig) -> Self {
         self.config.chain = chain_config;
+        self
+    }
+
+    /// Set the push-changefeed configuration, including the per-principal
+    /// subscription quota (Issue #3678).
+    pub fn changefeed(
+        mut self,
+        changefeed_config: crate::core::changefeed_subscription::ChangefeedConfig,
+    ) -> Self {
+        self.config.changefeed = changefeed_config;
+        self
+    }
+
+    /// Set engine-lane per-query resource limits (Issue #3368).
+    pub fn query_limits(
+        mut self,
+        query_limits_config: crate::query::limits::EngineQueryLimitsConfig,
+    ) -> Self {
+        self.config.query_limits = query_limits_config;
+        self
+    }
+
+    /// Set the asynchronous replication (TCP transport) configuration
+    /// (Issue #3355, Slice C).
+    pub fn replication(mut self, replication_config: ReplicationConfig) -> Self {
+        self.config.replication = replication_config;
         self
     }
 
@@ -1338,6 +1617,50 @@ mod tests {
 
     #[test]
     #[cfg(feature = "config-toml")]
+    fn test_toml_adjacency_section_round_trips() {
+        use crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig;
+
+        // Background adjacency maintenance (Issue #3810) must be tunable from
+        // an on-disk config, and -- because it is ON by default -- an existing
+        // config with no `[adjacency]` section must keep the default policy.
+        let toml_str = r#"
+[adjacency]
+enabled = false
+tick_interval_ms = 25
+quiet_ticks = 3
+duty_cycle_percent = 50
+quiescent_amortization = 0
+        "#;
+
+        let config = AletheiaDBConfig::from_toml_str(toml_str).unwrap();
+        assert!(!config.adjacency.enabled);
+        assert_eq!(config.adjacency.tick_interval_ms, 25);
+        assert_eq!(config.adjacency.quiet_ticks, 3);
+        assert_eq!(config.adjacency.duty_cycle_percent, 50);
+        assert_eq!(config.adjacency.quiescent_amortization, 0);
+        // Unspecified keys keep their defaults.
+        assert_eq!(
+            config.adjacency.min_compaction_interval_ms,
+            AdjacencyMaintenanceConfig::default().min_compaction_interval_ms
+        );
+
+        let rendered = config.to_toml_string().unwrap();
+        assert!(
+            rendered.contains("[adjacency]"),
+            "rendered TOML: {rendered}"
+        );
+        let reparsed = AletheiaDBConfig::from_toml_str(&rendered).unwrap();
+        assert_eq!(reparsed.adjacency, config.adjacency);
+
+        // Omitting the section leaves maintenance enabled: without it the
+        // frozen-CSR read fast path is unreachable (Issue #3810).
+        let bare = AletheiaDBConfig::from_toml_str("[wal]\nnum_stripes = 4\n").unwrap();
+        assert_eq!(bare.adjacency, AdjacencyMaintenanceConfig::default());
+        assert!(bare.adjacency.enabled);
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
     fn test_toml_chain_section_round_trips() {
         // The opt-in provenance hash chain (Issue #3351) must round-trip
         // through TOML via the `[chain]` section so `aletheia verify` can be
@@ -1481,6 +1804,36 @@ max_layer = 32
 
         // Should be equal
         assert_eq!(original, deserialized);
+    }
+
+    /// Issue #3798 review round: the two WAL stall bounds are documented with
+    /// a `0 = restore the legacy unbounded behavior` escape hatch, which is
+    /// only real if an operator can actually set them from a config file.
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn test_toml_carries_the_wal_stall_bounds() {
+        let toml_str = r#"
+[wal]
+max_append_block_ms = 0
+acquire_timeout_ms = 250
+        "#;
+
+        let config = AletheiaDBConfig::from_toml_str(toml_str).unwrap();
+        assert_eq!(
+            config.wal.max_append_block_ms, 0,
+            "`0` must survive as the documented unbounded escape hatch"
+        );
+        assert_eq!(config.wal.acquire_timeout_ms, 250);
+
+        // Omitting them keeps the shipped defaults...
+        let defaults = AletheiaDBConfig::from_toml_str("[wal]\nnum_stripes = 16\n").unwrap();
+        assert_eq!(defaults.wal.max_append_block_ms, 30_000);
+        assert_eq!(defaults.wal.acquire_timeout_ms, 120_000);
+
+        // ...and both survive a serialize/parse round trip.
+        let rendered = config.to_toml_string().unwrap();
+        let reparsed = AletheiaDBConfig::from_toml_str(&rendered).unwrap();
+        assert_eq!(reparsed.wal, config.wal);
     }
 
     #[test]
@@ -1640,6 +1993,54 @@ wal_dir = "/custom/path/to/wal"
         );
         let c = AletheiaDBConfig::from_toml_str("").unwrap();
         assert!(!c.persistence.enabled);
+    }
+
+    /// Configurable interner cap: the default `max_interned_strings` is 10M and
+    /// matches the interner's own default constant (they move in lockstep).
+    #[test]
+    fn persistence_default_max_interned_strings_is_ten_million() {
+        use crate::storage::index_persistence::PersistenceConfig;
+        assert_eq!(
+            PersistenceConfig::default().max_interned_strings,
+            10_000_000
+        );
+        assert_eq!(PersistenceConfig::DEFAULT_MAX_INTERNED_STRINGS, 10_000_000);
+        assert_eq!(
+            PersistenceConfig::DEFAULT_MAX_INTERNED_STRINGS,
+            crate::core::interning::DEFAULT_MAX_INTERNED_STRINGS,
+        );
+    }
+
+    /// Configurable interner cap: `max_interned_strings` round-trips through the
+    /// unified config builder.
+    #[test]
+    fn persistence_max_interned_strings_builder_round_trip() {
+        use crate::storage::index_persistence::PersistenceConfig;
+        let config = AletheiaDBConfig::builder()
+            .persistence(PersistenceConfig {
+                enabled: true,
+                max_interned_strings: 1234,
+                ..Default::default()
+            })
+            .build();
+        assert_eq!(config.persistence.max_interned_strings, 1234);
+    }
+
+    /// Configurable interner cap: `max_interned_strings` round-trips through
+    /// TOML, and a partial `[persistence]` table that omits it inherits the 10M
+    /// default (field-level serde default).
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn persistence_max_interned_strings_toml_round_trip() {
+        let c = AletheiaDBConfig::from_toml_str(
+            "[persistence]\nenabled = true\nmax_interned_strings = 1234\n",
+        )
+        .unwrap();
+        assert_eq!(c.persistence.max_interned_strings, 1234);
+
+        // Omitted field → 10M default (not 0).
+        let c = AletheiaDBConfig::from_toml_str("[persistence]\ndata_dir = \"custom\"\n").unwrap();
+        assert_eq!(c.persistence.max_interned_strings, 10_000_000);
     }
 
     /// The canonical durable entry point must keep persistence enabled with

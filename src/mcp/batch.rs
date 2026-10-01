@@ -256,6 +256,43 @@ pub enum BatchOperation {
         )]
         valid_time: Option<String>,
     },
+    /// Compare-and-set a committed node's properties, conditional on its head
+    /// still being `expected_version` (DBOS Phase 3e). Full-replace semantics
+    /// (like the single-op `compare_and_set_node`): the provided map becomes the
+    /// node's entire property state. A stale version aborts the WHOLE batch
+    /// (all-or-nothing) with `FAILED_PRECONDITION` and zero writes — letting a
+    /// step-record batch be atomically fenced on the owning run's version.
+    CompareAndSetNode {
+        /// The committed node id to compare-and-set (local `$refs` are rejected
+        /// in v1, like update/delete).
+        #[schemars(
+            description = "The committed node id to compare-and-set. A node created in the same \
+                           batch ('$ref') is not supported in v1."
+        )]
+        node_id: BatchNodeRef,
+        /// The version the node's committed head must still be for the write to
+        /// apply.
+        #[schemars(
+            description = "The version id the node's committed head must still equal; if it has \
+                           advanced (e.g. a successor stole the run), the whole batch aborts."
+        )]
+        expected_version: u64,
+        /// Full-replacement properties (NOT a PATCH merge).
+        #[schemars(
+            description = "Full replacement property map (not merged): the node's entire property \
+                           state is replaced with these key-value pairs."
+        )]
+        properties: Option<HashMap<String, serde_json::Value>>,
+        /// Optional valid time (ISO 8601 or microseconds since epoch).
+        #[schemars(
+            description = "Optional valid time: when this update became true in the real world \
+                           (ISO 8601 / RFC 3339 or integer microseconds since epoch)"
+        )]
+        valid_time: Option<String>,
+        /// Optional write-time provenance bundle for this version.
+        #[schemars(description = "Optional write-time provenance bundle for this version")]
+        provenance: Option<ProvenanceRequest>,
+    },
 }
 
 // ============================================================================
@@ -313,6 +350,13 @@ enum PlannedOp {
     DeleteEdge {
         edge_id: EdgeId,
         valid_from: Option<Timestamp>,
+    },
+    CompareAndSetNode {
+        node_id: NodeId,
+        expected_version: crate::core::id::VersionId,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+        provenance: Option<Provenance>,
     },
 }
 
@@ -430,7 +474,7 @@ impl AletheiaMcpServer {
 
         // Phase 1: static pre-validation. No database access; a rejected
         // batch never opens a transaction and never burns entity IDs.
-        let planned = match self.prevalidate_batch(&req.operations) {
+        let planned = match self.prevalidate_batch(req.operations) {
             Ok(p) => p,
             Err(result) => return *result,
         };
@@ -480,7 +524,7 @@ impl AletheiaMcpServer {
     /// result_large_err).
     fn prevalidate_batch(
         &self,
-        raw_ops: &[serde_json::Value],
+        raw_ops: Vec<serde_json::Value>,
     ) -> Result<Vec<PlannedOp>, Box<CallToolResult>> {
         // Batch cap first (Issue #3226 convention: echo the limit).
         let limit = self.max_batch_operations;
@@ -507,9 +551,12 @@ impl AletheiaMcpServer {
 
         // Parse each op individually so a malformed element is rejected with
         // its precise index (a wholesale Vec deserialization would lose it).
-        let mut ops = Vec::with_capacity(raw_ops.len());
-        for (index, raw) in raw_ops.iter().enumerate() {
-            match serde_json::from_value::<BatchOperation>(raw.clone()) {
+        // `raw_ops` is owned and only ever consumed here, so each element is
+        // moved into `from_value` directly instead of being cloned first.
+        let op_count = raw_ops.len();
+        let mut ops = Vec::with_capacity(op_count);
+        for (index, raw) in raw_ops.into_iter().enumerate() {
+            match serde_json::from_value::<BatchOperation>(raw) {
                 Ok(op) => ops.push(op),
                 Err(e) => {
                     return Err(self.batch_invalid(
@@ -686,6 +733,37 @@ impl AletheiaMcpServer {
                         valid_from: self.batch_valid_time(index, valid_time)?,
                     }
                 }
+                BatchOperation::CompareAndSetNode {
+                    node_id,
+                    expected_version,
+                    properties,
+                    valid_time,
+                    provenance,
+                } => {
+                    // Committed node id only (local refs rejected), one write
+                    // per committed entity per batch — same as update/delete.
+                    let node_id = self.batch_committed_node(
+                        index,
+                        node_id,
+                        "compare-and-set",
+                        &mut written_nodes,
+                    )?;
+                    let expected_version = crate::core::id::VersionId::new(*expected_version)
+                        .map_err(|e| {
+                            self.batch_invalid(
+                                index,
+                                format!("Operation {index}: invalid expected_version: {e}"),
+                                serde_json::Map::new(),
+                            )
+                        })?;
+                    PlannedOp::CompareAndSetNode {
+                        node_id,
+                        expected_version,
+                        properties: self.batch_properties(index, properties.as_ref())?,
+                        valid_from: self.batch_valid_time(index, valid_time)?,
+                        provenance: self.batch_provenance(index, provenance.clone())?,
+                    }
+                }
             };
             planned.push(planned_op);
         }
@@ -792,11 +870,34 @@ impl AletheiaMcpServer {
         match properties {
             None => Ok(PropertyMap::default()),
             Some(p) => self.json_to_property_map(p).map_err(|e| {
-                self.batch_invalid(
-                    index,
-                    format!("Operation {index}: invalid properties: {e}"),
-                    serde_json::Map::new(),
-                )
+                // A property-KEY interner-cap breach is a typed
+                // `StorageError::CapacityExceeded` (configurable interner cap,
+                // Issue #3716) that must render the SAME structured
+                // `FAILED_PRECONDITION` envelope the single-op create_node/HTTP
+                // surfaces emit — naming `persistence.max_interned_strings` with
+                // `{resource, current, limit}` details — not the generic
+                // `INVALID_ARGUMENT` this path previously flattened it to (Issue
+                // #3723). It is routed through `batch_db_error` (which reuses the
+                // same `McpError::from_db_error` mapping create_node uses) so the
+                // envelope is identical, plus the batch's `failed_op_index`.
+                //
+                // This runs in Phase 1 static pre-validation, before any
+                // transaction opens, so a breach leaves ZERO writes (all-or-
+                // nothing is trivially preserved). Every other property error
+                // (bad value, recursion depth) stays a caller-fault
+                // `INVALID_ARGUMENT`, preserving prior behavior.
+                if matches!(
+                    &e,
+                    Error::Storage(crate::core::error::StorageError::CapacityExceeded { .. })
+                ) {
+                    Box::new(self.batch_db_error(Some(index), &e))
+                } else {
+                    self.batch_invalid(
+                        index,
+                        format!("Operation {index}: invalid properties: {e}"),
+                        serde_json::Map::new(),
+                    )
+                }
             }),
         }
     }
@@ -1286,6 +1387,43 @@ impl AletheiaMcpServer {
                         "edge_id": edge_id.as_u64()
                     }));
                 }
+                PlannedOp::CompareAndSetNode {
+                    node_id,
+                    expected_version,
+                    properties,
+                    valid_from,
+                    provenance,
+                } => {
+                    // A CAS against a node CREATED earlier in this batch is a
+                    // guessed-id write against an uncommitted entity — the
+                    // documented v1-scope rejection (mirrors update/delete).
+                    if let Some(&created_at) = created_node_ids.get(&node_id.as_u64()) {
+                        return Err(BatchAbort::BatchCreatedRefWrite {
+                            index,
+                            entity: "node",
+                            id: node_id.as_u64(),
+                            created_at_index: created_at,
+                            verb: "compare-and-set",
+                        });
+                    }
+                    let options = write_options(*valid_from, provenance.clone());
+                    // A CasMismatch aborts the whole batch (all-or-nothing) via
+                    // op_err -> BatchAbort::Op -> FAILED_PRECONDITION.
+                    let version_id = tx
+                        .compare_and_set_node_with_options(
+                            *node_id,
+                            *expected_version,
+                            properties.clone(),
+                            options,
+                        )
+                        .map_err(op_err(index))?;
+                    results.push(json!({
+                        "op": "compare_and_set_node",
+                        "index": index,
+                        "node_id": node_id.as_u64(),
+                        "version_id": version_id.as_u64()
+                    }));
+                }
             }
         }
 
@@ -1523,8 +1661,12 @@ impl AletheiaMcpServer {
     /// `failed_op_index`. Mirrors `db_error`'s unique-violation enrichment
     /// (structured details plus legacy top-level fields).
     fn batch_db_error(&self, index: Option<usize>, e: &Error) -> CallToolResult {
-        let mut details = serde_json::Map::new();
-        details.insert("failed_op_index".to_string(), json!(index));
+        // `with_detail` MERGES (rather than replaces), so any structured details
+        // the classifier already attached survive — e.g. a configurable
+        // interner-cap `CapacityExceeded` keeps its `{resource, current, limit}`
+        // (Issue #3723), byte-identical to the create_node/HTTP envelope, with
+        // the batch's `failed_op_index` added alongside.
+        let mut err = McpError::from_db_error(e).with_detail("failed_op_index", json!(index));
         let mut top_level = serde_json::Map::new();
 
         if let Some(crate::core::error::ConstraintError::UniqueViolation {
@@ -1534,13 +1676,11 @@ impl AletheiaMcpServer {
             existing_node_id,
         }) = e.as_constraint()
         {
-            details.insert("label".to_string(), json!(label));
-            details.insert("property".to_string(), json!(property));
-            details.insert("value".to_string(), json!(value));
-            details.insert(
-                "existing_node_id".to_string(),
-                json!(existing_node_id.as_u64()),
-            );
+            err = err
+                .with_detail("label", json!(label))
+                .with_detail("property", json!(property))
+                .with_detail("value", json!(value))
+                .with_detail("existing_node_id", json!(existing_node_id.as_u64()));
             top_level.insert("success".to_string(), json!(false));
             top_level.insert("constraint_violation".to_string(), json!(true));
             top_level.insert("label".to_string(), json!(label));
@@ -1552,10 +1692,7 @@ impl AletheiaMcpServer {
             );
         }
 
-        Self::error_result_with_top_level(
-            McpError::from_db_error(e).details(serde_json::Value::Object(details)),
-            top_level,
-        )
+        Self::error_result_with_top_level(err, top_level)
     }
 }
 

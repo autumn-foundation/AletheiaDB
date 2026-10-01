@@ -154,12 +154,15 @@ async fn row_cap_reject_returns_413_with_details() {
         status, 413,
         "reject policy must error, not truncate: {body}"
     );
-    assert_eq!(body["success"], false);
-    assert_eq!(body["code"], "RESOURCE_EXHAUSTED");
-    assert_eq!(body["retriable"], false);
-    assert_eq!(body["details"]["dimension"], "result_rows");
-    assert_eq!(body["details"]["limit"], 2);
-    assert_eq!(body["details"]["consumed"], 5);
+    assert!(
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "RESOURCE_EXHAUSTED");
+    assert_eq!(body["error"]["retriable"], false);
+    assert_eq!(body["error"]["details"]["dimension"], "result_rows");
+    assert_eq!(body["error"]["details"]["limit"], 2);
+    assert_eq!(body["error"]["details"]["consumed"], 5);
 }
 
 // ---------------------------------------------------------------------------
@@ -184,13 +187,16 @@ async fn byte_cap_exceeded_returns_413_with_details() {
 
     let (status, body) = post_query(&client, &find_people()).await;
     assert_eq!(status, 413, "oversized response must be rejected: {body}");
-    assert_eq!(body["success"], false);
-    assert_eq!(body["code"], "RESOURCE_EXHAUSTED");
-    assert_eq!(body["retriable"], false);
-    assert_eq!(body["details"]["dimension"], "result_bytes");
-    assert_eq!(body["details"]["limit"], 16);
     assert!(
-        body["details"]["consumed"].as_u64().unwrap() > 16,
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "RESOURCE_EXHAUSTED");
+    assert_eq!(body["error"]["retriable"], false);
+    assert_eq!(body["error"]["details"]["dimension"], "result_bytes");
+    assert_eq!(body["error"]["details"]["limit"], 16);
+    assert!(
+        body["error"]["details"]["consumed"].as_u64().unwrap() > 16,
         "consumed must report the actual serialized size"
     );
 }
@@ -262,12 +268,15 @@ async fn override_above_ceiling_returns_422() {
         status, 422,
         "over-ceiling override must be rejected: {body}"
     );
-    assert_eq!(body["success"], false);
-    assert_eq!(body["code"], "INVALID_ARGUMENT");
-    assert_eq!(body["retriable"], false);
-    assert_eq!(body["details"]["dimension"], "result_rows");
-    assert_eq!(body["details"]["requested"], 1000);
-    assert_eq!(body["details"]["ceiling"], 100);
+    assert!(
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(body["error"]["retriable"], false);
+    assert_eq!(body["error"]["details"]["dimension"], "result_rows");
+    assert_eq!(body["error"]["details"]["requested"], 1000);
+    assert_eq!(body["error"]["details"]["ceiling"], 100);
 }
 
 /// A timeout override above the ceiling is likewise rejected 422 (dimension =
@@ -286,8 +295,8 @@ async fn timeout_override_above_ceiling_returns_422() {
     )
     .await;
     assert_eq!(status, 422);
-    assert_eq!(body["code"], "INVALID_ARGUMENT");
-    assert_eq!(body["details"]["dimension"], "wall_clock_timeout");
+    assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(body["error"]["details"]["dimension"], "wall_clock_timeout");
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +390,7 @@ async fn authenticated_request_gets_same_limit_behavior() {
         status, 422,
         "authenticated over-ceiling override → 422: {body}"
     );
-    assert_eq!(body["code"], "INVALID_ARGUMENT");
+    assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
 }
 
 /// An unauthenticated request that ALSO breaches a limit is rejected 401 —
@@ -413,7 +422,7 @@ async fn unauthenticated_over_limit_request_is_401_not_422() {
     )
     .await;
     assert_eq!(status, 401, "auth must reject before limit logic: {body}");
-    assert_eq!(body["code"], "UNAUTHENTICATED");
+    assert_eq!(body["error"]["code"], "UNAUTHENTICATED");
 }
 
 // ---------------------------------------------------------------------------
@@ -671,11 +680,11 @@ async fn concurrent_requests_with_distinct_overrides_are_isolated() {
 
     // B: byte-cap 413.
     assert_eq!(b.0, 413, "B: {}", b.1);
-    assert_eq!(b.1["details"]["dimension"], "result_bytes");
+    assert_eq!(b.1["error"]["details"]["dimension"], "result_bytes");
 
     // C: over-ceiling 422.
     assert_eq!(c.0, 422, "C: {}", c.1);
-    assert_eq!(c.1["details"]["dimension"], "result_rows");
+    assert_eq!(c.1["error"]["details"]["dimension"], "result_rows");
 
     // D: full, untruncated.
     assert_eq!(d.0, 200, "D: {}", d.1);
@@ -721,5 +730,5 @@ async fn authorized_check_precedes_limit_validation() {
         status, 403,
         "role denial must precede limit validation: {body}"
     );
-    assert_eq!(body["code"], "PERMISSION_DENIED");
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
 }

@@ -274,8 +274,11 @@ async fn oversize_mcp_body_is_413_envelope() {
     let status = resp.status.as_u16();
     let body: Value = serde_json::from_str(&resp.text()).unwrap_or(Value::Null);
     assert_eq!(status, 413, "oversize body → 413: {body}");
-    assert_eq!(body["code"], "RESOURCE_EXHAUSTED");
-    assert_eq!(body["success"], json!(false));
+    assert_eq!(body["error"]["code"], "RESOURCE_EXHAUSTED");
+    assert!(
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -307,7 +310,7 @@ async fn batch_with_tools_call_is_failclosed() {
         status, 400,
         "batched tools/call is refused fail-closed: {text}"
     );
-    assert_eq!(body["code"], "INVALID_ARGUMENT");
+    assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
     assert!(
         !text.contains("\"name\":\"Alice\"") && !text.contains("Alice"),
         "the tool must NOT have executed (no node data leaked): {text}"
@@ -338,7 +341,7 @@ async fn tools_call_missing_name_is_failclosed() {
         status, 400,
         "malformed tools/call → fail-closed 400: {body}"
     );
-    assert_eq!(body["code"], "INVALID_ARGUMENT");
+    assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -389,7 +392,7 @@ async fn x_api_key_metrics_read_tool_denied_403_with_details() {
     let status = resp.status.as_u16();
     let body: Value = serde_json::from_str(&resp.text()).unwrap_or(Value::Null);
     assert_eq!(status, 403, "metrics denied read over x-api-key: {body}");
-    assert_eq!(body["code"], "PERMISSION_DENIED");
-    assert_eq!(body["details"]["required_class"], "read");
-    assert_eq!(body["details"]["principal_role"], "metrics");
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
+    assert_eq!(body["error"]["details"]["required_class"], "read");
+    assert_eq!(body["error"]["details"]["principal_role"], "metrics");
 }

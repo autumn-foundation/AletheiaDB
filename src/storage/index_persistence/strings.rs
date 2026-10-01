@@ -286,20 +286,26 @@ pub fn save_string_interner_with_cipher(
 
 /// Save the global string interner, encrypting with the current generation of
 /// an [`IndexKeyring`](super::common::IndexKeyring) (Issue #488 key rotation).
+///
+/// Returns the exact number of strings written, so the manifest's
+/// `string_count` describes precisely what is on disk rather than a later,
+/// racy `GLOBAL_INTERNER.len()` sample (configurable interner cap fix).
 pub(crate) fn save_string_interner_with_keyring(
     path: &Path,
     keyring: Option<&super::common::IndexKeyring>,
-) -> Result<()> {
+) -> Result<u64> {
     let strings = GLOBAL_INTERNER.get_all_strings();
+    let string_count = strings.len() as u64;
 
     let data = StringInternerData {
         magic: INTERNER_MAGIC,
         version: MANIFEST_VERSION,
-        string_count: strings.len() as u64,
+        string_count,
         strings,
     };
 
-    super::common::save_encoded_maybe_encrypted_with_keyring(&data, path, keyring)
+    super::common::save_encoded_maybe_encrypted_with_keyring(&data, path, keyring)?;
+    Ok(string_count)
 }
 
 /// Load the string interner from disk and validate CRC32 checksum.
@@ -387,13 +393,19 @@ fn validate_string_interner(data: StringInternerData, path: &Path) -> Result<Str
         });
     }
 
-    // Validate string count to prevent DoS via memory exhaustion
-    if data.string_count > super::MAX_STRING_COUNT {
+    // Validate string count to prevent DoS via memory exhaustion.
+    //
+    // The effective limit honors the runtime cap configured at `open()` from
+    // `persistence.max_interned_strings` (set on GLOBAL_INTERNER before indexes
+    // load), floored by the generous `MAX_STRING_COUNT` backstop. This keeps the
+    // two caps in lockstep: a database that raised the runtime cap and interned
+    // past the old default reopens cleanly instead of being rejected here.
+    let effective_max = super::MAX_STRING_COUNT.max(GLOBAL_INTERNER.max_capacity() as u64);
+    if data.string_count > effective_max {
         return Err(IndexPersistenceError::SizeLimitExceeded {
             message: format!(
                 "String count {} exceeds maximum allowed count {}",
-                data.string_count,
-                super::MAX_STRING_COUNT
+                data.string_count, effective_max
             ),
         });
     }
@@ -462,14 +474,24 @@ fn validate_string_interner(data: StringInternerData, path: &Path) -> Result<Str
 ///
 /// # Errors
 ///
-/// Returns an error if a string cannot be interned (e.g. the live interner is
-/// at capacity).
+/// Currently infallible (returns `Ok`): persisted strings are re-admitted via
+/// `intern_unchecked`, which bypasses the runtime capacity cap, so a reopen
+/// under a cap lower than the persisted count loads cleanly instead of wedging.
+/// The `Result` return is retained for signature stability with the callers'
+/// `?` chains and to leave room for future validation.
 pub fn restore_string_interner(data: &StringInternerData) -> Result<InternerRemap> {
     let mut positions = Vec::with_capacity(data.strings.len());
     for s in &data.strings {
-        let interned_id = GLOBAL_INTERNER.intern(s).map_err(|e| {
-            IndexPersistenceError::Serialization(format!("Failed to intern string: {}", e))
-        })?;
+        // Re-admit persisted strings via `intern_unchecked`, bypassing the
+        // runtime capacity cap (configurable interner cap fix). These strings
+        // were already admitted once when they were written, so restoring
+        // known-good on-disk data must NEVER be blocked by a runtime cap that is
+        // lower than the persisted count — that would wedge the whole reopen with
+        // a confusing "Failed to intern string" mid-load. The load-validation cap
+        // (`validate_string_interner`) still bounds the persisted COUNT up front,
+        // so a genuinely oversized file is rejected before we reach here; NEW
+        // interns on the live write path remain capped as normal.
+        let interned_id = GLOBAL_INTERNER.intern_unchecked(s);
         // Record file_position (== `positions.len()`) -> live interner id. We do
         // NOT require live id == file position: the live interner may already
         // hold these strings (e.g. from WAL replay) at different ids. The remap
@@ -633,6 +655,98 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Size limit exceeded"));
         assert!(err.to_string().contains("String count"));
+    }
+
+    /// Regression (configurable interner cap, finding 5): the load validator's
+    /// effective cap is `max(MAX_STRING_COUNT, GLOBAL_INTERNER.max_capacity())`,
+    /// so a persisted interner whose COUNT exceeds the 10M `MAX_STRING_COUNT`
+    /// floor must be REJECTED at the default cap and LOAD only after the runtime
+    /// cap is raised above it. This DISCRIMINATES the `max(...)` change (the old
+    /// test used a 200K count, which is below the 10M floor and would pass on
+    /// trunk, proving nothing).
+    ///
+    /// It mutates the process-global interner cap, so it runs in a SUBPROCESS to
+    /// isolate the mutation from concurrent tests (mirrors the reopen test).
+    #[test]
+    fn string_count_above_floor_rejected_then_loads_under_raised_cap_via_subprocess() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let exe = std::env::current_exe().expect("failed to locate current test binary");
+        let mut child = Command::new(exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "storage::index_persistence::strings::tests::\
+                 string_count_above_floor_rejected_then_loads_under_raised_cap_helper",
+            ])
+            .spawn()
+            .expect("failed to spawn subprocess for load-cap discrimination test");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(status.success(), "load-cap discrimination helper failed");
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("load-cap discrimination helper did not complete");
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("failed while polling subprocess: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn string_count_above_floor_rejected_then_loads_under_raised_cap_helper() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("interner.idx");
+
+        // Header claims 15_000_000 strings — ABOVE the 10M MAX_STRING_COUNT floor.
+        // The body carries a single string; validation rejects on the COUNT header
+        // vs the effective cap, so the body size is irrelevant.
+        let over_floor = super::super::MAX_STRING_COUNT + 5_000_000; // 15M
+        assert!(over_floor > super::super::MAX_STRING_COUNT);
+        let data = StringInternerData {
+            magic: INTERNER_MAGIC,
+            version: MANIFEST_VERSION,
+            string_count: over_floor,
+            strings: vec!["loads_ok".to_string()],
+        };
+        let encoded = bitcode::encode(&data);
+        let mut hasher = Hasher::new();
+        hasher.update(&encoded);
+        let checksum = hasher.finalize();
+        let mut bytes = encoded;
+        bytes.extend_from_slice(&checksum.to_le_bytes());
+        fs::write(&path, bytes).unwrap();
+
+        // At the default 10M floor: the 15M count is REJECTED (proves the load cap
+        // is honored, not silently ignored).
+        GLOBAL_INTERNER.set_max_capacity(super::super::MAX_STRING_COUNT as usize);
+        let rejected = load_string_interner(&path);
+        assert!(
+            matches!(
+                rejected,
+                Err(IndexPersistenceError::SizeLimitExceeded { .. })
+            ),
+            "a count above the 10M floor must be rejected at the default cap, got: {rejected:?}"
+        );
+
+        // Raise the runtime cap ABOVE the persisted count: now it LOADS — proving
+        // `validate_string_interner` uses `max(floor, configured cap)`, not just
+        // the constant.
+        GLOBAL_INTERNER.set_max_capacity(over_floor as usize + 1);
+        let loaded =
+            load_string_interner(&path).expect("count within the raised cap must load cleanly");
+        assert_eq!(loaded.string_count, over_floor);
     }
 
     #[test]

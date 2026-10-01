@@ -26,6 +26,8 @@
 //! to the physical wall clock, bridging the gap between machines and human expectations.
 
 pub mod changefeed;
+pub mod changefeed_subscription;
+pub mod commit_clock;
 pub mod constraint;
 pub mod error;
 pub mod graph;
@@ -36,14 +38,20 @@ pub mod hlc;
 pub mod id;
 pub mod interning;
 pub mod lineage;
+pub mod namespace;
 pub mod observer;
 pub mod property;
 pub mod provenance;
 pub mod temporal;
+/// Multi-tenant isolation core model (Issue #3365).
+pub mod tenant;
 pub mod vector;
 
 // Re-export commonly used types for convenience
 pub use changefeed::{ChangeFeedPage, ChangeFeedQuery, ChangeRecord, ChangeType, EntityKind};
+pub use changefeed_subscription::{
+    ChangeFilter, ChangefeedBroadcaster, ChangefeedConfig, RecvError, Subscription,
+};
 pub use error::{Error, Result, StorageError, TemporalError};
 pub use graph::{Edge, Node, NodeHeader};
 pub use id::{EdgeId, EntityId, IdGenerator, NodeId, VersionId};
@@ -55,6 +63,7 @@ pub use lineage::{
     LineageClosure, LineageEntry, LineageError, LineageQueryOptions, LineageRecord, LineageRef,
     LineageStore,
 };
+pub use namespace::{NAMESPACE_KEY, Namespace, NamespaceError, NamespaceScope};
 pub use property::{PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue};
 pub use provenance::{
     Provenance, ProvenanceBuilder, ProvenanceError, ProvenanceFilter, ProvenanceFilterError,

@@ -58,6 +58,13 @@ pub struct SimilarityQuery {
     k: usize,
     label: Option<String>,
     timestamp: Option<Timestamp>,
+    /// Optional provenance-weighted fusion policy (Issue #3372). When set, pass
+    /// the query to
+    /// [`AletheiaDB::similarity_search_fused`](crate::AletheiaDB::similarity_search_fused);
+    /// the plain [`AletheiaDB::similarity_search`](crate::AletheiaDB::similarity_search)
+    /// ignores it, preserving byte-for-byte behavior (AC2).
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fusion: Option<crate::db::fusion::FusionPolicy>,
 }
 
 impl SimilarityQuery {
@@ -70,6 +77,8 @@ impl SimilarityQuery {
             k: DEFAULT_K,
             label: None,
             timestamp: None,
+            #[cfg(feature = "semantic-retrieval-fusion")]
+            fusion: None,
         }
     }
 
@@ -82,6 +91,8 @@ impl SimilarityQuery {
             k: DEFAULT_K,
             label: None,
             timestamp: None,
+            #[cfg(feature = "semantic-retrieval-fusion")]
+            fusion: None,
         }
     }
 
@@ -121,6 +132,25 @@ impl SimilarityQuery {
     /// The configured temporal point, if any.
     pub(crate) fn timestamp(&self) -> Option<Timestamp> {
         self.timestamp
+    }
+
+    /// Attach a provenance-weighted [`FusionPolicy`](crate::db::fusion::FusionPolicy)
+    /// (Issue #3372).
+    ///
+    /// The policy is honored only by
+    /// [`AletheiaDB::similarity_search_fused`](crate::AletheiaDB::similarity_search_fused);
+    /// [`AletheiaDB::similarity_search`](crate::AletheiaDB::similarity_search)
+    /// ignores it, so setting it never changes pure-similarity results (AC2).
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    pub fn fusion(mut self, policy: crate::db::fusion::FusionPolicy) -> Self {
+        self.fusion = Some(policy);
+        self
+    }
+
+    /// The configured fusion policy, if any.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    pub(crate) fn fusion_policy(&self) -> Option<&crate::db::fusion::FusionPolicy> {
+        self.fusion.as_ref()
     }
 }
 

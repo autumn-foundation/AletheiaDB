@@ -277,6 +277,6 @@ match cosine_similarity(target_embedding, embedding) {
 - [ADR-0019: Hybrid Query Planner](./0019-hybrid-query-planner.md) - Query planning architecture
 - [ADR-0011: Vector Search Integration](./0011-vector-search-integration.md) - HNSW index design
 - [ADR-0018: Temporal Vector Integration](./0018-temporal-vector-historical-integration.md) - Snapshot architecture
-- [Issue #85](https://github.com/madmax983/AletheiaDB/issues/85) - VS-072 Phase 4 documentation
+- [Issue #85](https://github.com/autumn-foundation/AletheiaDB/issues/85) - VS-072 Phase 4 documentation
 - [Volcano Query Processing Paper](https://paperhub.s3.amazonaws.com/dace52a42c07f7f8348b08dc2b186061.pdf) - Pull-based execution model
 - [benches/hybrid_query.rs](../../benches/hybrid_query.rs) - Performance benchmarks

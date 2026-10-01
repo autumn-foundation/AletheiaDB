@@ -207,11 +207,69 @@ pub enum QueryOp {
         aggregates: Vec<AggregateSpec>,
     },
 
+    /// Temporal aggregation window (Issue #3363).
+    ///
+    /// A terminal operation that consumes the upstream matched-entity stream,
+    /// buckets each entity's **valid-time** history into fixed tumbling windows
+    /// over `[range_start, range_end)`, and emits one output row per window
+    /// carrying the window's `window_start`/`window_end` (RFC 3339 columns)
+    /// followed by each per-window aggregate. Reads history at the belief
+    /// recorded as of `as_of_system_time` (the transaction-time dimension).
+    TemporalWindowAggregate(TemporalWindowSpec),
+
+    /// Temporal join / align (Issue #3379).
+    ///
+    /// A terminal operation that consumes the upstream matched-entity stream and
+    /// aligns the bound participants at matching **valid-time** coordinates over
+    /// `[range_start, range_end)`, in either event-aligned or interval-overlap
+    /// mode, emitting one computed-column row per alignment coordinate. Reads
+    /// history at the belief recorded as of `as_of_system_time`.
+    TemporalAlign(TemporalAlignSpec),
+
     /// Collect unique values
     Distinct,
 
     /// Project specific properties
     Project(Vec<String>),
+
+    /// Project one or more provenance accessors (`RETURN source(x)`,
+    /// `RETURN n, confidence(n) AS conf`, Issue #3354) as output columns.
+    ///
+    /// This op runs **last** in the pipeline (after any Sort/Skip/Limit) so it
+    /// never interferes with entity-based ordering or pagination. For each input
+    /// row it resolves the row entity's write-time provenance (at the query's
+    /// bi-temporal coordinate, exactly as the `WHERE` provenance leaves do) and
+    /// attaches one column per projection. When the `RETURN` also names a bare
+    /// entity variable, the row is emitted through the bindings+columns shape so
+    /// the entity survives alongside the projected columns (mirroring the
+    /// multi-variable / aggregation row shape); otherwise a pure columns row is
+    /// produced.
+    ProjectProvenance(ProvenanceProjection),
+}
+
+/// A single provenance accessor projected as an output column
+/// (`source(x) AS alias`, Issue #3354).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenanceProjectionItem {
+    /// The output column name (the alias if one was given, else the accessor
+    /// rendered as `"<accessor>(<var>)"`).
+    pub output_name: String,
+    /// Which provenance field to resolve.
+    pub field: ProvenanceField,
+}
+
+/// The plan for [`QueryOp::ProjectProvenance`]: the bare-entity binding to
+/// preserve (if any) plus the ordered provenance columns to project
+/// (Issue #3354).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenanceProjection {
+    /// The variable name of a bare entity also returned (`RETURN n, source(n)`),
+    /// preserved via the bindings channel so it stays observable. `None` when
+    /// only accessors are projected (`RETURN source(n)`), yielding a pure
+    /// columns row.
+    pub entity_binding: Option<String>,
+    /// The provenance columns to project, in `RETURN` order.
+    pub items: Vec<ProvenanceProjectionItem>,
 }
 
 /// A comparison operator for a [`ScoreThreshold`].
@@ -253,6 +311,119 @@ impl ScoreThreshold {
             ScoreComparison::Le => score <= self.value,
         }
     }
+}
+
+/// The fully-resolved plan for a [`QueryOp::TemporalWindowAggregate`]
+/// (Issue #3363). Produced by the converter after validating the raw AST window
+/// clause (unit word, aggregate functions, timestamp boundaries).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemporalWindowSpec {
+    /// The window granularity (count + unit).
+    pub granularity: crate::query::temporal_window::WindowGranularity,
+    /// Inclusive start of the valid-time range (microseconds since epoch).
+    pub range_start_micros: i64,
+    /// Exclusive end of the valid-time range (microseconds since epoch).
+    pub range_end_micros: i64,
+    /// Transaction-time coordinate the history is read as-of.
+    pub as_of_system_time: Timestamp,
+    /// The per-window aggregates to compute, in `RETURN` order.
+    pub aggregates: Vec<WindowAggregateSpec>,
+}
+
+/// A single resolved window aggregate (Issue #3363).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowAggregateSpec {
+    /// The aggregate function.
+    pub func: WindowAggFunc,
+    /// The aggregate argument.
+    pub arg: WindowAggArg,
+    /// The output column name (alias if given, else a rendered default).
+    pub output_name: String,
+}
+
+/// A temporal-window aggregate function (Issue #3363).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowAggFunc {
+    /// Count of samples/entities present in the window.
+    Count,
+    /// Sum of numeric samples at window start.
+    Sum,
+    /// Mean of numeric samples at window start.
+    Avg,
+    /// Minimum numeric sample at window start.
+    Min,
+    /// Maximum numeric sample at window start.
+    Max,
+    /// Number of entity/property versions whose valid interval starts in the
+    /// window.
+    Changes,
+}
+
+/// The argument to a temporal-window aggregate (Issue #3363).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowAggArg {
+    /// `*` — the matched entity itself (no property).
+    Star,
+    /// A property key `v.key`.
+    Property(String),
+}
+
+/// The fully-resolved plan for a [`QueryOp::TemporalAlign`] (Issue #3379).
+/// Produced by the converter after validating the raw AST align clause (mode,
+/// pattern shape, driver/return variables, timestamp boundaries).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemporalAlignSpec {
+    /// The alignment mode.
+    pub mode: crate::query::temporal_join::AlignMode,
+    /// Index into `participants` of the driving entity (event-aligned mode).
+    /// Ignored for interval-overlap.
+    pub driver_index: usize,
+    /// Inclusive start of the valid-time range (microseconds since epoch).
+    pub range_start_micros: i64,
+    /// Exclusive end of the valid-time range (microseconds since epoch).
+    pub range_end_micros: i64,
+    /// Transaction-time coordinate the history is read as-of.
+    pub as_of_system_time: Timestamp,
+    /// The participants, in declaration order (their index is referenced by
+    /// `driver_index` and each [`AlignOutputItem`]).
+    pub participants: Vec<AlignParticipant>,
+    /// The aligned output items, in `RETURN` order.
+    pub output_items: Vec<AlignOutputItem>,
+}
+
+/// One participant in a temporal join (Issue #3379): a bound variable, how to
+/// extract its node id from each matched row, and an optional gating edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlignParticipant {
+    /// The bound variable name.
+    pub var: String,
+    /// Where the participant's node id is read from in the matched row.
+    pub node_source: AlignNodeSource,
+    /// The path index of the connecting edge that gates this participant's
+    /// presence (its validity must contain the alignment instant), or `None`
+    /// for an ungated participant (the pattern anchor / a single bound node).
+    pub edge_gate_path_index: Option<usize>,
+}
+
+/// How a participant's node id is located within a matched [`QueryRow`]
+/// (Issue #3379).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignNodeSource {
+    /// The row's primary `entity` (the far/final node of the traversal).
+    Entity,
+    /// The node at this index in the row's `path` (`path[0]` is the anchor).
+    PathIndex(usize),
+}
+
+/// One resolved align output item (Issue #3379).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlignOutputItem {
+    /// Index into [`TemporalAlignSpec::participants`] of the referenced variable.
+    pub participant_index: usize,
+    /// The property key to read, or `None` to return the entity id.
+    pub key: Option<String>,
+    /// The output column name (alias if given, else a rendered default).
+    pub output_name: String,
 }
 
 /// A grouping key in a [`QueryOp::Aggregate`] (a non-aggregate projection
@@ -417,10 +588,27 @@ pub enum Direction {
 pub enum SortKey {
     /// Sort by a property value
     Property(String),
+    /// Sort by a property (or reserved structural field) of the row's
+    /// **traversed edge** (its [`edge`](crate::query::executor::QueryRow::edge)
+    /// side channel) rather than the node entity, for edge-property `ORDER BY`
+    /// in the AQL pipeline (Issue #3622). Reserved `type`/`label`/`source`/
+    /// `target`/`id` resolve structurally against the edge; a genuine user key
+    /// reads `edge.properties`. A row with no edge channel, or an absent key,
+    /// sorts as null (openCypher null placement). The edge is the one
+    /// reconstructed at the query's bi-temporal coordinate.
+    EdgeProperty(String),
     /// Sort by similarity score (for vector search results)
     Score,
     /// Sort by timestamp (for temporal queries)
     Timestamp,
+    /// Sort by a provenance accessor (`ORDER BY source(x)`/`confidence(x)`/
+    /// `reason(x)`, Issue #3354). The value is resolved per row from the write-
+    /// time provenance recorded on the version the row represents (the historical
+    /// version at the query's bi-temporal coordinate for an `AS OF` query),
+    /// exactly as the `WHERE`-clause provenance leaves resolve it. An
+    /// unattributed row (or a bundle missing the field) sorts as a null value,
+    /// following the same openCypher null placement as any other key.
+    Provenance(ProvenanceField),
 }
 
 /// Property predicates for filtering nodes and edges.
@@ -522,6 +710,21 @@ pub enum Predicate {
 
     /// Logical NOT of a predicate
     Not(Box<Predicate>),
+
+    /// Evaluate the wrapped predicate against the row's **traversed edge**
+    /// (its [`edge`](crate::query::executor::QueryRow::edge) side channel)
+    /// instead of the row's node entity, for edge-property `WHERE` in the AQL
+    /// pipeline (Issue #3622). The AQL converter wraps each WHERE leaf that
+    /// references the single-hop relationship variable in this; node leaves stay
+    /// unwrapped and evaluate against the node entity as before. The inner
+    /// predicate is a plain property / structural / logical sub-tree (never
+    /// itself `EdgeScoped`), evaluated with the shared openCypher edge semantics
+    /// (`evaluate_edge_full`): reserved `type`/`label`/`source`/`target`/`id`
+    /// resolve structurally, `Ne` on an absent property includes, and the edge
+    /// is the one reconstructed at the query's bi-temporal coordinate. A row
+    /// with no edge channel (edge not valid at the coordinate) evaluates to
+    /// `false`.
+    EdgeScoped(Box<Predicate>),
 
     /// Filter on a version's write-time provenance (Issue #3354a).
     ///

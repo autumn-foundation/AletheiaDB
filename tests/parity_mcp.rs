@@ -33,7 +33,7 @@
 //! (via the public `McpErrorCode` enum — the single source of truth for the
 //! wire codes), the success + structured-error envelope shapes, the temporal
 //! block on read responses, and the vector-elision default. It also pins the
-//! full 46-tool inventory + access-class table as a golden constant that a
+//! full 74-tool inventory + access-class table as a golden constant that a
 //! porter must keep in lockstep with the server.
 //!
 //! Run with:
@@ -354,7 +354,7 @@ fn representative_tool_roundtrip_is_wellformed() {
 }
 
 // ===========================================================================
-// Golden tool inventory — the 46-tool advertised set + access classes.
+// Golden tool inventory — the 74-tool advertised set + access classes.
 //
 // This is the one place the FULL registry is pinned from an external test:
 // because the advertised list (`tool_definitions`) is not reachable through the
@@ -364,9 +364,11 @@ fn representative_tool_roundtrip_is_wellformed() {
 // ===========================================================================
 
 /// (tool_name, access_class) for every advertised MCP tool, per
-/// `src/mcp/auth.rs::TOOL_ACCESS_CLASSES`. Access class ∈ {read, write, metrics}
-/// (MCP advertises no admin-class tools).
-const TOOL_INVENTORY: [(&str, &str); 46] = [
+/// `src/mcp/auth.rs::TOOL_ACCESS_CLASSES`. Access class ∈
+/// {read, write, metrics, admin} — the GDPR crypto-shred tools
+/// (`designate_subject`/`erase_subject`, Issue #3359) are the first
+/// admin-class MCP tools.
+const TOOL_INVENTORY: [(&str, &str); 74] = [
     ("get_node", "read"),
     ("create_node", "write"),
     ("update_node", "write"),
@@ -387,6 +389,17 @@ const TOOL_INVENTORY: [(&str, &str); 46] = [
     ("get_incoming_edges", "read"),
     ("traverse", "read"),
     ("find_similar", "read"),
+    ("embed_query", "read"),
+    ("embed_text", "read"),
+    ("semantic_search", "read"),
+    ("create_node_with_embedding", "write"),
+    ("update_node_embedding", "write"),
+    ("semantic_path", "read"),
+    ("concept_analogy", "read"),
+    ("concept_mean", "read"),
+    ("find_duplicate_candidates", "read"),
+    ("semantic_horizon", "read"),
+    ("context_aspects", "read"),
     ("enable_vector_index", "write"),
     ("list_vector_indexes", "read"),
     ("enable_unique_constraint", "write"),
@@ -395,6 +408,7 @@ const TOOL_INVENTORY: [(&str, &str); 46] = [
     ("get_edge_at_time", "read"),
     ("find_nodes_at_time", "read"),
     ("list_changes", "read"),
+    ("await_changes", "read"),
     ("get_node_at_valid_time", "read"),
     ("get_node_at_transaction_time", "read"),
     ("get_node_history", "read"),
@@ -403,6 +417,14 @@ const TOOL_INVENTORY: [(&str, &str); 46] = [
     ("get_edge_at_transaction_time", "read"),
     ("get_edge_history", "read"),
     ("diff_edge_versions", "read"),
+    ("get_belief_revisions", "read"),
+    ("list_drift_monitors", "read"),
+    ("query_drift_alarms", "read"),
+    ("contradiction_genealogy", "read"),
+    ("find_contradictions", "read"),
+    ("counterfactual_replay", "read"),
+    ("trust_breakdown", "read"),
+    ("list_trust_policies", "read"),
     ("hybrid_query", "read"),
     ("query", "read"),
     ("get_schema", "read"),
@@ -412,14 +434,23 @@ const TOOL_INVENTORY: [(&str, &str); 46] = [
     ("audit_export", "read"),
     ("verify_chain", "read"),
     ("export_chain_head", "read"),
+    ("create_namespace", "write"),
+    ("create_drift_monitor", "write"),
+    ("delete_drift_monitor", "write"),
+    ("resolve_drift_alarm", "write"),
+    ("list_namespaces", "read"),
+    ("describe_namespace", "read"),
     ("database_stats", "metrics"),
+    // GDPR crypto-shred (Issue #3359) — the first admin-class MCP tools.
+    ("designate_subject", "admin"),
+    ("erase_subject", "admin"),
 ];
 
 /// PARITY (external mirror, NOT a live drift detector): this constant is a
-/// cross-crate reference copy of the 46-tool inventory. Because the live
+/// cross-crate reference copy of the 74-tool inventory. Because the live
 /// registry (`list_tools_for_test` / `TOOL_ACCESS_CLASSES`) is `pub(crate)`
 /// and unreachable from this external test crate, this test only validates the
-/// mirror's internal consistency (46 tools, unique names, MCP-legal classes,
+/// mirror's internal consistency (74 tools, unique names, MCP-legal classes,
 /// exactly one metrics tool) — it does NOT read the server, so it cannot by
 /// itself catch a tool added/removed/renamed/reclassified in the registry.
 ///
@@ -430,7 +461,7 @@ const TOOL_INVENTORY: [(&str, &str); 46] = [
 /// `tests/parity/inventory.json` in lockstep when the inventory changes.
 #[test]
 fn tool_inventory_golden_is_stable() {
-    assert_eq!(TOOL_INVENTORY.len(), 46, "MCP advertises exactly 46 tools");
+    assert_eq!(TOOL_INVENTORY.len(), 74, "MCP advertises exactly 74 tools");
 
     // Names unique.
     let mut names: Vec<&str> = TOOL_INVENTORY.iter().map(|(n, _)| *n).collect();
@@ -439,10 +470,10 @@ fn tool_inventory_golden_is_stable() {
     names.dedup();
     assert_eq!(names.len(), count, "tool names must be unique");
 
-    // Access classes are drawn from the MCP-legal set (no admin tools).
+    // Access classes are drawn from the MCP-legal set.
     for (name, class) in TOOL_INVENTORY {
         assert!(
-            matches!(class, "read" | "write" | "metrics"),
+            matches!(class, "read" | "write" | "metrics" | "admin"),
             "tool `{name}` has an unexpected access class `{class}`"
         );
     }
@@ -484,6 +515,7 @@ fn query_over_ceiling_override_is_invalid_argument() {
     let v = run_query(
         &s,
         QueryRequest {
+            namespace: None,
             language: "aql".into(),
             query: "MATCH (n) RETURN n".into(),
             params: None,
@@ -516,6 +548,7 @@ fn query_byte_cap_is_resource_exhausted() {
     let v = run_query(
         &s,
         QueryRequest {
+            namespace: None,
             language: "aql".into(),
             query: "MATCH (n:Widget) RETURN n".into(),
             params: None,
@@ -547,6 +580,7 @@ fn query_row_cap_override_truncates_successfully() {
     let v = run_query(
         &s,
         QueryRequest {
+            namespace: None,
             language: "aql".into(),
             query: "MATCH (n:Widget) RETURN n".into(),
             params: None,

@@ -331,20 +331,27 @@ fn keys_unknown_subcommand_fails() {
 }
 
 #[test]
-fn keys_rotate_reports_deferred_not_unknown() {
+fn keys_rotate_bare_shows_usage_not_deferred_or_unknown() {
+    // `keys rotate` is now wired to the shipped rotation engine (Issue #488).
+    // Bare (no key source / action flag) it is a USAGE error -- no longer the
+    // old "not yet available" deferred stub, and not the generic
+    // "unknown keys subcommand" fallback. (Full behavior lives in
+    // tests/cli_encryption.rs.)
     let r = run(&["keys", "rotate"]);
     assert_ne!(
         r.code, 0,
-        "keys rotate must exit non-zero (not yet available)"
+        "bare keys rotate must exit non-zero (usage error)"
     );
     let combined = format!("{}{}", r.stdout, r.stderr).to_lowercase();
-    // Must be an honest, specific deferred message -- NOT the generic
-    // "unknown keys subcommand" fallback.
     assert!(
-        combined.contains("rotate") && combined.contains("not yet available"),
-        "keys rotate must give a specific deferred message; stdout={:?} stderr={:?}",
+        combined.contains("rotate"),
+        "keys rotate usage must name the verb; stdout={:?} stderr={:?}",
         r.stdout,
         r.stderr
+    );
+    assert!(
+        !combined.contains("not yet available"),
+        "keys rotate must no longer report the deferred stub; got={combined:?}"
     );
     assert!(
         !combined.contains("unknown keys subcommand"),

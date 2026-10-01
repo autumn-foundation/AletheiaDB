@@ -32,7 +32,27 @@ impl AletheiaDB {
     ///
     /// Returns `Error::Backup` on any serialization or I/O failure.
     pub fn backup(&self, path: &Path) -> Result<BackupSummary> {
-        let source_lsn = self.wal.current_lsn().0;
+        // Capture the LSN coordinate under the commit clock
+        // (`current_timestamp`, lock order #1 -- released before any other
+        // lock below is taken). A committer holds this lock across its
+        // WAL-append → apply window (#3413), so any transaction whose
+        // entries carry an LSN below the value read here is guaranteed to be
+        // fully applied -- and therefore visible to the state snapshot taken
+        // below. Reading `current_lsn` WITHOUT the lock allowed a
+        // transaction to be missing from BOTH the snapshot and a replica's
+        // resume-from-`source_lsn` stream (appended at LSN < `source_lsn`
+        // but not yet applied when the snapshot was cloned): permanently
+        // lost on the replica. Commits landing after this read have LSNs
+        // >= `source_lsn`; if they also make the snapshot, resume re-applies
+        // them idempotently (#3419) -- the safe direction.
+        let source_lsn = {
+            let _commit_clock = self.current_timestamp.lock().map_err(|_| {
+                Error::Storage(crate::core::error::StorageError::LockPoisoned {
+                    resource: "current_timestamp".to_string(),
+                })
+            })?;
+            self.wal.current_lsn().0
+        };
 
         // Take consistent point-in-time snapshots.
         //
@@ -85,6 +105,27 @@ impl AletheiaDB {
             .unwrap_or_default()
             .as_micros() as i64;
 
+        // Capture declared schema constraints (Issue #3378) and uniqueness
+        // constraints (Issue #3218) so both survive the backup→restore
+        // round-trip. Uniqueness constraints are otherwise only WAL-persisted,
+        // so a fresh-WAL restore would silently drop them; they are captured
+        // here and re-declared on restore (see `reapply_unique_constraints`),
+        // which rebuilds the reservation index and writes a durable WAL record.
+        let schema_constraints = self.constraint_registry.export_schema_constraints();
+        let unique_constraints = self.constraint_registry.export_unique_constraints();
+
+        // Capture the crypto-shred subject keyring / designation registry
+        // (Issue #3665) so designations, erased-state, `erased_at`, and
+        // attestations travel inside the archive. The exported bytes are the
+        // exact CRC-wrapped sidecar wire form (empty when crypto-shred is
+        // unused). An erased subject's wrapped DEK is already absent from these
+        // bytes, so a post-erasure backup stays erased. When the `audit-export`
+        // feature is off there is no crypto-shred state, so the field is empty.
+        #[cfg(feature = "audit-export")]
+        let keyring_sidecar = self.crypto_shred.export_sidecar_bytes();
+        #[cfg(not(feature = "audit-export"))]
+        let keyring_sidecar = Vec::new();
+
         let payload = build_payload(
             current_snapshot,
             historical_snapshot,
@@ -92,6 +133,9 @@ impl AletheiaDB {
             cold_edge_versions,
             source_lsn,
             created_at_micros,
+            schema_constraints,
+            unique_constraints,
+            keyring_sidecar,
         )
         .map_err(Error::Backup)?;
 
@@ -131,10 +175,32 @@ impl AletheiaDB {
 
         materialize_to_dir(&payload, tmp.path()).map_err(Error::Backup)?;
 
+        // Restore schema constraints (Issue #3378) by writing the sidecar into
+        // the data dir (parent of the reopen WAL dir = tmp root), so the
+        // reopen below loads them through the normal startup sidecar path.
+        crate::db::schema_constraint::persist_descriptors_to_dir(
+            tmp.path(),
+            &payload.schema_constraints,
+        )?;
+
+        // Restore the crypto-shred subject keyring / designation registry
+        // (Issue #3665) into the SAME data dir the schema-constraint sidecar
+        // went to (the parent of the reopen WAL dir = tmp root), so the reopen
+        // below loads it via the fail-closed `CryptoShredState::open` path.
+        #[cfg(feature = "audit-export")]
+        restore_keyring_sidecar(tmp.path(), &payload)?;
+
         // Use an isolated WAL dir inside the temp dir to avoid cross-test contamination
         // from the default "aletheiadb/wal" path.
         let config = build_restore_config(tmp.path(), tmp.path().join("wal"));
         let mut db = AletheiaDB::with_unified_config(config)?;
+
+        // Re-declare uniqueness constraints (Issue #3218) after the data is
+        // loaded: unlike the schema-constraint sidecar (loaded during startup
+        // above), uniqueness constraints are WAL-persisted, so they must be
+        // re-declared against the reopened DB — which rebuilds the reservation
+        // index from the restored nodes and writes a durable WAL record.
+        reapply_unique_constraints(&db, &payload.unique_constraints)?;
 
         // Keep the temp dir alive for the lifetime of the ephemeral DB.
         db._tempdir = Some(tmp);
@@ -177,11 +243,140 @@ impl AletheiaDB {
         let payload = read_artifact(path).map_err(Error::Backup)?;
         materialize_to_dir(&payload, &index_root).map_err(Error::Backup)?;
 
+        // Restore schema constraints (Issue #3378): the durable reopen derives
+        // its data dir as the parent of its WAL dir (`data_dir/wal` → `data_dir`),
+        // so the sidecar must land at `data_dir`, not the index root.
+        crate::db::schema_constraint::persist_descriptors_to_dir(
+            data_dir,
+            &payload.schema_constraints,
+        )?;
+
+        // Restore the crypto-shred subject keyring / designation registry
+        // (Issue #3665) into `data_dir` (the parent of the durable reopen WAL
+        // dir, where `CryptoShredState::open` looks), NOT the index root.
+        #[cfg(feature = "audit-export")]
+        restore_keyring_sidecar(data_dir, &payload)?;
+
         // Reopen through the canonical durable config so the layout written above
         // is exactly the layout `open`/`open_from_env` will read on restart.
         let config = crate::config::durable_config_for_data_dir(data_dir);
-        AletheiaDB::with_unified_config(config)
+        let db = AletheiaDB::with_unified_config(config)?;
+
+        // Re-declare uniqueness constraints (Issue #3218). Because
+        // `enable_unique_constraint` appends a `DeclareUniqueConstraint` WAL
+        // record, the constraint is durable in the restored database and is
+        // recovered by normal WAL replay on a later reopen.
+        reapply_unique_constraints(&db, &payload.unique_constraints)?;
+        Ok(db)
     }
+}
+
+/// Re-declare each restored uniqueness constraint (Issue #3218) against a
+/// freshly-reopened database.
+///
+/// `enable_unique_constraint` runs the duplicate pre-flight scan (a safety net
+/// — a consistent backup enforced uniqueness, so no duplicates should exist),
+/// rebuilds the reservation index from the restored nodes, and appends a
+/// durable `DeclareUniqueConstraint` WAL record. A dangling/duplicate
+/// declaration surfaces as a normal error rather than silently dropping the
+/// constraint.
+fn reapply_unique_constraints(
+    db: &AletheiaDB,
+    descriptors: &[crate::core::constraint::UniqueConstraintDescriptor],
+) -> Result<()> {
+    for d in descriptors {
+        db.enable_unique_constraint(&d.label, &d.property)?;
+    }
+    Ok(())
+}
+
+/// Write the crypto-shred subject keyring / designation registry (Issue #3665)
+/// from a restored payload into `data_dir` as `subject_keyring.dat`.
+///
+/// The payload's `keyring_sidecar` is the exact CRC-wrapped sidecar wire form,
+/// so it is written verbatim; the subsequent reopen loads it via the
+/// fail-closed `CryptoShredState::open`. No-op on an empty sidecar.
+///
+/// **Backward-compat (v5/v6 archives):** an archive taken before the keyring
+/// fold carries no keyring, yet may hold designated (SUBJ-sealed) property
+/// bytes. Those restore **sealed-unreadable** — without the keyring the
+/// per-subject DEKs are gone. We emit a single loud warning in that case so an
+/// operator is never silently surprised by unreadable designated properties.
+///
+/// **Write-side size cap (Issue #3665 hardening):** the payload's keyring
+/// sidecar is rejected here if it exceeds [`keyring::MAX_KEYRING_BYTES`], the
+/// same 64 MiB bound the fail-closed loader enforces. Without this symmetry a
+/// malicious v7 archive could force a multi-GiB `subject_keyring.dat` write
+/// before the loader ever rejects it (disk-exhaustion DoS).
+///
+/// **Stale-keyring removal (Issue #3665 hardening):** when the payload carries
+/// no keyring (a plain / keyless restore) but the target `data_dir` already
+/// holds a leftover `subject_keyring.dat`, that file is removed so the reopen
+/// adopts the restored state rather than the stale keyring.
+#[cfg(feature = "audit-export")]
+fn restore_keyring_sidecar(
+    data_dir: &Path,
+    payload: &crate::storage::backup::BackupPayload,
+) -> Result<()> {
+    use crate::db::crypto_shred::keyring;
+    if !payload.keyring_sidecar.is_empty() {
+        // Reject an over-cap sidecar BEFORE writing anything to disk — symmetry
+        // with the 64 MiB load cap (`keyring::MAX_KEYRING_BYTES`).
+        if payload.keyring_sidecar.len() as u64 > keyring::MAX_KEYRING_BYTES {
+            return Err(Error::Backup(BackupError::Corrupt(format!(
+                "keyring sidecar in backup exceeds size limit ({} bytes > {} byte cap)",
+                payload.keyring_sidecar.len(),
+                keyring::MAX_KEYRING_BYTES
+            ))));
+        }
+        let path = data_dir.join(keyring::KEYRING_FILENAME);
+        keyring::save_sidecar_bytes(&path, &payload.keyring_sidecar)
+            .map_err(|e| Error::Backup(BackupError::Io(e.to_string())))?;
+    } else {
+        // Keyless restore: drop any stale keyring left in the target so the
+        // restored (empty-crypto-shred) state wins over pre-existing state.
+        // Attempt the delete directly and ignore only NotFound — this avoids the
+        // redundant `exists()` check and the TOCTOU window it opens.
+        let stale = data_dir.join(keyring::KEYRING_FILENAME);
+        match std::fs::remove_file(&stale) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(Error::Backup(BackupError::Io(format!(
+                    "failed to remove stale keyring sidecar: {e}"
+                ))));
+            }
+        }
+        if payload_has_sealed_properties(payload) {
+            let message = "crypto-shred: restoring a pre-v7 backup that contains \
+                           designated (sealed) properties but no subject keyring — \
+                           those properties will be sealed-unreadable (the archive \
+                           predates the Issue #3665 keyring fold). Restore from a v7 \
+                           (or newer) backup to recover them.";
+            #[cfg(feature = "observability")]
+            tracing::warn!("{message}");
+            #[cfg(not(feature = "observability"))]
+            eprintln!("WARNING: {message}");
+        }
+    }
+    Ok(())
+}
+
+/// Whether a restored payload's current-state graph holds any SUBJ-sealed
+/// (crypto-shred envelope) property value. Feature-independent scan by the
+/// public `SUBJ` envelope magic, used only to decide whether to warn on a
+/// keyring-less restore.
+#[cfg(feature = "audit-export")]
+fn payload_has_sealed_properties(payload: &crate::storage::backup::BackupPayload) -> bool {
+    use crate::storage::index_persistence::formats::PersistedPropertyValue;
+    let is_sealed = |props: &crate::storage::index_persistence::formats::PersistedPropertyMap| {
+        props.entries.iter().any(|(_, v)| {
+            matches!(v, PersistedPropertyValue::Bytes(b)
+                if crate::db::crypto_shred::envelope::is_envelope(b))
+        })
+    };
+    payload.graph.nodes.iter().any(|n| is_sealed(&n.properties))
+        || payload.graph.edges.iter().any(|e| is_sealed(&e.properties))
 }
 
 /// The index-persistence base directory under a durable data root.
@@ -262,6 +457,103 @@ pub(crate) mod backup_test_hooks {
             .clone();
         if let Some(hook) = hook {
             hook(snapshot);
+        }
+    }
+}
+
+/// Unit tests for the crypto-shred backward-compat warning guard (Issue #3665
+/// hardening). Gated on `audit-export` because `payload_has_sealed_properties`
+/// lives behind that feature.
+#[cfg(all(test, feature = "audit-export"))]
+mod hardening_tests {
+    use super::*;
+    use crate::storage::backup::BackupPayload;
+    use crate::storage::index_persistence::formats::{
+        GraphIndexData, PersistedNode, PersistedPropertyMap, PersistedPropertyValue,
+        StringInternerData, TemporalIndexData,
+    };
+    use crate::storage::index_persistence::{
+        GRAPH_MAGIC, INTERNER_MAGIC, MANIFEST_VERSION, TEMPORAL_MAGIC,
+    };
+
+    /// Build a minimal payload whose single node carries `value` as its only
+    /// property. Only the graph is populated — `payload_has_sealed_properties`
+    /// inspects nothing else.
+    fn payload_with_node_property(value: PersistedPropertyValue) -> BackupPayload {
+        let node = PersistedNode {
+            id: 1,
+            label_idx: 0,
+            version_id: 1,
+            properties: PersistedPropertyMap {
+                entries: vec![(0, value)],
+            },
+        };
+        BackupPayload {
+            created_at_micros: 0,
+            source_lsn: 0,
+            current_node_count: 1,
+            current_edge_count: 0,
+            node_version_count: 0,
+            edge_version_count: 0,
+            interner: StringInternerData {
+                magic: INTERNER_MAGIC,
+                version: MANIFEST_VERSION,
+                string_count: 0,
+                strings: vec![],
+            },
+            graph: GraphIndexData {
+                magic: GRAPH_MAGIC,
+                version: MANIFEST_VERSION,
+                node_count: 1,
+                edge_count: 0,
+                nodes: vec![node],
+                edges: vec![],
+                outgoing_node_ids: vec![],
+                outgoing_offsets: vec![],
+                outgoing_neighbors: vec![],
+                incoming_node_ids: vec![],
+                incoming_offsets: vec![],
+                incoming_neighbors: vec![],
+            },
+            temporal: TemporalIndexData {
+                magic: TEMPORAL_MAGIC,
+                version: MANIFEST_VERSION,
+                node_versions: vec![],
+                node_anchors: vec![],
+                edge_versions: vec![],
+                edge_anchors: vec![],
+            },
+            schema_constraints: vec![],
+            unique_constraints: vec![],
+            keyring_sidecar: vec![],
+        }
+    }
+
+    #[test]
+    fn payload_has_sealed_properties_true_for_subj_envelope() {
+        // A `SUBJ`-prefixed Bytes value is a crypto-shred sealed envelope.
+        let mut sealed = b"SUBJ".to_vec();
+        sealed.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]);
+        let payload = payload_with_node_property(PersistedPropertyValue::Bytes(sealed));
+        assert!(
+            payload_has_sealed_properties(&payload),
+            "a SUBJ-enveloped Bytes property must be detected as sealed"
+        );
+    }
+
+    #[test]
+    fn payload_has_sealed_properties_false_for_plain_values() {
+        // Plain (non-sealed) values must not trip the guard.
+        for value in [
+            PersistedPropertyValue::Int(42),
+            PersistedPropertyValue::Bool(true),
+            PersistedPropertyValue::Bytes(b"not-an-envelope".to_vec()),
+        ] {
+            let payload = payload_with_node_property(value);
+            assert!(
+                !payload_has_sealed_properties(&payload),
+                "a non-sealed property must not be detected as sealed"
+            );
         }
     }
 }

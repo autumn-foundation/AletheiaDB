@@ -12,6 +12,7 @@
 
 use crate::core::error::{Error, QueryError};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
+use crate::core::namespace::{Namespace, NamespaceId, resolve_namespace_id};
 use crate::core::temporal::{BiTemporalInterval, TimeRange, Timestamp};
 
 /// Whether a change record refers to a node or an edge.
@@ -97,6 +98,15 @@ pub struct ChangeRecord {
     pub transaction_time_range: TimeRange,
     /// Full valid-time range of the version (an empty range denotes a deletion).
     pub valid_time_range: TimeRange,
+    /// The namespace the affected entity belongs to (Issue #3349, PR3c).
+    ///
+    /// Derived from the entity's immutable ride-along namespace
+    /// ([`crate::core::namespace::NAMESPACE_KEY`]); a legacy / default entity
+    /// resolves to [`Namespace::default`]. Surfaced as a first-class field so the
+    /// reserved ride-along key never leaks into a changefeed payload, and used by
+    /// [`crate::core::changefeed_subscription::ChangeFilter`] to scope a
+    /// subscription to a namespace.
+    pub namespace: Namespace,
 }
 
 impl ChangeRecord {
@@ -106,6 +116,25 @@ impl ChangeRecord {
     #[inline]
     pub fn transaction_time(&self) -> Timestamp {
         self.transaction_time_range.start()
+    }
+
+    /// The stable total-order [`ChangeCursor`] identifying this record.
+    ///
+    /// This is the dedup / resume key for the push changefeed (Issue #3375): two
+    /// records are the same committed fact iff their cursors are equal, and a
+    /// consumer resumes a pull with `list_changes(cursor = last_delivered.cursor())`.
+    /// Derived from the record's own fields so it always agrees with what the
+    /// #3216 scan would have produced for the same version.
+    #[inline]
+    pub(crate) fn cursor(&self) -> ChangeCursor {
+        let start = self.transaction_time_range.start();
+        ChangeCursor {
+            tx_wallclock: start.wallclock(),
+            tx_logical: start.logical(),
+            kind_ord: self.kind.ord(),
+            entity_id: self.entity_id,
+            version_id: self.version_id,
+        }
     }
 }
 
@@ -136,6 +165,66 @@ impl ChangeCursor {
             self.tx_wallclock, self.tx_logical, self.kind_ord, self.entity_id, self.version_id
         );
         crate::core::hex::encode(raw.as_bytes())
+    }
+
+    /// Encode a **baseline resume anchor** positioned strictly after every version committed
+    /// at or before `frontier` (Issue #3375 review F4).
+    ///
+    /// Uses `frontier`'s `(wallclock, logical)` with maximal kind/entity/version tiebreakers,
+    /// so a `list_changes` resume from this token (strict `> cursor`) returns exactly the
+    /// changes committed *after* `frontier` — i.e. everything a subscriber that captured
+    /// `frontier` at subscribe time could have missed, and nothing it should not re-see.
+    /// Because every future commit gets a strictly greater HLC timestamp, no future event is
+    /// ever excluded by this anchor.
+    pub(crate) fn baseline_after(frontier: Timestamp) -> String {
+        ChangeCursor {
+            tx_wallclock: frontier.wallclock(),
+            tx_logical: frontier.logical(),
+            kind_ord: u8::MAX,
+            entity_id: u64::MAX,
+            version_id: u64::MAX,
+        }
+        .encode()
+    }
+
+    /// The minimal [`ChangeCursor`] positioned at a transaction time `tx` (Issue #3677).
+    ///
+    /// All the cursor tie-breakers (`kind_ord`, `entity_id`, `version_id`) are zero, so this
+    /// sorts at or before every real version committed at `tx` and strictly after every version
+    /// committed before `tx`. Used by the cold-tier directory to bound a `[start, end)`
+    /// transaction-time window: `min_at(start)` (inclusive) and `min_at(end)` (exclusive) exactly
+    /// select the versions whose commit timestamp lies in the half-open window, mirroring
+    /// [`TimeRange::contains`](crate::core::temporal::TimeRange::contains).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn min_at(tx: Timestamp) -> Self {
+        ChangeCursor {
+            tx_wallclock: tx.wallclock(),
+            tx_logical: tx.logical(),
+            kind_ord: 0,
+            entity_id: 0,
+            version_id: 0,
+        }
+    }
+
+    /// The [`ChangeCursor`] identifying a specific committed version (Issue #3677).
+    ///
+    /// Mirrors the cursor [`build_raw_change`] computes for the same version, so a directory entry
+    /// built from a migrated version is byte-identical to what the changefeed scan would produce.
+    /// `tx_start` is the version's transaction-time interval start.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn for_version(
+        tx_start: Timestamp,
+        kind: EntityKind,
+        entity_id: u64,
+        version_id: u64,
+    ) -> Self {
+        ChangeCursor {
+            tx_wallclock: tx_start.wallclock(),
+            tx_logical: tx_start.logical(),
+            kind_ord: kind.ord(),
+            entity_id,
+            version_id,
+        }
     }
 
     /// Decode an opaque continuation token produced by [`ChangeCursor::encode`].
@@ -190,16 +279,25 @@ pub(crate) struct RawChange {
     pub cursor: ChangeCursor,
     pub change_type: ChangeType,
     pub label_id: InternedString,
+    /// Interned namespace id of the affected entity (Issue #3349, PR3c). Kept as a
+    /// `Copy` [`NamespaceId`] (not an owned [`Namespace`]) so, like `label_id`, the
+    /// name resolution is deferred to [`RawChange::into_record`] and paid only for
+    /// rows that survive cursor filtering and the page `limit`.
+    pub namespace_id: NamespaceId,
     pub transaction_time_range: TimeRange,
     pub valid_time_range: TimeRange,
 }
 
 impl RawChange {
-    /// Resolve the label and materialize a public [`ChangeRecord`].
+    /// Resolve the label and namespace and materialize a public [`ChangeRecord`].
     pub(crate) fn into_record(self) -> ChangeRecord {
         let label = GLOBAL_INTERNER
             .resolve_with(self.label_id, |s| s.to_string())
             .unwrap_or_default();
+        // A namespace id is interned at derivation time, so it always resolves; the
+        // `unwrap_or_default` is defensive (a `default`-namespace entity resolves to
+        // the default namespace either way).
+        let namespace = resolve_namespace_id(self.namespace_id).unwrap_or_default();
         ChangeRecord {
             entity_id: self.cursor.entity_id,
             version_id: self.cursor.version_id,
@@ -208,6 +306,7 @@ impl RawChange {
             label,
             transaction_time_range: self.transaction_time_range,
             valid_time_range: self.valid_time_range,
+            namespace,
         }
     }
 }
@@ -224,6 +323,13 @@ impl RawChange {
 /// the deletion instant `v` — so it intersects the half-open window iff the window contains
 /// that single instant. The two predicates are the same intersection rule applied to a range
 /// vs. a point.
+///
+/// `namespace_fn` derives the affected entity's interned [`NamespaceId`] (Issue #3349,
+/// PR3c). It is invoked **lazily** — only after every cheap filter (transaction-time
+/// window, valid-time window, label) has passed — so a candidate that will be discarded
+/// never pays the namespace derivation (which, for a delta version, may reconstruct
+/// properties). It is not part of the sort [`ChangeCursor`], so record ordering is
+/// unchanged.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_raw_change(
     version_id: u64,
@@ -235,7 +341,17 @@ pub(crate) fn build_raw_change(
     tx_window: &TimeRange,
     valid_window: Option<&TimeRange>,
     label_filter: Option<&str>,
+    namespace_fn: impl FnOnce() -> NamespaceId,
 ) -> Option<RawChange> {
+    // Structural versions (an update's carry-forward of the superseded
+    // valid-time prefix, or a backfill's head re-assertion) restate facts
+    // already recorded; they are not changes. Skipping them here keeps the pull
+    // feed identical to the push feed, which only ever broadcasts the version
+    // ids a transaction wrote.
+    if crate::core::id::VersionId::new_unchecked(version_id).is_structural() {
+        return None;
+    }
+
     let tx_range = temporal.transaction_time();
     // Transaction-time window is half-open [t1, t2).
     if !tx_window.contains(tx_range.start()) {
@@ -281,9 +397,161 @@ pub(crate) fn build_raw_change(
         },
         change_type,
         label_id,
+        namespace_id: namespace_fn(),
         transaction_time_range: tx_range,
         valid_time_range: valid_range,
     })
+}
+
+/// A streaming, bounded-by-cursor accumulator of [`RawChange`]s (Issue #3216, PR 2).
+///
+/// Retains only the `bound`-smallest changes offered to it (by [`ChangeCursor`] order), so a
+/// windowed changefeed scan over a large tier holds `O(bound)` rows in memory instead of every
+/// match. This is the **limit pushdown** for `list_changes`: the query layer passes
+/// `page_limit + 1` as the bound (the `+1` lets it detect `has_more` without materializing the
+/// rest), and because the retained set always contains the true `bound`-smallest survivors, the
+/// page the query layer then selects is byte-identical to one produced by an unbounded scan.
+///
+/// Applying the bound **per tier** is sound because the page is the `page_limit`-smallest of the
+/// tiers' union: any survivor beyond a tier's `bound`-smallest has at least `bound` smaller
+/// survivors within that same tier — hence at least `page_limit` smaller survivors in the union —
+/// and can never reach the page.
+pub(crate) struct BoundedChanges {
+    bound: usize,
+    inner: BoundedInner,
+}
+
+/// Upper limit on the heap capacity we pre-reserve, so a large `bound` (e.g. an MCP
+/// `limit = 10_000` catch-up) does not attempt a giant up-front allocation while still avoiding
+/// the handful of reallocations a `bound`-sized scan would otherwise incur.
+const HEAP_PRESIZE_CAP: usize = 4096;
+
+/// Storage strategy for [`BoundedChanges`], chosen once at construction from `bound`.
+enum BoundedInner {
+    /// Unbounded fast path (`bound == usize::MAX`): accumulate every offered change into a plain
+    /// `Vec` in `O(M)`. When nothing can ever be evicted (the common "drain everything" /
+    /// large-limit case) the max-heap's `O(M log M)` maintenance buys no memory benefit — it just
+    /// re-heapifies a set the caller sorts anyway — so we skip it entirely.
+    Unbounded(Vec<RawChange>),
+    /// Bounded path: max-heap keyed by cursor, so the current largest-cursor survivor sits at the
+    /// top and is the one evicted once the heap exceeds `bound`.
+    Bounded(std::collections::BinaryHeap<ByCursor>),
+}
+
+/// [`RawChange`] wrapper ordered solely by its [`ChangeCursor`] (which is unique per emitted
+/// version), so a [`std::collections::BinaryHeap`] evicts the largest-cursor survivor.
+struct ByCursor(RawChange);
+
+impl PartialEq for ByCursor {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.cursor == other.0.cursor
+    }
+}
+impl Eq for ByCursor {}
+impl PartialOrd for ByCursor {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for ByCursor {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.cursor.cmp(&other.0.cursor)
+    }
+}
+
+impl BoundedChanges {
+    /// Create an accumulator that keeps at most `bound` (min 1) smallest-cursor changes.
+    ///
+    /// A `bound` of `usize::MAX` selects the unbounded fast path (plain `Vec`, no heap); any
+    /// finite `bound` selects the bounded max-heap, pre-sized to `bound` (capped by
+    /// [`HEAP_PRESIZE_CAP`]).
+    pub(crate) fn new(bound: usize) -> Self {
+        let bound = bound.max(1);
+        let inner = if bound == usize::MAX {
+            BoundedInner::Unbounded(Vec::new())
+        } else {
+            BoundedInner::Bounded(std::collections::BinaryHeap::with_capacity(
+                bound.min(HEAP_PRESIZE_CAP),
+            ))
+        };
+        BoundedChanges { bound, inner }
+    }
+
+    /// Offer a change; the accumulator keeps only the `bound`-smallest by cursor seen so far.
+    pub(crate) fn consider(&mut self, change: RawChange) {
+        match &mut self.inner {
+            // Unbounded: keep everything (no eviction is ever possible).
+            BoundedInner::Unbounded(v) => v.push(change),
+            BoundedInner::Bounded(heap) => {
+                heap.push(ByCursor(change));
+                if heap.len() > self.bound {
+                    // Evict the current largest cursor — it cannot belong on any page of size < bound.
+                    heap.pop();
+                }
+            }
+        }
+    }
+
+    /// Number of changes currently retained.
+    ///
+    /// Used by the cold-tier directory pushdown (Issue #3677) to early-stop a bounded,
+    /// ascending-cursor point-read walk: once `len() >= bound` no later (larger-cursor) candidate
+    /// can displace a retained survivor, so the walk may stop.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn len(&self) -> usize {
+        match &self.inner {
+            BoundedInner::Unbounded(v) => v.len(),
+            BoundedInner::Bounded(heap) => heap.len(),
+        }
+    }
+
+    /// Consume the accumulator, returning the retained changes (unordered; the caller sorts).
+    pub(crate) fn into_vec(self) -> Vec<RawChange> {
+        match self.inner {
+            BoundedInner::Unbounded(v) => v,
+            BoundedInner::Bounded(heap) => heap.into_iter().map(|w| w.0).collect(),
+        }
+    }
+}
+
+/// Build a [`RawChange`] for one version and, if it passes every filter **and** sorts strictly
+/// after `resume_after`, offer it to `acc` (Issue #3216, PR 2).
+///
+/// Shared verbatim by the hot ([`crate::storage::historical`]) and cold
+/// ([`crate::storage::redb_cold_storage`]) changefeed scans so their filtering, cursor-resume,
+/// and bounding are identical by construction — the guarantee that makes the pushed-down page
+/// byte-identical to the legacy unbounded merge.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn consider_version(
+    acc: &mut BoundedChanges,
+    resume_after: Option<ChangeCursor>,
+    version_id: u64,
+    entity_id: u64,
+    kind: EntityKind,
+    temporal: &BiTemporalInterval,
+    label_id: InternedString,
+    prev_is_none: bool,
+    tx_window: &TimeRange,
+    valid_window: Option<&TimeRange>,
+    label_filter: Option<&str>,
+    namespace_fn: impl FnOnce() -> NamespaceId,
+) {
+    if let Some(rec) = build_raw_change(
+        version_id,
+        entity_id,
+        kind,
+        temporal,
+        label_id,
+        prev_is_none,
+        tx_window,
+        valid_window,
+        label_filter,
+        namespace_fn,
+    )
+    .filter(|rec| resume_after.is_none_or(|c| rec.cursor > c))
+    {
+        acc.consider(rec);
+    }
 }
 
 /// Query options for [`crate::db::AletheiaDB::list_changes`].

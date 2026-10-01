@@ -85,6 +85,7 @@ impl InFlightLsns {
     ///
     /// When `None`, the caller falls back to the WAL allocation frontier, which
     /// is safe precisely because no durable-but-unapplied write exists.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn min(&self) -> Option<u64> {
         // Leaf critical section: a single ordered-set min read.
         self.lsns

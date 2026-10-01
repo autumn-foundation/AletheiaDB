@@ -129,6 +129,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -143,16 +144,19 @@ use rmcp::{
 use serde_json::json;
 
 use crate::api::transaction::WriteOps;
+use crate::core::changefeed::ChangeCursor;
+use crate::core::changefeed_subscription::{ChangeFilter, RecvError, Subscription};
 use crate::core::temporal::time;
 use crate::core::{
-    ChangeFeedQuery, EdgeId, GLOBAL_INTERNER, NodeId, PropertyMap, PropertyMapBuilder,
+    ChangeFeedQuery, ChangeType, EdgeId, GLOBAL_INTERNER, NodeId, PropertyMap, PropertyMapBuilder,
     PropertyValue, Provenance, ProvenanceFilter, Timestamp, VersionId,
 };
 use crate::db::AletheiaDB;
 use crate::index::vector::{DistanceMetric, HnswConfig};
 use crate::query::executor::{EntityId as ResultEntityId, EntityResult};
+use crate::query::limits::QueryResourceLimits;
 
-use super::auth::{McpAuthConfig, SessionAuth};
+use super::auth::{McpAuthConfig, SessionAuth, read_only_replica_error, tool_access_class};
 use super::batch::ApplyBatchRequest;
 use super::budget;
 use super::cursor::{CursorManager, CursorPayload};
@@ -161,7 +165,7 @@ use super::limits::{
     EffectiveQueryLimits, LimitCounters, LimitCountsSnapshot, LimitDimension, QueryLimitsConfig,
 };
 use super::tools::*;
-use crate::auth::{AuthMode, Principal};
+use crate::auth::{AccessClass, AuthMode, Principal};
 
 // ============================================================================
 // Resource Limits (to prevent DoS attacks)
@@ -189,11 +193,81 @@ const MAX_PAGINATION_OFFSET: usize = 10_000;
 /// Maximum k for vector similarity search.
 const MAX_VECTOR_K: usize = 1000;
 
+/// Node-expansion budget per unit of `max_depth` for the `semantic_path` tool
+/// (Issue #2907). The unbounded A* search is a DoS risk on large/adversarial
+/// graphs when the endpoints are attacker-controlled; the MCP surface therefore
+/// derives a bounded expansion budget (`max_depth * this`, both clamped) and
+/// aborts the search once it is exhausted.
+#[cfg(feature = "semantic-search")]
+const SEMANTIC_PATH_EXPANSIONS_PER_DEPTH: usize = 1_000;
+
 /// Default k for vector similarity search.
 const DEFAULT_VECTOR_K: usize = 10;
 
 /// Default transaction time placeholder string.
 const TRANSACTION_TIME_NOW: &str = "now";
+
+/// Maximum UTF-8 byte length of a single text input accepted by the embedding
+/// tools (Issue #2906). Bounds per-request embedding work and memory so an
+/// oversized input is rejected with `INVALID_ARGUMENT` before any model runs.
+///
+/// Only referenced by the feature-on embedding handlers; gated so the
+/// feature-off build (whose handlers return the unavailable-feature error
+/// without validating) does not carry a dead constant.
+#[cfg(feature = "embeddings")]
+const MAX_EMBED_TEXT_BYTES: usize = 64 * 1024;
+
+/// Maximum number of text strings accepted by `embed_text` in one call
+/// (Issue #2906).
+#[cfg(feature = "embeddings")]
+const MAX_EMBED_TEXTS: usize = 256;
+
+/// Maximum number of per-chunk embeddings `embed_text` returns in one call
+/// (Issue #2906). Also the ceiling `max_chunks` is clamped to.
+#[cfg(feature = "embeddings")]
+const MAX_EMBED_CHUNKS: usize = 512;
+
+/// Character window size used to chunk-expand each `embed_text` input document
+/// before embedding (Issue #2906). A long document is split into contiguous
+/// windows of at most this many Unicode scalar values, so it yields MULTIPLE
+/// aligned embeddings instead of being silently truncated to a single vector.
+/// Matches `embed_anything`'s default document chunk size.
+#[cfg(feature = "embeddings")]
+const EMBED_CHUNK_SIZE_CHARS: usize = 1000;
+
+/// Split `text` into contiguous character windows of at most `chunk_size_chars`
+/// Unicode scalar values each (Issue #2906 chunk expansion).
+///
+/// A deterministic, model-independent splitter so a long `embed_text` input
+/// document expands into MULTIPLE chunks (each subsequently embedded and
+/// aligned to its own [`EmbedData`](crate::embeddings::EmbedData)) rather than
+/// being silently truncated to a single vector. Splits on Unicode scalar
+/// boundaries, so every chunk is valid UTF-8. Empty input yields a single empty
+/// chunk (callers validate non-empty input upstream). `chunk_size_chars` must
+/// be non-zero.
+#[cfg(feature = "embeddings")]
+pub(crate) fn split_text_into_chunks(text: &str, chunk_size_chars: usize) -> Vec<String> {
+    debug_assert!(chunk_size_chars > 0, "chunk size must be non-zero");
+    let chunk_size_chars = chunk_size_chars.max(1);
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut count = 0usize;
+    for ch in text.chars() {
+        current.push(ch);
+        count += 1;
+        if count == chunk_size_chars {
+            chunks.push(std::mem::take(&mut current));
+            count = 0;
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
 
 /// Default maximum number of operations accepted by a single `apply_batch`
 /// call (Issue #3231). Deliberately far below the core transaction buffer's
@@ -201,6 +275,14 @@ const TRANSACTION_TIME_NOW: &str = "now";
 /// surface bound is always the one that fires, with the limit echoed in the
 /// rejection per the #3226 completeness convention.
 pub(crate) const DEFAULT_MAX_BATCH_OPERATIONS: usize = 1000;
+
+/// Default maximum number of designation targets accepted by a single
+/// `designate_subject` call (Issue #3701 hardening). Mirrors the `apply_batch`
+/// cap: an over-cap request is rejected up front with `INVALID_ARGUMENT`
+/// (limit echoed per the #3226 convention) before any registry mutation, so an
+/// unbounded `targets` array cannot be used as a DoS vector. Configurable per
+/// server via [`AletheiaMcpServer::with_max_designate_targets`].
+pub(crate) const DEFAULT_MAX_DESIGNATE_TARGETS: usize = 1000;
 
 /// AletheiaDB MCP Server.
 ///
@@ -223,6 +305,14 @@ pub struct AletheiaMcpServer {
     db: Arc<AletheiaDB>,
     /// Maximum operations accepted by one `apply_batch` call (Issue #3231).
     pub(crate) max_batch_operations: usize,
+    /// Maximum number of designation targets accepted by one
+    /// `designate_subject` call (Issue #3701 hardening). An over-cap request is
+    /// rejected up front with `INVALID_ARGUMENT` before any registry mutation.
+    pub(crate) max_designate_targets: usize,
+    /// Maximum number of entries accepted in a `priority_properties` budget
+    /// array (Issue #3583). Bounds the one-time cost of building the protected-
+    /// key set; an over-cap array is rejected with `INVALID_ARGUMENT`.
+    pub(crate) max_priority_properties: usize,
     auth: SessionAuth,
     /// Snapshot-anchored keyset continuation cursors (Issue #3360). Shared
     /// (one manager == one MCP connection) so its live-cursor cap is a
@@ -244,6 +334,32 @@ pub struct AletheiaMcpServer {
     /// occupying capacity. Shared across clones so the cloned server used for
     /// the race sees the same live count.
     in_flight_queries: Arc<AtomicUsize>,
+    /// Optional embedding-model handle (Issue #2906). Present only when the
+    /// `embeddings` feature is compiled AND a model has been configured via
+    /// [`with_embedder`](Self::with_embedder). `None` -> the embedding tools
+    /// (`embed_query`, `embed_text`, `semantic_search`,
+    /// `create_node_with_embedding`, `update_node_embedding`) return
+    /// `FAILED_PRECONDITION` ("no embedding model configured"). The tools are
+    /// advertised unconditionally (Design A); when the feature is *not*
+    /// compiled they return a structured unavailable-feature error instead.
+    #[cfg(feature = "embeddings")]
+    embedder: Option<Arc<crate::embeddings::Embedder>>,
+}
+
+/// Outcome of the `await_changes` synchronous prelude (Issue #3673): either an
+/// immediate result (bad args / subscribe error / catch-up hit) or a live
+/// [`Subscription`] to wait on for `timeout`. Shared by the sync
+/// [`AletheiaMcpServer::handle_await_changes`] (blocking Condvar) and the async
+/// [`AletheiaMcpServer::dispatch_await_changes_async`] (event-driven Notify) so
+/// both run identical subscribe + catch-up logic and differ only in HOW they
+/// wait. The `Immediate` result is boxed so the enum's variants stay
+/// size-balanced (`CallToolResult` is far larger than a `Subscription`).
+enum AwaitChangesStep {
+    Immediate(Box<CallToolResult>),
+    Block {
+        sub: Subscription,
+        timeout: std::time::Duration,
+    },
 }
 
 /// RAII slot in the bounded in-flight-query pool (Issue #3368). Decrements the
@@ -309,12 +425,34 @@ impl AletheiaMcpServer {
         Self {
             db,
             max_batch_operations: DEFAULT_MAX_BATCH_OPERATIONS,
+            max_designate_targets: DEFAULT_MAX_DESIGNATE_TARGETS,
+            max_priority_properties: budget::DEFAULT_MAX_PRIORITY_PROPERTIES,
             auth: SessionAuth::Anonymous,
             cursors: Arc::new(CursorManager::new()),
             query_limits: Arc::new(QueryLimitsConfig::default()),
             limit_counters: Arc::new(LimitCounters::default()),
             in_flight_queries: Arc::new(AtomicUsize::new(0)),
+            #[cfg(feature = "embeddings")]
+            embedder: None,
         }
+    }
+
+    /// Configure the embedding-model handle used by the embedding tools
+    /// (Issue #2906).
+    ///
+    /// The embedding tools are advertised unconditionally, but they only
+    /// produce embeddings once a model is configured here; until then they
+    /// return `FAILED_PRECONDITION`. A model is deliberately NOT built
+    /// implicitly (e.g. from an env var) inside [`new`](Self::new) /
+    /// [`with_auth`](Self::with_auth) because loading a model can download
+    /// weights and block — unacceptable for the many embedded/test callers of
+    /// those constructors. Serving deployments call this explicitly after
+    /// building the [`Embedder`](crate::embeddings::Embedder).
+    #[cfg(feature = "embeddings")]
+    #[must_use = "with_embedder returns a new server; discarding it drops the configured model"]
+    pub fn with_embedder(mut self, embedder: Arc<crate::embeddings::Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
     }
 
     /// Override the per-query resource limits for the `query` tool (Issue
@@ -364,6 +502,38 @@ impl AletheiaMcpServer {
         self
     }
 
+    /// Override the maximum number of designation targets accepted by a single
+    /// `designate_subject` call (default: 1000, Issue #3701). An over-limit
+    /// request is rejected before any registry mutation, with the limit echoed
+    /// in the structured error's `details` (per the #3226 completeness
+    /// convention).
+    ///
+    /// The cap is an MCP-surface payload bound mirroring
+    /// [`with_max_batch_operations`](Self::with_max_batch_operations), guarding
+    /// against an unbounded `targets` array being used as a DoS vector.
+    #[must_use]
+    pub fn with_max_designate_targets(mut self, max_designate_targets: usize) -> Self {
+        self.max_designate_targets = max_designate_targets;
+        self
+    }
+
+    /// Override the maximum number of entries accepted in a `priority_properties`
+    /// token-budget array (default: 1024, Issue #3583).
+    ///
+    /// `priority_properties` (Issue #3353) names the property keys a budgeted
+    /// read protects from elision. It is consulted for every property of every
+    /// returned entity, so an unbounded array is a denial-of-service vector:
+    /// this cap rejects an over-long array up front with a structured
+    /// `INVALID_ARGUMENT` error (naming the cap and the given length) before any
+    /// shaping runs, keeping response-shaping cost bounded regardless of caller
+    /// input. The per-key lookup itself is O(1); this cap additionally bounds the
+    /// one-time cost of validating the array and building the lookup set.
+    #[must_use = "with_max_priority_properties returns a new server; discarding it drops the configured limit"]
+    pub fn with_max_priority_properties(mut self, max_priority_properties: usize) -> Self {
+        self.max_priority_properties = max_priority_properties;
+        self
+    }
+
     /// Create an MCP server with authentication and role-based
     /// authorization (Issue #3350, Phase 2).
     ///
@@ -398,11 +568,15 @@ impl AletheiaMcpServer {
         Self {
             db,
             max_batch_operations: DEFAULT_MAX_BATCH_OPERATIONS,
+            max_designate_targets: DEFAULT_MAX_DESIGNATE_TARGETS,
+            max_priority_properties: budget::DEFAULT_MAX_PRIORITY_PROPERTIES,
             auth: SessionAuth::from(auth),
             cursors: Arc::new(CursorManager::new()),
             query_limits: Arc::new(QueryLimitsConfig::default()),
             limit_counters: Arc::new(LimitCounters::default()),
             in_flight_queries: Arc::new(AtomicUsize::new(0)),
+            #[cfg(feature = "embeddings")]
+            embedder: None,
         }
     }
 
@@ -501,6 +675,7 @@ impl AletheiaMcpServer {
     ///     valid_time: None,
     ///     provenance: None,
     ///     derived_from: None,
+    ///     namespace: None,
     /// };
     /// ```
     ///
@@ -533,6 +708,39 @@ impl AletheiaMcpServer {
     /// Returns the updated node object.
     pub fn update_node(&self, req: UpdateNodeRequest) -> String {
         Self::extract_text(self.handle_update_node(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Generate a single dense embedding from text (Issue #2906).
+    ///
+    /// Returns the tool's JSON response as a string. When the `embeddings`
+    /// feature is not compiled (or no model is configured) this returns the
+    /// structured unavailable/precondition error rather than an embedding.
+    pub fn embed_query(&self, req: EmbedQueryRequest) -> String {
+        Self::extract_text(self.handle_embed_query(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Generate per-chunk dense embeddings for multiple texts (Issue #2906).
+    pub fn embed_text(&self, req: EmbedTextRequest) -> String {
+        Self::extract_text(self.handle_embed_text(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Create a node whose embedding is generated from text (Issue #2906).
+    pub fn create_node_with_embedding(&self, req: CreateNodeWithEmbeddingRequest) -> String {
+        Self::extract_text(self.handle_create_node_with_embedding(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Regenerate a node's embedding property from text, preserving all other
+    /// properties (Issue #2906).
+    pub fn update_node_embedding(&self, req: UpdateNodeEmbeddingRequest) -> String {
+        Self::extract_text(self.handle_update_node_embedding(
             serde_json::to_value(req).expect("request serialization should not fail"),
         ))
     }
@@ -610,6 +818,36 @@ impl AletheiaMcpServer {
         Self::extract_text(self.handle_count_nodes(
             serde_json::to_value(req).expect("request serialization should not fail"),
         ))
+    }
+
+    /// Dispatch a tool by name from a raw JSON arguments object, returning the
+    /// tool's JSON string result.
+    ///
+    /// Unlike the per-tool typed methods (e.g. [`get_edge`](Self::get_edge)),
+    /// which call their `handle_*` directly, this routes through
+    /// [`dispatch_tool`](Self::dispatch_tool) so the raw-argument-driven
+    /// cross-cutting read features apply: the Issue #3353 token-budget shaping
+    /// (`max_response_tokens` / `max_response_bytes` / `priority_properties`)
+    /// and the Issue #3360 snapshot-anchored cursor paging (`use_cursor` /
+    /// `cursor`), both of which are read off the raw arguments and are therefore
+    /// invisible to the typed request structs. On the embedded/anonymous
+    /// [`AletheiaMcpServer::new`] path the built-in tool authorization is a
+    /// no-op; a caller that has authorized the tool out-of-band (e.g. the
+    /// autumn-web HTTP surface's own RBAC gate) gets the same result a direct
+    /// `handle_*` would produce when neither budget nor cursor is present.
+    ///
+    // exposed for autumn-web migration (Issue #3524)
+    pub fn dispatch_tool_json(&self, name: &str, args: serde_json::Value) -> String {
+        Self::extract_text(self.dispatch_tool(name, args))
+    }
+
+    /// Every advertised tool's classified [`AccessClass`], exposed for
+    /// external conformance sweeps (e.g. the Issue #3355 replica read-only
+    /// enforcement test) without depending on the crate-private
+    /// `TOOL_ACCESS_CLASSES` table directly.
+    #[must_use]
+    pub fn tool_access_classes() -> Vec<(&'static str, AccessClass)> {
+        super::auth::TOOL_ACCESS_CLASSES.to_vec()
     }
 
     /// Get an edge by its ID.
@@ -711,6 +949,49 @@ impl AletheiaMcpServer {
     /// Returns the path and the final nodes found.
     pub fn traverse(&self, req: TraverseRequest) -> String {
         Self::extract_text(self.handle_traverse(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Create (register) an agent-scoped namespace (Issue #3349, PR3b).
+    ///
+    /// Returns the created `{name, description, created_at}`; a duplicate name
+    /// (or the implicit `default`) is a `CONFLICT`, a malformed/reserved name is
+    /// `INVALID_ARGUMENT`.
+    pub fn create_namespace(&self, req: CreateNamespaceRequest) -> String {
+        Self::extract_text(self.handle_create_namespace(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// List all registered namespaces with per-namespace counts (Issue #3349,
+    /// PR3b).
+    pub fn list_namespaces(&self, req: ListNamespacesRequest) -> String {
+        Self::extract_text(self.handle_list_namespaces(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Describe a single namespace by name (Issue #3349, PR3b). An unregistered
+    /// name is `NOT_FOUND` (`details.namespace`).
+    pub fn describe_namespace(&self, req: DescribeNamespaceRequest) -> String {
+        Self::extract_text(self.handle_describe_namespace(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// ADMIN. Designate a GDPR erasure subject over one or more targets
+    /// (Issue #3359, Slice 4b). The first Admin-class MCP tool.
+    pub fn designate_subject(&self, req: DesignateSubjectRequest) -> String {
+        Self::extract_text(self.handle_designate_subject(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// ADMIN. Irreversibly erase a designated subject and return a signed
+    /// erasure attestation (Issue #3359, Slice 4b).
+    pub fn erase_subject(&self, req: EraseSubjectRequest) -> String {
+        Self::extract_text(self.handle_erase_subject(
             serde_json::to_value(req).expect("request serialization should not fail"),
         ))
     }
@@ -894,18 +1175,50 @@ impl AletheiaMcpServer {
     /// Thin aggregator over [`AletheiaDB::stats`] — all values are O(1)/cached
     /// counter reads, never a version scan.
     pub fn database_stats(&self, req: DatabaseStatsRequest) -> String {
+        // Native/MCP path: derive the per-principal breakdown visibility from
+        // the MCP session principal (anonymous mode is fully privileged →
+        // included). The HTTP route authenticates independently and must call
+        // `database_stats_with_visibility` with its own principal's role.
+        self.database_stats_with_visibility(req, self.caller_is_admin())
+    }
+
+    /// `database_stats` with an explicit decision on whether the changefeed
+    /// per-principal identity breakdown is included (Issue #3678).
+    ///
+    /// The HTTP `GET /database_stats` route authenticates independently of the
+    /// MCP session, so it computes admin-ness from its own
+    /// `Authorized<MetricsClass>` principal and threads it here. A non-admin
+    /// caller receives the scalar aggregates but not the per-principal roster.
+    #[must_use]
+    pub fn database_stats_with_visibility(
+        &self,
+        req: DatabaseStatsRequest,
+        include_per_principal: bool,
+    ) -> String {
         Self::extract_text(self.handle_database_stats(
             serde_json::to_value(req).expect("request serialization should not fail"),
+            include_per_principal,
         ))
+    }
+
+    /// Whether the current MCP session principal may see admin-gated details
+    /// (Issue #3678). Anonymous mode has no session principal and is fully
+    /// privileged, so it returns `true`; an authenticated session returns
+    /// `true` only for the `admin` role.
+    fn caller_is_admin(&self) -> bool {
+        self.session_principal()
+            .is_none_or(|p| p.role.allows(crate::auth::AccessClass::Admin))
     }
 
     /// Test-only access to the raw `database_stats` handler, bypassing typed
     /// request construction so tests can exercise wire-level argument edge
     /// cases (null arguments, non-object arguments, unknown keys) exactly as
-    /// `call_tool` delivers them.
+    /// `call_tool` delivers them. Admin-visible (per-principal breakdown
+    /// included) so the argument-edge assertions are unaffected by the #3678
+    /// gate.
     #[cfg(test)]
     pub(crate) fn database_stats_raw(&self, args: serde_json::Value) -> String {
-        Self::extract_text(self.handle_database_stats(args))
+        Self::extract_text(self.handle_database_stats(args, true))
     }
 
     /// List graph-wide changes within a transaction-time window.
@@ -918,6 +1231,67 @@ impl AletheiaMcpServer {
         Self::extract_text(self.handle_list_changes(
             serde_json::to_value(req).expect("request serialization should not fail"),
         ))
+    }
+
+    /// Long-poll for the next committed changes (the push changefeed's blocking
+    /// surface, Issue #3375).
+    ///
+    /// Stateless per call: subscribe to the push feed, optionally catch up from a
+    /// prior `from_token` via [`list_changes`](Self::list_changes), and otherwise
+    /// block up to `timeout_ms` (default 25000, hard cap 60000) for the next
+    /// matching commit. A timeout returns an empty `changes` array with
+    /// `timed_out: true` and a `resume_token` to poll again; a lagged
+    /// subscription returns a retriable `RESOURCE_EXHAUSTED` carrying the
+    /// `resume_token` to resume losslessly via `list_changes`.
+    ///
+    /// This tool is deliberately excluded from the #3368 per-read timeout /
+    /// #3353 token-budget / #3360 cursor wrappers — a long-poll is expected to
+    /// block, so those cross-cutting read features would truncate or abort it.
+    pub fn await_changes(&self, req: AwaitChangesRequest) -> String {
+        self.await_changes_for_principal(req, None)
+    }
+
+    /// Long-poll for changes on behalf of an explicit principal (Issue #3678).
+    ///
+    /// Used by the HTTP `/changes/await` projection, which authenticates the
+    /// caller at the route and threads that principal id here so the per-principal
+    /// changefeed quota is enforced on the HTTP surface too (the native stdio path
+    /// resolves the principal from the MCP session instead, via
+    /// [`session_principal`](Self::session_principal)). Passing `None` falls back
+    /// to the session principal (or the shared `"anonymous"` bucket).
+    pub fn await_changes_for_principal(
+        &self,
+        req: AwaitChangesRequest,
+        principal_key: Option<String>,
+    ) -> String {
+        Self::extract_text(self.handle_await_changes(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+            principal_key,
+        ))
+    }
+
+    /// Event-driven async counterpart to [`await_changes_for_principal`]
+    /// (Issue #3673).
+    ///
+    /// Waits on the changefeed via the `recv_async` Notify path, so the long-poll
+    /// pins **no** Tokio worker for its duration and releases its per-principal
+    /// slot immediately when the caller's future is dropped (HTTP client
+    /// disconnect). Used by the HTTP `/changes/await` projection; the native MCP
+    /// `call_tool` seam routes through [`dispatch_await_changes_async`](Self::dispatch_await_changes_async)
+    /// directly. Behavior (delivery / resume / timeout / lagged semantics) is
+    /// identical to the sync entry — only the wait mechanism differs.
+    pub async fn await_changes_for_principal_async(
+        &self,
+        req: AwaitChangesRequest,
+        principal_key: Option<String>,
+    ) -> String {
+        Self::extract_text(
+            self.dispatch_await_changes_async(
+                serde_json::to_value(req).expect("request serialization should not fail"),
+                principal_key,
+            )
+            .await,
+        )
     }
 
     /// Execute a hybrid query.
@@ -1074,8 +1448,21 @@ impl AletheiaMcpServer {
             id: node.id.as_u64(),
             label: self.interned_to_string(node.label),
             properties: self.property_map_to_json(&node.properties, include_vectors),
+            namespace: Self::namespace_field(node.namespace()),
             provenance,
             temporal,
+        }
+    }
+
+    /// Render an entity's namespace as the first-class response field
+    /// (Issue #3349): `None` for the implicit `default` namespace — so a
+    /// single-agent (`default`-only) response stays byte-identical to
+    /// pre-namespace behavior — and `Some(name)` for any non-default namespace.
+    fn namespace_field(ns: crate::core::namespace::Namespace) -> Option<String> {
+        if ns.is_default() {
+            None
+        } else {
+            Some(ns.into_string())
         }
     }
 
@@ -1092,9 +1479,21 @@ impl AletheiaMcpServer {
             target_id: edge.target.as_u64(),
             label: self.interned_to_string(edge.label),
             properties: self.property_map_to_json(&edge.properties, include_vectors),
+            namespace: Self::namespace_field(edge.namespace()),
             provenance,
             temporal,
         }
+    }
+
+    /// Test-only accessor for the private JSON serializer (crypto-shred PR-1b
+    /// erased-marker test lives in `db::crypto_shred::integration_tests`).
+    #[cfg(test)]
+    pub(crate) fn property_map_to_json_for_test(
+        &self,
+        props: &PropertyMap,
+        include_vectors: bool,
+    ) -> HashMap<String, serde_json::Value> {
+        self.property_map_to_json(props, include_vectors)
     }
 
     fn property_map_to_json(
@@ -1105,6 +1504,12 @@ impl AletheiaMcpServer {
         let mut result = HashMap::new();
         for (key, value) in props.iter() {
             let key_str = self.interned_to_string(*key);
+            // Elide engine-reserved ride-along keys (the namespace marker,
+            // #3349, and crypto-shred markers) — they are surfaced as
+            // first-class fields, never as user properties.
+            if crate::core::namespace::is_reserved_property_key(&key_str) {
+                continue;
+            }
             result.insert(key_str, self.property_value_to_json(value, include_vectors));
         }
         result
@@ -1122,6 +1527,18 @@ impl AletheiaMcpServer {
             PropertyValue::Float(f) => json!(*f),
             PropertyValue::String(s) => serde_json::Value::String(s.to_string()),
             PropertyValue::Bytes(b) => {
+                // GDPR crypto-shred (Issue #3359, PR-1b): a sealed `SUBJ` envelope
+                // that reaches the MCP funnel belongs to a known erasure subject.
+                // Active-subject values are already unsealed to plaintext at the db
+                // read boundary, so a surviving envelope is (almost always) erased —
+                // render the erased descriptor (analogous to the #3220 vector-elision
+                // shape) instead of leaking opaque ciphertext as base64. A `Bytes`
+                // value whose subject the keyring does not recognize is treated as
+                // ordinary user bytes.
+                #[cfg(feature = "audit-export")]
+                if let Some(descriptor) = self.sealed_value_descriptor(b) {
+                    return descriptor;
+                }
                 serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b))
             }
             PropertyValue::Array(arr) => serde_json::Value::Array(
@@ -1158,19 +1575,70 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// If `bytes` is a sealed crypto-shred `SUBJ` envelope for a subject the
+    /// keyring recognizes, return its MCP descriptor (Issue #3359, PR-1b);
+    /// otherwise `None` (render as ordinary bytes). An erased subject yields
+    /// `{"type":"sealed","erased":true,"subject_id":<id>}`; an active subject
+    /// that somehow reached here un-unsealed yields `erased:false` — never the
+    /// plaintext and never the raw ciphertext.
+    #[cfg(feature = "audit-export")]
+    fn sealed_value_descriptor(&self, bytes: &[u8]) -> Option<serde_json::Value> {
+        use crate::db::crypto_shred::envelope;
+        if !envelope::is_envelope(bytes) {
+            return None;
+        }
+        let header = envelope::parse_header(bytes).ok()?;
+        let erased = self.db.crypto_shred.is_erased(&header.subject_id);
+        let active = self.db.crypto_shred.is_active(&header.subject_id);
+        if !erased && !active {
+            // Not a subject we know — treat as ordinary user bytes.
+            return None;
+        }
+        Some(json!({
+            "type": "sealed",
+            "erased": erased,
+            "subject_id": header.subject_id,
+        }))
+    }
+
     pub(crate) fn json_to_property_map(
         &self,
         json: &HashMap<String, serde_json::Value>,
-    ) -> Result<PropertyMap, String> {
+    ) -> Result<PropertyMap, crate::core::error::Error> {
         let mut builder = PropertyMapBuilder::new();
         for (key, value) in json {
             if let Some(pv) = self.json_to_property_value(value) {
-                builder = builder
-                    .try_insert(key.as_str(), pv)
-                    .map_err(|e| e.to_string())?;
+                // `try_insert` interns the property KEY. A capacity exhaustion
+                // there is a TYPED `StorageError::CapacityExceeded` that must
+                // survive to the call site so it renders as an actionable
+                // FAILED_PRECONDITION (configurable interner cap), NOT a generic
+                // INVALID_ARGUMENT. Propagate the typed error verbatim.
+                builder = builder.try_insert(key.as_str(), pv)?;
             }
         }
         Ok(builder.build())
+    }
+
+    /// Render a property-map construction error to a `CallToolResult`.
+    ///
+    /// A string-interner capacity exhaustion (a property-KEY interning breach,
+    /// configurable interner cap) routes through [`Self::db_error`] so it
+    /// surfaces as an actionable `FAILED_PRECONDITION` naming
+    /// `persistence.max_interned_strings` with structured
+    /// `{resource, current, limit}` details — the same envelope the node-LABEL
+    /// path already produces. Every other property error (bad value, recursion
+    /// depth) stays a caller-fault `INVALID_ARGUMENT`, preserving prior behavior.
+    pub(crate) fn property_map_error(&self, e: crate::core::error::Error) -> CallToolResult {
+        if matches!(
+            &e,
+            crate::core::error::Error::Storage(
+                crate::core::error::StorageError::CapacityExceeded { .. }
+            )
+        ) {
+            self.db_error(e)
+        } else {
+            self.invalid_argument(&format!("Invalid properties: {}", e))
+        }
     }
 
     fn json_to_property_value(&self, value: &serde_json::Value) -> Option<PropertyValue> {
@@ -1233,6 +1701,11 @@ impl AletheiaMcpServer {
     ///
     /// Collapses the otherwise-duplicated "if present, parse, else None" handling for the
     /// changefeed's optional time bounds.
+    // clippy::result_large_err: the Err is rmcp's `CallToolResult` (~176B), the
+    // MCP error-response type carried across the whole tool surface; boxing it
+    // would ripple through the entire MCP `Result` API and every `?` call site.
+    // Cold error path. Allowed pending a deliberate Box refactor.
+    #[allow(clippy::result_large_err)]
     fn parse_opt_timestamp(
         &self,
         label: &str,
@@ -1243,6 +1716,135 @@ impl AletheiaMcpServer {
             .map(|s| self.parse_timestamp(s))
             .transpose()
             .map_err(|e| self.invalid_argument(&format!("Invalid {label}: {e}")))
+    }
+
+    /// Parse an optional namespace **write** argument (Issue #3349, PR3a),
+    /// returning a structured `INVALID_ARGUMENT` error result on a malformed
+    /// name. `None`/absent ⇒ the default namespace (unchanged behavior). A
+    /// supplied `"default"` resolves to the default namespace (equivalent to
+    /// omitting it).
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); see
+    // `parse_opt_timestamp`.
+    #[allow(clippy::result_large_err)]
+    fn parse_opt_namespace(
+        &self,
+        value: &Option<String>,
+    ) -> std::result::Result<Option<crate::core::namespace::Namespace>, CallToolResult> {
+        match value.as_deref() {
+            None => Ok(None),
+            Some(s) => match crate::core::namespace::Namespace::new(s) {
+                Ok(ns) => Ok(Some(ns)),
+                Err(e) => Err(self.db_error(crate::core::error::Error::Namespace(e))),
+            },
+        }
+    }
+
+    /// Reject an explicit namespace supplied to a **non-create** write
+    /// (update / delete — Issue #3349, PR3a): a namespace is immutable after
+    /// creation, so supplying one is `INVALID_ARGUMENT`
+    /// ([`NamespaceError::Immutable`]) rather than a silent no-op. `None` ⇒ OK.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult`; see above.
+    #[allow(clippy::result_large_err)]
+    fn reject_namespace_on_write_update(
+        &self,
+        value: &Option<String>,
+    ) -> std::result::Result<(), CallToolResult> {
+        if value.is_some() {
+            return Err(self.db_error(crate::core::error::Error::Namespace(
+                crate::core::namespace::NamespaceError::Immutable,
+            )));
+        }
+        Ok(())
+    }
+
+    /// Parse an optional namespace **read scope** argument (Issue #3349, PR3a).
+    ///
+    /// Accepts three JSON shapes:
+    /// - a **string** namespace name (single-namespace scope), or the special
+    ///   selector `"all"` (no filter);
+    /// - an **array of string** namespace names (the union scope);
+    /// - absent ⇒ `Ok(None)`, meaning "no explicit scope supplied". Each scoped
+    ///   read tool resolves this to [`NamespaceScope::default`] — the `default`
+    ///   namespace ONLY (isolated-by-default, #3349 FIX2) — via
+    ///   `.unwrap_or_default()`, then routes through its `*_scoped` path. This is
+    ///   exact back-compat for any pre-namespace database (all data is `default`,
+    ///   so an omitted read returns all of it) and only isolates once non-default
+    ///   namespaces exist. It is therefore equivalent to an explicit
+    ///   `"default"`, and distinct from `"all"` (which imposes no filter). The
+    ///   non-scoping tools (`list_edges`/`hybrid_query`/`query`) instead treat an
+    ///   omitted/`"all"` scope as a no-op via [`reject_unsupported_scope`].
+    ///
+    /// An **empty array** is `INVALID_ARGUMENT` (a scope that silently matches
+    /// nothing is forbidden). A malformed namespace name is `INVALID_ARGUMENT`
+    /// with `details.namespace`. An unknown (unregistered) namespace is not
+    /// rejected here — it surfaces as `NOT_FOUND` when the scoped read validates
+    /// the scope against the registry (`details.namespace`).
+    // clippy::result_large_err: Err is rmcp's `CallToolResult`; see above.
+    #[allow(clippy::result_large_err)]
+    fn parse_opt_scope(
+        &self,
+        value: &Option<serde_json::Value>,
+    ) -> std::result::Result<Option<crate::core::namespace::NamespaceScope>, CallToolResult> {
+        use crate::core::error::Error;
+        use crate::core::namespace::{Namespace, NamespaceScope};
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        // An explicit JSON null is treated as "not supplied".
+        if value.is_null() {
+            return Ok(None);
+        }
+        let scope = match value {
+            serde_json::Value::String(s) if s == "all" => NamespaceScope::All,
+            serde_json::Value::String(s) => match Namespace::new(s.as_str()) {
+                Ok(ns) => NamespaceScope::Single(ns),
+                Err(e) => return Err(self.db_error(Error::Namespace(e))),
+            },
+            serde_json::Value::Array(arr) => {
+                let mut namespaces = Vec::with_capacity(arr.len());
+                for el in arr {
+                    let Some(name) = el.as_str() else {
+                        return Err(
+                            self.invalid_argument("namespace scope array elements must be strings")
+                        );
+                    };
+                    match Namespace::new(name) {
+                        Ok(ns) => namespaces.push(ns),
+                        Err(e) => return Err(self.db_error(Error::Namespace(e))),
+                    }
+                }
+                // Empty list ⇒ INVALID_ARGUMENT (never-silently-match-nothing).
+                match NamespaceScope::list(namespaces) {
+                    Ok(scope) => scope,
+                    Err(e) => return Err(self.db_error(Error::Namespace(e))),
+                }
+            }
+            _ => {
+                return Err(self.invalid_argument(
+                    "namespace must be a string, an array of strings, or \"all\"",
+                ));
+            }
+        };
+        Ok(Some(scope))
+    }
+
+    /// For a read tool that does **not** yet support a namespace scope in v1
+    /// (`list_edges`, `hybrid_query`, `query`): accept an absent scope or the
+    /// no-op `"all"` selector (both leave behavior unchanged), but reject any
+    /// narrowing scope with a structured `INVALID_ARGUMENT` — never a silently
+    /// unscoped result (never-silently-wrong). A malformed / empty scope still
+    /// surfaces its own `parse_opt_scope` error.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult`; see above.
+    #[allow(clippy::result_large_err)]
+    fn reject_unsupported_scope(
+        &self,
+        value: &Option<serde_json::Value>,
+        message: &str,
+    ) -> std::result::Result<(), CallToolResult> {
+        match self.parse_opt_scope(value)? {
+            None | Some(crate::core::namespace::NamespaceScope::All) => Ok(()),
+            Some(_) => Err(self.invalid_argument(message)),
+        }
     }
 
     /// Resolve a pair of independently-optional `as_of_valid_time` /
@@ -1257,6 +1859,9 @@ impl AletheiaMcpServer {
     /// (transaction_time defaults to now), matching the Rust API's
     /// `get_node_at_valid_time`/`get_node_at_transaction_time` convenience
     /// methods, which default the unspecified dimension the same way.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); see
+    // `parse_opt_timestamp` — boxing would cascade through the MCP `Result` API.
+    #[allow(clippy::result_large_err)]
     fn resolve_bitemporal_as_of(
         &self,
         as_of_valid_time: &Option<String>,
@@ -1291,6 +1896,9 @@ impl AletheiaMcpServer {
     /// deliberately has no `principal` field, so callers cannot forge it.
     /// Anonymous-mode sessions (and the embedded `new()` constructor)
     /// record no principal -- the field is absent, not an empty string.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); see
+    // `parse_opt_timestamp` — boxing would cascade through the MCP `Result` API.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn parse_opt_provenance(
         &self,
         value: Option<crate::mcp::tools::ProvenanceRequest>,
@@ -1347,6 +1955,9 @@ impl AletheiaMcpServer {
     /// Invalid values fail closed with a structured `INVALID_ARGUMENT` whose
     /// `details.field` names the offending parameter (AC5) — never a silent
     /// empty result.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); see
+    // `parse_opt_timestamp` — boxing would cascade through the MCP `Result` API.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn parse_provenance_filter(
         &self,
         args: &serde_json::Value,
@@ -1439,6 +2050,85 @@ impl AletheiaMcpServer {
         )
     }
 
+    /// Parse the optional Issue #3372 `fusion_policy` object into a validated
+    /// [`FusionPolicy`](crate::db::fusion::FusionPolicy). Returns `Ok(None)`
+    /// when the param is absent/null (unchanged behavior). A wrong JSON type or
+    /// an invalid weight/parameter maps to `INVALID_ARGUMENT` (#3234,
+    /// `retriable:false`) — `FusionPolicyError` is not a `db::Error`, so it is
+    /// mapped directly here.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult`; see
+    // `parse_provenance_filter`.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn parse_fusion_policy(
+        &self,
+        args: &serde_json::Value,
+    ) -> std::result::Result<Option<crate::db::fusion::FusionPolicy>, CallToolResult> {
+        let Some(obj) = args.as_object() else {
+            return Ok(None);
+        };
+        let policy_val = match obj.get("fusion_policy") {
+            None | Some(serde_json::Value::Null) => return Ok(None),
+            Some(serde_json::Value::Object(m)) => m,
+            Some(_) => {
+                return Err(self.invalid_argument(
+                    "Invalid 'fusion_policy': expected an object with optional numeric weights",
+                ));
+            }
+        };
+
+        // Read an optional finite f64 field, rejecting a wrong JSON type here so
+        // the caller gets a field-named INVALID_ARGUMENT rather than a silently
+        // ignored setting.
+        let read_num = |key: &str| -> std::result::Result<Option<f64>, CallToolResult> {
+            match policy_val.get(key) {
+                None | Some(serde_json::Value::Null) => Ok(None),
+                Some(serde_json::Value::Number(n)) => Ok(Some(n.as_f64().unwrap_or(f64::NAN))),
+                Some(_) => Err(self.invalid_argument(&format!(
+                    "Invalid 'fusion_policy.{key}': expected a number"
+                ))),
+            }
+        };
+
+        let mut builder = crate::db::fusion::FusionPolicy::builder();
+        if let Some(v) = read_num("w_similarity")? {
+            builder = builder.w_similarity(v);
+        }
+        if let Some(v) = read_num("w_confidence")? {
+            builder = builder.w_confidence(v);
+        }
+        if let Some(v) = read_num("w_recency")? {
+            builder = builder.w_recency(v);
+        }
+        if let Some(v) = read_num("neutral_confidence")? {
+            builder = builder.neutral_confidence(v);
+        }
+        if let Some(v) = read_num("recency_half_life_secs")? {
+            builder = builder.recency_half_life_secs(v);
+        }
+
+        builder.build().map(Some).map_err(|e| {
+            self.error_result(
+                McpError::new(McpErrorCode::InvalidArgument, e.to_string())
+                    .details(json!({ "param": "fusion_policy" })),
+            )
+        })
+    }
+
+    /// Serialize a [`FusionBreakdown`](crate::db::fusion::FusionBreakdown) into
+    /// the per-result `score_breakdown` JSON (Issue #3372).
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn fusion_breakdown_to_json(b: &crate::db::fusion::FusionBreakdown) -> serde_json::Value {
+        json!({
+            "similarity": b.similarity,
+            "confidence": b.confidence,
+            "confidence_defaulted": b.confidence_defaulted,
+            "recency": b.recency,
+            "recency_defaulted": b.recency_defaulted,
+            "fused": b.fused,
+        })
+    }
+
     /// Parse a single MCP [`LineageRefRequest`] into a core
     /// [`LineageRef`](crate::core::lineage::LineageRef) (Issue #3371).
     ///
@@ -1447,6 +2137,9 @@ impl AletheiaMcpServer {
     /// version actually *exists* is checked by the write path
     /// (`validate_sources`) so a dangling reference becomes a `NOT_FOUND`
     /// rather than an `INVALID_ARGUMENT`.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); see
+    // `parse_opt_timestamp` — boxing would cascade through the MCP `Result` API.
+    #[allow(clippy::result_large_err)]
     fn parse_lineage_ref(
         &self,
         req: &crate::mcp::tools::LineageRefRequest,
@@ -1472,6 +2165,10 @@ impl AletheiaMcpServer {
     /// Parse the optional `derived_from` list on a write request into core
     /// [`LineageRef`](crate::core::lineage::LineageRef)s (Issue #3371). `None`
     /// or an empty list yields an empty vec (no lineage recorded).
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); see
+    // `parse_opt_timestamp` — boxing would cascade through the MCP `Result` API.
+    // Also covers the inner `map(|r| self.parse_lineage_ref(r))` closure.
+    #[allow(clippy::result_large_err)]
     fn parse_derived_from(
         &self,
         value: &Option<Vec<crate::mcp::tools::LineageRefRequest>>,
@@ -1850,6 +2547,9 @@ impl AletheiaMcpServer {
     /// applying the same optional exact-property filter `list_nodes` /
     /// `find_nodes_at_time` support. Returns a structured error result on a
     /// bad property value.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); see
+    // `parse_opt_timestamp` — boxing would cascade through the MCP `Result` API.
+    #[allow(clippy::result_large_err)]
     fn fetch_node_candidates(
         &self,
         label: &str,
@@ -2094,7 +2794,23 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
-        match self.db.get_node(node_id) {
+        // Issue #3349: a namespace scope narrows visibility (an out-of-scope
+        // node is reported NOT_FOUND, indistinguishable from missing). Omitted ⇒
+        // the `default` namespace only (isolated-by-default, #3349 FIX2), routed
+        // through the scoped read; `all` imposes no filter (byte-identical
+        // unscoped fast path). For a pre-namespace database (all data is
+        // `default`) an omitted read still returns all of it.
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        let node_result = match &scope {
+            crate::core::namespace::NamespaceScope::All => self.db.get_node(node_id),
+            scope => self.db.get_node_scoped(node_id, scope),
+        };
+
+        match node_result {
             Ok(node) => {
                 let now = time::now();
                 let response =
@@ -2138,7 +2854,7 @@ impl AletheiaMcpServer {
         let properties = match req.properties {
             Some(p) => match self.json_to_property_map(&p) {
                 Ok(map) => map,
-                Err(e) => return self.invalid_argument(&format!("Invalid properties: {}", e)),
+                Err(e) => return self.property_map_error(e),
             },
             None => PropertyMap::default(),
         };
@@ -2157,12 +2873,20 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
+        let namespace = match self.parse_opt_namespace(&req.namespace) {
+            Ok(ns) => ns,
+            Err(result) => return result,
+        };
+
         let mut options = crate::api::transaction::WriteRequestOptions::new();
         if let Some(valid_from) = valid_from {
             options = options.with_valid_from(valid_from);
         }
         if let Some(provenance) = provenance {
             options = options.with_provenance(provenance);
+        }
+        if let Some(ns) = namespace.clone() {
+            options = options.with_namespace(ns);
         }
 
         let created = if derived_from.is_empty() {
@@ -2178,6 +2902,15 @@ impl AletheiaMcpServer {
                 )
                 .map(|(node_id, _version)| node_id)
         };
+
+        // Auto-register the (non-default) namespace only AFTER a successful
+        // commit, mirroring `create_node_in_namespace` (a failed write must not
+        // leave a durable phantom namespace).
+        if let (Ok(_), Some(ns)) = (&created, &namespace)
+            && let Err(e) = self.db.register_namespace_on_write(ns)
+        {
+            return self.db_error(e);
+        }
 
         match created {
             Ok(node_id) => match self.db.get_node(node_id) {
@@ -2210,9 +2943,15 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
+        // A namespace is immutable after creation (Issue #3349): supplying one
+        // on an update is INVALID_ARGUMENT, never a silent no-op.
+        if let Err(result) = self.reject_namespace_on_write_update(&req.namespace) {
+            return result;
+        }
+
         let properties = match self.json_to_property_map(&req.properties) {
             Ok(map) => map,
-            Err(e) => return self.invalid_argument(&format!("Invalid properties: {}", e)),
+            Err(e) => return self.property_map_error(e),
         };
 
         let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
@@ -2276,6 +3015,12 @@ impl AletheiaMcpServer {
             // regression vs pre-#3234 responses).
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
+
+        // A namespace is immutable after creation (Issue #3349): supplying one
+        // on a delete is INVALID_ARGUMENT, never a silent no-op.
+        if let Err(result) = self.reject_namespace_on_write_update(&req.namespace) {
+            return result;
+        }
 
         let detach = req.detach.unwrap_or(false);
 
@@ -2567,6 +3312,115 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// Map a [`CryptoShredError`] to the MCP #3234 error envelope via its stable
+    /// `.code()` (Issue #3359, Slice 4b).
+    ///
+    /// `CryptoShredError` is NOT a `crate::core::error::Error` variant, so
+    /// routing it through [`Self::db_error`] would collapse `INVALID_ARGUMENT` /
+    /// `CONFLICT` to `INTERNAL` (its `From<..> for Error` only preserves
+    /// `FAILED_PRECONDITION`). We map directly instead. Its `Display` never
+    /// contains key bytes or plaintext (guaranteed by the error type), so the
+    /// message is safe to surface verbatim.
+    fn crypto_shred_error(&self, e: crate::db::CryptoShredError) -> CallToolResult {
+        let code = match e.code() {
+            "INVALID_ARGUMENT" => McpErrorCode::InvalidArgument,
+            "FAILED_PRECONDITION" => McpErrorCode::FailedPrecondition,
+            "CONFLICT" => McpErrorCode::Conflict,
+            "NOT_FOUND" => McpErrorCode::NotFound,
+            _ => McpErrorCode::Internal,
+        };
+        self.error_result(McpError::new(code, e.to_string()).retriable(e.retriable()))
+    }
+
+    /// ADMIN. Designate a GDPR erasure subject over one or more targets
+    /// (Issue #3359, Slice 4b).
+    fn handle_designate_subject(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::db::DesignationTarget;
+
+        // DoS guard: reject an over-cap `targets` array up front, on the RAW
+        // JSON value BEFORE `serde_json::from_value` deserializes/allocates the
+        // typed Vec, mirroring the `apply_batch` cap (limit echoed per the #3226
+        // convention).
+        if let Some(arr) = args.get("targets").and_then(|t| t.as_array())
+            && arr.len() > self.max_designate_targets
+        {
+            return self.error_result(
+                McpError::new(
+                    McpErrorCode::InvalidArgument,
+                    format!(
+                        "designate targets length {} exceeds maximum of {}",
+                        arr.len(),
+                        self.max_designate_targets
+                    ),
+                )
+                .details(json!({
+                    "limit": self.max_designate_targets,
+                    "submitted": arr.len(),
+                })),
+            );
+        }
+
+        let req: DesignateSubjectRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let mut targets = Vec::with_capacity(req.targets.len());
+        for t in req.targets {
+            let has_keys = t.keys.as_ref().is_some_and(|k| !k.is_empty());
+            let target = match (t.entity_kind.as_str(), has_keys) {
+                ("node", false) => DesignationTarget::WholeNode(t.id),
+                ("node", true) => DesignationTarget::NodeProperties(t.id, t.keys.unwrap()),
+                ("edge", false) => DesignationTarget::WholeEdge(t.id),
+                ("edge", true) => DesignationTarget::EdgeProperties(t.id, t.keys.unwrap()),
+                (other, _) => {
+                    return self.invalid_argument(&format!(
+                        "invalid entity_kind '{other}' (expected 'node' or 'edge')"
+                    ));
+                }
+            };
+            targets.push(target);
+        }
+
+        let count = targets.len();
+        match self.db.designate_subject(req.subject_id.clone(), targets) {
+            Ok(()) => self.success_json(json!({
+                "success": true,
+                "subject_id": req.subject_id,
+                "targets_designated": count,
+            })),
+            Err(e) => self.crypto_shred_error(e),
+        }
+    }
+
+    /// ADMIN. Irreversibly erase a designated subject and return a signed
+    /// erasure attestation (Issue #3359, Slice 4b). The response carries only
+    /// the subject id, entity count, timestamp, and signature/pubkey hex —
+    /// never key material or plaintext.
+    fn handle_erase_subject(&self, args: serde_json::Value) -> CallToolResult {
+        let req: EraseSubjectRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        match self.db.erase_subject(req.subject_id) {
+            Ok(att) => {
+                let timestamp =
+                    Self::format_timestamp_rfc3339(Timestamp::from(att.timestamp_micros));
+                self.success_json(json!({
+                    "success": true,
+                    "subject_id": att.subject_id,
+                    "entity_count": att.entity_count,
+                    "timestamp": timestamp,
+                    "timestamp_micros": att.timestamp_micros,
+                    "signature": crate::core::hex::encode(&att.signature),
+                    "signer_public_key": att.signer_public_key.to_hex(),
+                }))
+            }
+            Err(e) => self.crypto_shred_error(e),
+        }
+    }
+
     fn handle_delete_node_cascade(&self, args: serde_json::Value) -> CallToolResult {
         let req: DeleteNodeCascadeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -2710,6 +3564,16 @@ impl AletheiaMcpServer {
             if Self::has_provenance_filter_args(&args) {
                 return self.provenance_filter_cursor_unsupported();
             }
+            // Issue #3349: a narrowing namespace scope does not yet compose with
+            // the #3360 cursor path — fail closed rather than page an unscoped
+            // scan under a scope the caller asked for.
+            if let Err(result) = self.reject_unsupported_scope(
+                &args.get("namespace").cloned(),
+                "namespace scope does not compose with cursor paging (use_cursor) in v1; page the \
+                 scoped scan with offset/limit instead, or use \"all\".",
+            ) {
+                return result;
+            }
             return self.handle_list_nodes_cursor(&args);
         }
 
@@ -2743,6 +3607,21 @@ impl AletheiaMcpServer {
         }
         if req.property_key.is_some() && req.label.is_none() {
             return self.invalid_argument("Property filtering requires 'label' to be specified");
+        }
+
+        // Issue #3349 (FIX2): an omitted scope resolves to the `default`
+        // namespace only (isolated-by-default) and routes through the scoped
+        // membership index, exactly like an explicit narrowing scope. For a
+        // pre-namespace database (all data is `default`) this still returns all
+        // of it. Only the `all` selector falls through to the full-featured
+        // unscoped path below (byte-identical to the current unscoped behavior).
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        if !matches!(scope, crate::core::namespace::NamespaceScope::All) {
+            return self.handle_list_nodes_scoped(&req, &scope, prov_filter.as_ref());
         }
 
         // One request-scoped wallclock for every entity in the response
@@ -2895,6 +3774,109 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// Namespace-scoped `list_nodes` page (Issue #3349): candidates come from
+    /// the membership index (not a full scan), filtered to the given
+    /// (narrowing) `scope`, then offset/limit-paginated and rendered exactly
+    /// like the unscoped path (temporal bounds, vector elision, first-class
+    /// `namespace` field, provenance filter). Unlike the unscoped path this does
+    /// not compose with the #3360 cursor or #3353 token-budget shaping in v1
+    /// (offset paging applies).
+    fn handle_list_nodes_scoped(
+        &self,
+        req: &ListNodesRequest,
+        scope: &crate::core::namespace::NamespaceScope,
+        prov_filter: Option<&crate::core::ProvenanceFilter>,
+    ) -> CallToolResult {
+        let limit = req
+            .limit
+            .unwrap_or(DEFAULT_RESULT_LIMIT)
+            .clamp(1, MAX_RESULT_LIMIT);
+        let offset = req.offset.unwrap_or(0).min(MAX_PAGINATION_OFFSET);
+        let include_vectors = req.include_vectors.unwrap_or(false);
+        let now = time::now();
+
+        // No label filter: reproduce the unscoped path's guidance response
+        // exactly (byte-identical back-compat for an omitted/default-scope read —
+        // #3349 FIX2). The unscoped path declines to enumerate every node without
+        // a label; we mirror that, reporting the **in-scope** node count as
+        // `total_count` (for a pre-namespace / `default`-only database this
+        // equals `node_count()`, so the response is byte-identical). `list_nodes_
+        // scoped` also validates the scope, so an unknown namespace still surfaces
+        // as NOT_FOUND(details.namespace) here.
+        if req.label.is_none() && req.property_key.is_none() {
+            let total = match self.db.list_nodes_scoped(None, scope) {
+                Ok(ids) => ids.len(),
+                Err(e) => return self.db_error(e),
+            };
+            let mut response = json!({
+                "message": "Use 'label' filter to list nodes by type, or use 'count_nodes' for total count",
+                "total_count": total,
+                "nodes": [],
+                "count": 0,
+                "offset": offset,
+                "limit": limit
+            });
+            Self::attach_completeness(&mut response, offset, 0, false, None);
+            return self.success_json(response);
+        }
+
+        // Resolve the candidate id set within scope (validates the scope against
+        // the registry — an unknown namespace ⇒ NOT_FOUND(details.namespace)).
+        let ids_result = if let (Some(label), Some(prop_key), Some(prop_val)) =
+            (&req.label, &req.property_key, &req.property_value)
+        {
+            let property_value = match self.json_to_property_value(prop_val) {
+                Some(v) => v,
+                None => {
+                    return self.invalid_argument(
+                        "Unsupported property_value type. Use strings, numbers, booleans, or null.",
+                    );
+                }
+            };
+            self.db
+                .find_nodes_by_property_scoped(label, prop_key, &property_value, scope)
+        } else {
+            self.db.list_nodes_scoped(req.label.as_deref(), scope)
+        };
+        let node_ids = match ids_result {
+            Ok(ids) => ids,
+            Err(e) => return self.db_error(e),
+        };
+
+        let total_matching = node_ids.len();
+        let mut nodes = Vec::with_capacity(limit.min(total_matching.saturating_sub(offset)));
+        for node_id in node_ids.into_iter().skip(offset).take(limit) {
+            if let Ok(node) = self.db.get_node(node_id) {
+                let resp = self.node_to_response(&node, include_vectors, now);
+                if prov_filter.is_none_or(|f| f.matches(resp.provenance.as_ref())) {
+                    nodes.push(resp);
+                }
+            }
+        }
+
+        let has_more = offset.saturating_add(limit) < total_matching;
+        let mut response = json!({
+            "nodes": nodes,
+            "count": nodes.len(),
+            "offset": offset,
+            "limit": limit,
+        });
+        // Match the unscoped path's total-reporting exactly (byte-identical
+        // back-compat for an omitted/default-scope read — #3349 FIX2): a
+        // property lookup reports the materialized `total_matching` (as the
+        // unscoped property path does), while a label-only / no-filter scan
+        // omits it (as the unscoped label-only path does). A provenance filter
+        // makes the materialized total the *unfiltered* candidate count, so it
+        // is likewise omitted. `has_more` always carries the completeness signal.
+        let reported_total = if prov_filter.is_some() || req.property_key.is_none() {
+            None
+        } else {
+            Some(total_matching)
+        };
+        Self::attach_completeness(&mut response, offset, limit, has_more, reported_total);
+        self.success_json(response)
+    }
+
     fn handle_count_nodes(&self, args: serde_json::Value) -> CallToolResult {
         let req: CountNodesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -2924,6 +3906,86 @@ impl AletheiaMcpServer {
         }
     }
 
+    // ────────────────────────────────────────────────────────────────────────
+    // Namespace management (Issue #3349, PR3b)
+    // ────────────────────────────────────────────────────────────────────────
+
+    /// Render a namespace's metadata (without counts) as a JSON object:
+    /// `{name, description, created_at}` (created_at RFC 3339).
+    fn namespace_info_json(info: &crate::db::NamespaceInfo) -> serde_json::Value {
+        json!({
+            "name": info.name,
+            "description": info.description,
+            "created_at": time::to_iso8601(info.created_at),
+        })
+    }
+
+    /// Look up the current-state `(node_count, edge_count)` for a namespace name
+    /// from the O(1) membership-index-backed [`AletheiaDB::namespace_counts`]
+    /// snapshot. Missing (a registered-but-unpopulated namespace not folded into
+    /// the counts snapshot) defaults to `(0, 0)`.
+    fn namespace_counts_for(counts: &[crate::db::NamespaceCount], name: &str) -> (usize, usize) {
+        counts
+            .iter()
+            .find(|c| c.name == name)
+            .map_or((0, 0), |c| (c.node_count, c.edge_count))
+    }
+
+    fn handle_create_namespace(&self, args: serde_json::Value) -> CallToolResult {
+        let req: CreateNamespaceRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        match self.db.create_namespace(&req.name, req.description) {
+            Ok(info) => self.success_json(Self::namespace_info_json(&info)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    fn handle_list_namespaces(&self, args: serde_json::Value) -> CallToolResult {
+        let _req: ListNamespacesRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        let counts = self.db.namespace_counts();
+        let namespaces: Vec<serde_json::Value> = self
+            .db
+            .list_namespaces()
+            .iter()
+            .map(|info| {
+                let (node_count, edge_count) = Self::namespace_counts_for(&counts, &info.name);
+                let mut obj = Self::namespace_info_json(info);
+                if let Some(map) = obj.as_object_mut() {
+                    map.insert("node_count".to_string(), json!(node_count));
+                    map.insert("edge_count".to_string(), json!(edge_count));
+                }
+                obj
+            })
+            .collect();
+        let count = namespaces.len();
+        self.success_json(json!({ "namespaces": namespaces, "count": count }))
+    }
+
+    fn handle_describe_namespace(&self, args: serde_json::Value) -> CallToolResult {
+        let req: DescribeNamespaceRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        match self.db.get_namespace(&req.name) {
+            Ok(info) => {
+                let counts = self.db.namespace_counts();
+                let (node_count, edge_count) = Self::namespace_counts_for(&counts, &info.name);
+                let mut obj = Self::namespace_info_json(&info);
+                if let Some(map) = obj.as_object_mut() {
+                    map.insert("node_count".to_string(), json!(node_count));
+                    map.insert("edge_count".to_string(), json!(edge_count));
+                }
+                self.success_json(obj)
+            }
+            Err(e) => self.db_error(e),
+        }
+    }
+
     fn handle_get_edge(&self, args: serde_json::Value) -> CallToolResult {
         let req: GetEdgeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -2939,7 +4001,20 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
-        match self.db.get_edge(edge_id) {
+        // Issue #3349: a namespace scope narrows visibility. Omitted ⇒ the
+        // `default` namespace only (isolated-by-default, #3349 FIX2); `all`
+        // imposes no filter (unscoped fast path).
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        let edge_result = match &scope {
+            crate::core::namespace::NamespaceScope::All => self.db.get_edge(edge_id),
+            scope => self.db.get_edge_scoped(edge_id, scope),
+        };
+
+        match edge_result {
             Ok(edge) => {
                 let now = time::now();
                 let response =
@@ -2972,7 +4047,7 @@ impl AletheiaMcpServer {
         let properties = match req.properties {
             Some(p) => match self.json_to_property_map(&p) {
                 Ok(map) => map,
-                Err(e) => return self.invalid_argument(&format!("Invalid properties: {}", e)),
+                Err(e) => return self.property_map_error(e),
             },
             None => PropertyMap::default(),
         };
@@ -2991,12 +4066,20 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
+        let namespace = match self.parse_opt_namespace(&req.namespace) {
+            Ok(ns) => ns,
+            Err(result) => return result,
+        };
+
         let mut options = crate::api::transaction::WriteRequestOptions::new();
         if let Some(valid_from) = valid_from {
             options = options.with_valid_from(valid_from);
         }
         if let Some(provenance) = provenance {
             options = options.with_provenance(provenance);
+        }
+        if let Some(ns) = namespace.clone() {
+            options = options.with_namespace(ns);
         }
 
         let created = if derived_from.is_empty() {
@@ -3014,6 +4097,14 @@ impl AletheiaMcpServer {
                 )
                 .map(|(edge_id, _version)| edge_id)
         };
+
+        // Auto-register the (non-default) namespace only AFTER a successful
+        // commit (see handle_create_node).
+        if let (Ok(_), Some(ns)) = (&created, &namespace)
+            && let Err(e) = self.db.register_namespace_on_write(ns)
+        {
+            return self.db_error(e);
+        }
 
         match created {
             Ok(edge_id) => match self.db.get_edge(edge_id) {
@@ -3046,9 +4137,15 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
+        // A namespace is immutable after creation (Issue #3349): supplying one
+        // on an update is INVALID_ARGUMENT, never a silent no-op.
+        if let Err(result) = self.reject_namespace_on_write_update(&req.namespace) {
+            return result;
+        }
+
         let properties = match self.json_to_property_map(&req.properties) {
             Ok(map) => map,
-            Err(e) => return self.invalid_argument(&format!("Invalid properties: {}", e)),
+            Err(e) => return self.property_map_error(e),
         };
 
         let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
@@ -3113,6 +4210,12 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
+        // A namespace is immutable after creation (Issue #3349): supplying one
+        // on a delete is INVALID_ARGUMENT, never a silent no-op.
+        if let Err(result) = self.reject_namespace_on_write_update(&req.namespace) {
+            return result;
+        }
+
         let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
             Ok(v) => v,
             Err(result) => return result,
@@ -3159,6 +4262,16 @@ impl AletheiaMcpServer {
                 )
                 .details(json!({ "cursorable_alternatives": ["get_outgoing_edges", "get_incoming_edges"] })),
             );
+        }
+
+        // Issue #3349: list_edges does not enumerate edges by namespace in v1;
+        // a narrowing scope is INVALID_ARGUMENT (never silently unscoped).
+        if let Err(result) = self.reject_unsupported_scope(
+            &args.get("namespace").cloned(),
+            "list_edges does not enumerate edges by namespace in v1; a namespace scope is not \
+             supported here. Use the scoped adjacency/traversal reads instead, or \"all\".",
+        ) {
+            return result;
         }
 
         let req: ListEdgesRequest = match serde_json::from_value(args) {
@@ -3455,6 +4568,15 @@ impl AletheiaMcpServer {
             if Self::has_provenance_filter_args(&args) {
                 return self.provenance_filter_cursor_unsupported();
             }
+            // Issue #3349: a narrowing namespace scope does not compose with the
+            // #3360 cursor path in v1 — fail closed.
+            if let Err(result) = self.reject_unsupported_scope(
+                &args.get("namespace").cloned(),
+                "namespace scope does not compose with cursor paging (use_cursor) in v1; use \
+                 offset/limit paging with the scope instead, or \"all\".",
+            ) {
+                return result;
+            }
             return self.handle_traverse_cursor(&args);
         }
 
@@ -3500,6 +4622,42 @@ impl AletheiaMcpServer {
         // (Issue #3391).
         let now = time::now();
 
+        // Issue #3349 (FIX2 / PR3d): resolve an omitted scope to the `default`
+        // namespace only (isolated-by-default). An explicit *non-default*
+        // narrowing scope routes through the boundary-enforcing scoped BFS (a hop
+        // is crossed only if the edge's own namespace AND the far node's
+        // namespace are in scope, so a scope cannot leak via transit through an
+        // out-of-scope node) — now for all three directions (outgoing, incoming,
+        // both; PR3d). The `default` scope — whether omitted or explicit — and
+        // the `all` selector run the full unscoped DFS below, which preserves the
+        // path/depth result shape and every traversal direction; the `default`
+        // case then drops any non-default node from the returned page so an
+        // omitted read stays default-isolated (a pre-namespace database is all
+        // `default`, so nothing is dropped and the result is byte-identical).
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        let default_only = match &scope {
+            crate::core::namespace::NamespaceScope::All => false,
+            crate::core::namespace::NamespaceScope::Single(ns) if ns.is_default() => true,
+            _ => {
+                return self.handle_traverse_scoped(
+                    &req,
+                    &scope,
+                    start_id,
+                    direction,
+                    depth,
+                    limit,
+                    offset,
+                    temporal,
+                    prov_filter.as_ref(),
+                    now,
+                );
+            }
+        };
+
         let (mut results, has_more) = self.run_traversal(
             start_id,
             &req.edge_label,
@@ -3521,6 +4679,20 @@ impl AletheiaMcpServer {
         // edges the DFS follows (edge-provenance-gated path pruning is a
         // documented follow-up).
         let page_window = results.len();
+        // Default-scope isolation (#3349 FIX2): drop any non-default node from
+        // the page (its response carries `Some(namespace)`; the default
+        // namespace is elided to `None`). `page_window` above is the pre-filter
+        // DFS page size, so `next_offset` still advances over the unfiltered DFS
+        // order (gap-free/dup-free), exactly like the provenance filter.
+        // Semantics note (#3349): this `default` path filters returned nodes, not
+        // the crossed edges, so it preserves the path/depth DFS result shape for
+        // every direction. An explicit narrowing scope instead routes through the
+        // boundary-enforcing scoped BFS above (all directions, PR3d), which never
+        // crosses an out-of-scope edge/node; the two paths differ in shape by
+        // design (see `handle_traverse_scoped`).
+        if default_only {
+            results.retain(|r| r.node.namespace.is_none());
+        }
         if let Some(filter) = &prov_filter {
             results.retain(|r| filter.matches(r.node.provenance.as_ref()));
         }
@@ -3542,6 +4714,108 @@ impl AletheiaMcpServer {
         // `total_matching` is omitted; `has_more`/`next_offset` carry the
         // completeness signal.
         Self::attach_completeness(&mut response, offset, page_window, has_more, None);
+        self.success_json(response)
+    }
+
+    /// Namespace-scoped `traverse` (Issue #3349). Routes through the
+    /// boundary-enforcing scoped BFS (`traverse_scoped` / `traverse_scoped_as_of`)
+    /// so an edge is crossed only when the edge's own namespace AND the target
+    /// node's namespace are in scope — a scope can never leak across the
+    /// boundary or via transit through an out-of-scope node.
+    ///
+    /// All three directions (`outgoing`, `incoming`, `both`) are supported and
+    /// boundary-scoped (Issue #3349, PR3d): the boundary rule (edge.ns ∧
+    /// far-node.ns ∈ scope) applies symmetrically. The scoped BFS returns the
+    /// reachable in-scope node **set** (sorted by id), so each result carries its
+    /// `node` while `depth`/`path` are omitted — the boundary-correct set, not
+    /// per-path detail (unchanged from the shipped outgoing scoped path). It does
+    /// not compose with the #3360 cursor / #3353 token-budget shaping (offset
+    /// paging applies).
+    #[allow(clippy::too_many_arguments)]
+    fn handle_traverse_scoped(
+        &self,
+        req: &TraverseRequest,
+        scope: &crate::core::namespace::NamespaceScope,
+        start_id: NodeId,
+        direction: &str,
+        depth: usize,
+        limit: usize,
+        offset: usize,
+        temporal: Option<(Timestamp, Timestamp)>,
+        prov_filter: Option<&crate::core::ProvenanceFilter>,
+        now: Timestamp,
+    ) -> CallToolResult {
+        // Issue #3349 (PR3d): all three traversal directions are boundary-scoped.
+        // The boundary rule (edge.ns ∧ far-node.ns ∈ scope) applies symmetrically
+        // for outgoing (→ target), incoming (source →), and both.
+        let traverse_direction = match direction {
+            "outgoing" => crate::db::namespace_query::TraverseDirection::Outgoing,
+            "incoming" => crate::db::namespace_query::TraverseDirection::Incoming,
+            "both" => crate::db::namespace_query::TraverseDirection::Both,
+            other => {
+                return self.invalid_argument(&format!(
+                    "invalid traverse direction {other:?}; expected \"outgoing\", \"incoming\", \
+                     or \"both\""
+                ));
+            }
+        };
+        // The scoped BFS takes an optional edge label; the MCP tool always
+        // supplies one (a required field), so restrict to that relationship.
+        let edge_label = Some(req.edge_label.as_str());
+        let reachable = match temporal {
+            Some((vt, tt)) => self.db.traverse_scoped_as_of_directed(
+                start_id,
+                edge_label,
+                traverse_direction,
+                depth,
+                vt,
+                tt,
+                scope,
+            ),
+            None => self.db.traverse_scoped_directed(
+                start_id,
+                edge_label,
+                traverse_direction,
+                depth,
+                scope,
+            ),
+        };
+        let reachable = match reachable {
+            Ok(ids) => ids,
+            Err(e) => return self.db_error(e),
+        };
+
+        let total = reachable.len();
+        let include_vectors = req.include_vectors.unwrap_or(false);
+        let mut results: Vec<serde_json::Value> = Vec::new();
+        for node_id in reachable.into_iter().skip(offset).take(limit) {
+            let node = match temporal {
+                Some((vt, tt)) => self.db.get_node_at_time(node_id, vt, tt),
+                None => self.db.get_node(node_id),
+            };
+            if let Ok(node) = node {
+                let resp = self.node_to_response(&node, include_vectors, now);
+                if prov_filter.is_none_or(|f| f.matches(resp.provenance.as_ref())) {
+                    results.push(json!({ "node": resp }));
+                }
+            }
+        }
+
+        let has_more = offset.saturating_add(limit) < total;
+        let count = results.len();
+        let mut response = match temporal {
+            Some((vt, tt)) => json!({
+                "results": results,
+                "count": count,
+                "as_of_valid_time": time::to_iso8601(vt),
+                "as_of_transaction_time": time::to_iso8601(tt),
+            }),
+            None => json!({
+                "results": results,
+                "count": count,
+            }),
+        };
+        Self::attach_completeness(&mut response, offset, limit, has_more, Some(total));
         self.success_json(response)
     }
 
@@ -3796,12 +5070,420 @@ impl AletheiaMcpServer {
         self.success_json(serde_json::Value::Object(obj))
     }
 
+    // ========================================================================
+    // Semantic-search analysis tools (Issue #2907)
+    //
+    // Advertised unconditionally (Design A). The real handler bodies live under
+    // `#[cfg(feature = "semantic-search")]`; a `#[cfg(not(...))]` twin returns
+    // the structured `semantic_search_unavailable` FAILED_PRECONDITION so a
+    // caller on a build without the feature gets an actionable error rather than
+    // an "unknown tool".
+    // ========================================================================
+
+    /// Structured `FAILED_PRECONDITION` returned by every semantic-search tool
+    /// when the `semantic-search` feature is not compiled into this build
+    /// (Issue #2907). Mirrors the cypher `language_unavailable` pattern.
+    #[cfg(not(feature = "semantic-search"))]
+    fn semantic_search_unavailable(&self, tool: &str) -> CallToolResult {
+        self.error_result(
+            McpError::new(
+                McpErrorCode::FailedPrecondition,
+                format!(
+                    "Tool '{tool}' requires the `semantic-search` feature, which is not compiled \
+                     into this build. Rebuild AletheiaDB with `--features semantic-search` to \
+                     enable it."
+                ),
+            )
+            .details(json!({
+                "tool": tool,
+                "required_feature": "semantic-search",
+            })),
+        )
+    }
+
+    #[cfg(not(feature = "semantic-search"))]
+    fn handle_semantic_path(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_search_unavailable("semantic_path")
+    }
+
+    #[cfg(feature = "semantic-search")]
+    fn handle_semantic_path(&self, args: serde_json::Value) -> CallToolResult {
+        let req: SemanticPathRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        let start = match NodeId::new(req.start) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        let end = match NodeId::new(req.end) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        // Clamp depth and derive a bounded expansion budget (DoS protection —
+        // the plain A* search is unbounded).
+        let max_depth = req
+            .max_depth
+            .unwrap_or(MAX_TRAVERSAL_DEPTH)
+            .clamp(1, MAX_TRAVERSAL_DEPTH);
+        let max_expansions = max_depth.saturating_mul(SEMANTIC_PATH_EXPANSIONS_PER_DEPTH);
+
+        let navigator =
+            crate::semantic_search::semantic_navigator::SemanticNavigator::new(&self.db);
+        use crate::semantic_search::semantic_navigator::PathSearchOutcome;
+        match navigator.find_path_bounded(start, end, &req.property_name, max_expansions) {
+            Ok(PathSearchOutcome::Found(path)) => {
+                let ids: Vec<u64> = path.iter().map(|n| n.as_u64()).collect();
+                self.success_json(json!({
+                    "path": ids,
+                    "length": path.len(),
+                    "start": req.start,
+                    "end": req.end,
+                    "property_name": req.property_name,
+                }))
+            }
+            // A genuinely disconnected pair is a NORMAL outcome, not a server
+            // bug: report NOT_FOUND (non-retriable) rather than INTERNAL, so an
+            // LLM treats it as "no such route" instead of escalating.
+            Ok(PathSearchOutcome::NoPath) => self.error_result(McpError::new(
+                McpErrorCode::NotFound,
+                format!(
+                    "no path found between nodes {} and {} within max_depth {}",
+                    req.start, req.end, max_depth
+                ),
+            )),
+            // The DoS-protection expansion budget was exhausted before a path
+            // was found. This is a resource-limit refusal (FAILED_PRECONDITION,
+            // matching StorageError::CapacityExceeded's classification), not an
+            // internal error: the caller can lower max_depth or pick closer
+            // endpoints and retry a smaller search.
+            Ok(PathSearchOutcome::BudgetExhausted { max_expansions }) => self.error_result(
+                McpError::new(
+                    McpErrorCode::FailedPrecondition,
+                    format!(
+                        "semantic path search hit its expansion budget of {max_expansions} \
+                             node expansions before finding a path; lower max_depth or choose \
+                             closer endpoints"
+                    ),
+                )
+                .details(json!({
+                    "reason": "expansion_budget_exceeded",
+                    "max_expansions": max_expansions,
+                })),
+            ),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    #[cfg(not(feature = "semantic-search"))]
+    fn handle_concept_analogy(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_search_unavailable("concept_analogy")
+    }
+
+    #[cfg(feature = "semantic-search")]
+    fn handle_concept_analogy(&self, args: serde_json::Value) -> CallToolResult {
+        let req: ConceptAnalogyRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        let a = match NodeId::new(req.a) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        let b = match NodeId::new(req.b) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        let c = match NodeId::new(req.c) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        let k = req.k.unwrap_or(DEFAULT_VECTOR_K).clamp(1, MAX_VECTOR_K);
+        let algebra = crate::semantic_search::concept_algebra::ConceptAlgebra::new(&self.db)
+            .with_property(&req.property_name);
+        match algebra.analogy(a, b, c, k) {
+            Ok(results) => self.success_json(Self::rank_response(&results, &req.property_name)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    #[cfg(not(feature = "semantic-search"))]
+    fn handle_concept_mean(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_search_unavailable("concept_mean")
+    }
+
+    #[cfg(feature = "semantic-search")]
+    fn handle_concept_mean(&self, args: serde_json::Value) -> CallToolResult {
+        let req: ConceptMeanRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.nodes.len() > MAX_RESULT_LIMIT {
+            return self.invalid_argument(&format!(
+                "Too many nodes ({}); at most {} are accepted.",
+                req.nodes.len(),
+                MAX_RESULT_LIMIT
+            ));
+        }
+        let mut nodes = Vec::with_capacity(req.nodes.len());
+        for raw in &req.nodes {
+            match NodeId::new(*raw) {
+                Ok(id) => nodes.push(id),
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            }
+        }
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        let k = req.k.unwrap_or(DEFAULT_VECTOR_K).clamp(1, MAX_VECTOR_K);
+        let algebra = crate::semantic_search::concept_algebra::ConceptAlgebra::new(&self.db)
+            .with_property(&req.property_name);
+        match algebra.mean(&nodes, k) {
+            Ok(results) => self.success_json(Self::rank_response(&results, &req.property_name)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    #[cfg(not(feature = "semantic-search"))]
+    fn handle_find_duplicate_candidates(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_search_unavailable("find_duplicate_candidates")
+    }
+
+    #[cfg(feature = "semantic-search")]
+    fn handle_find_duplicate_candidates(&self, args: serde_json::Value) -> CallToolResult {
+        let req: FindDuplicateCandidatesRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        let node_id = match NodeId::new(req.node_id) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        // v1: the underlying SimilarityQuery has no property selector, so the
+        // search resolves against the node's own indexed embedding. We still
+        // validate that a vector index exists for `property_name` so a caller
+        // gets a clear precondition error rather than a silent surprise.
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        let threshold = req.threshold.unwrap_or(0.9);
+        if !(0.0..=1.0).contains(&threshold) {
+            return self
+                .invalid_argument(&format!("threshold must be in [0, 1] (got {threshold})."));
+        }
+        let limit = req.limit.unwrap_or(DEFAULT_VECTOR_K).clamp(1, MAX_VECTOR_K);
+        let detector = crate::semantic_search::highlander::HighlanderDetector::new(&self.db);
+        match detector.find_duplicates(node_id, threshold, limit) {
+            Ok(results) => {
+                // The underlying similarity query resolves against the target's
+                // own embedding, so it can return the target itself (similarity
+                // ~= 1.0). A node is never its own duplicate — filter it out.
+                let candidates: Vec<serde_json::Value> = results
+                    .iter()
+                    .filter(|(id, _)| *id != node_id)
+                    .map(|(id, sim)| json!({ "node_id": id.as_u64(), "similarity": sim }))
+                    .collect();
+                let count = candidates.len();
+                self.success_json(json!({
+                    "candidates": candidates,
+                    "count": count,
+                    "threshold": threshold,
+                    "target": req.node_id,
+                }))
+            }
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    #[cfg(not(feature = "semantic-search"))]
+    fn handle_semantic_horizon(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_search_unavailable("semantic_horizon")
+    }
+
+    #[cfg(feature = "semantic-search")]
+    fn handle_semantic_horizon(&self, args: serde_json::Value) -> CallToolResult {
+        let req: SemanticHorizonRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        let seed = match NodeId::new(req.seed) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        if !(0.0..=1.0).contains(&req.threshold) {
+            return self.invalid_argument(&format!(
+                "threshold must be in [0, 1] (got {}).",
+                req.threshold
+            ));
+        }
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        let max_depth = req
+            .max_depth
+            .unwrap_or(MAX_TRAVERSAL_DEPTH)
+            .clamp(1, MAX_TRAVERSAL_DEPTH);
+        let engine = crate::semantic_search::horizon::HorizonEngine::new(&self.db);
+        match engine.map_horizon(seed, &req.property_name, req.threshold, max_depth) {
+            Ok(result) => {
+                let mut interior: Vec<u64> = result.interior.iter().map(|n| n.as_u64()).collect();
+                interior.sort_unstable();
+                let mut horizon: Vec<u64> = result.horizon.iter().map(|n| n.as_u64()).collect();
+                horizon.sort_unstable();
+                self.success_json(json!({
+                    "seed": req.seed,
+                    "threshold": req.threshold,
+                    "max_depth": max_depth,
+                    "interior_count": interior.len(),
+                    "horizon_count": horizon.len(),
+                    "interior": interior,
+                    "horizon": horizon,
+                }))
+            }
+            // The visited-node DoS cap (a resource-limit refusal) surfaces as a
+            // FAILED_PRECONDITION naming the cap, not an INTERNAL error, so a
+            // caller knows to narrow the query (lower max_depth / raise
+            // threshold) rather than escalate a server bug.
+            Err(crate::core::error::Error::Storage(
+                crate::core::error::StorageError::CapacityExceeded { limit, .. },
+            )) => self.error_result(
+                McpError::new(
+                    McpErrorCode::FailedPrecondition,
+                    format!(
+                        "semantic horizon search hit its visited-node cap of {limit} nodes; \
+                         narrow the query by lowering max_depth or raising threshold"
+                    ),
+                )
+                .details(json!({
+                    "reason": "visit_cap_exceeded",
+                    "max_visited_nodes": limit,
+                })),
+            ),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    #[cfg(not(feature = "semantic-search"))]
+    fn handle_context_aspects(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_search_unavailable("context_aspects")
+    }
+
+    #[cfg(feature = "semantic-search")]
+    fn handle_context_aspects(&self, args: serde_json::Value) -> CallToolResult {
+        let req: ContextAspectsRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        let node_id = match NodeId::new(req.node_id) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        let k = req.k.unwrap_or(DEFAULT_VECTOR_K).clamp(1, MAX_VECTOR_K);
+        let include_vectors = req.include_vectors.unwrap_or(false);
+        let chameleon = crate::semantic_search::chameleon::Chameleon::new(&self.db);
+        match chameleon.analyze_context(node_id, &req.property_name, k) {
+            Ok(aspects) => {
+                let aspects_json: Vec<serde_json::Value> = aspects
+                    .iter()
+                    .map(|aspect| {
+                        // Sort exemplars by ascending node id for deterministic,
+                        // reproducible LLM-facing output (Chameleon clustering
+                        // order is not guaranteed stable). Mirrors the sorted
+                        // interior/horizon sets in semantic_horizon.
+                        let mut exemplars: Vec<u64> =
+                            aspect.exemplars.iter().map(|n| n.as_u64()).collect();
+                        exemplars.sort_unstable();
+                        // Elide the centroid vector by default (#3220).
+                        let centroid = if include_vectors {
+                            json!(aspect.centroid)
+                        } else {
+                            json!({
+                                "type": "vector",
+                                "dim": aspect.centroid.len(),
+                                "elided": true,
+                            })
+                        };
+                        json!({
+                            "weight": aspect.weight,
+                            "exemplars": exemplars,
+                            "centroid": centroid,
+                        })
+                    })
+                    .collect();
+                self.success_json(json!({
+                    "node_id": req.node_id,
+                    "count": aspects_json.len(),
+                    "aspects": aspects_json,
+                }))
+            }
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Shared response shape for the ranked concept-algebra tools
+    /// (`concept_analogy`, `concept_mean`): `{results:[{node_id, score}], count,
+    /// property_name}`.
+    #[cfg(feature = "semantic-search")]
+    fn rank_response(results: &[(NodeId, f32)], property_name: &str) -> serde_json::Value {
+        let entries: Vec<serde_json::Value> = results
+            .iter()
+            .map(|(id, score)| json!({ "node_id": id.as_u64(), "score": score }))
+            .collect();
+        json!({
+            "results": entries,
+            "count": results.len(),
+            "property_name": property_name,
+        })
+    }
+
     fn handle_find_similar(&self, args: serde_json::Value) -> CallToolResult {
         // Issue #3348: parse the optional provenance filter before consuming args.
         let prov_filter = match self.parse_provenance_filter(&args) {
             Ok(f) => f,
             Err(result) => return result,
         };
+
+        // Issue #3372: when a `fusion_policy` is supplied, re-rank by the fused
+        // score and return here; otherwise fall through to the unchanged
+        // similarity-only path below. Feature-gated: the param is only
+        // advertised/parsed when `semantic-retrieval-fusion` is compiled.
+        #[cfg(feature = "semantic-retrieval-fusion")]
+        {
+            match self.parse_fusion_policy(&args) {
+                Ok(Some(policy)) => {
+                    return self.handle_find_similar_fused(&args, &policy, prov_filter.as_ref());
+                }
+                Ok(None) => {}
+                Err(result) => return result,
+            }
+        }
 
         let req: FindSimilarRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -3835,6 +5517,22 @@ impl AletheiaMcpServer {
         // Validate embedding dimensions
         if let Err(e) = self.validate_embedding_dimensions(&req.embedding, &req.property_name) {
             return self.invalid_argument(&e);
+        }
+
+        // Issue #3349 (FIX2): an omitted scope resolves to the `default`
+        // namespace only (isolated-by-default) and routes through the
+        // filter-complete scoped k-NN (over-fetches until it has k genuinely
+        // in-scope results — never k-then-drop), exactly like an explicit
+        // narrowing scope. For a pre-namespace database (all data is `default`)
+        // this returns the same top-k. Only the `all` selector falls through to
+        // the full unscoped search below.
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        if !matches!(scope, crate::core::namespace::NamespaceScope::All) {
+            return self.handle_find_similar_scoped(&req, &scope, k, offset, prov_filter.as_ref());
         }
 
         // Over-fetch one past the requested page (offset + k + 1, capped at
@@ -3874,6 +5572,7 @@ impl AletheiaMcpServer {
                             self.db.get_node(node_id).ok().map(|node| SimilarityResult {
                                 node: self.node_to_response(&node, include_vectors, now),
                                 score,
+                                score_breakdown: None,
                             })
                         })
                         .filter(|r| filter.matches(r.node.provenance.as_ref()))
@@ -3891,6 +5590,7 @@ impl AletheiaMcpServer {
                             self.db.get_node(node_id).ok().map(|node| SimilarityResult {
                                 node: self.node_to_response(&node, include_vectors, now),
                                 score,
+                                score_breakdown: None,
                             })
                         })
                         .collect();
@@ -3913,6 +5613,792 @@ impl AletheiaMcpServer {
             }
             Err(e) => self.db_error(e),
         }
+    }
+
+    /// Namespace-scoped `find_similar` (Issue #3349). Routes through the
+    /// filter-complete scoped k-NN (`find_similar_by_embedding_scoped`), which
+    /// over-fetches until it has the requested number of genuinely in-scope
+    /// results (never k-then-drop); scores and ranking order match the unscoped
+    /// search. Offset paging applies; it does not compose with the #3360 cursor
+    /// or #3353 token-budget shaping in v1.
+    fn handle_find_similar_scoped(
+        &self,
+        req: &FindSimilarRequest,
+        scope: &crate::core::namespace::NamespaceScope,
+        k: usize,
+        offset: usize,
+        prov_filter: Option<&crate::core::ProvenanceFilter>,
+    ) -> CallToolResult {
+        // Over-fetch one past the page window so `has_more` is exact, capped at
+        // the MAX_VECTOR_K resource horizon. When a provenance filter is active
+        // fetch the full horizon so the returned top-k are all filter-passing.
+        let fetch_k = if prov_filter.is_some() {
+            MAX_VECTOR_K.saturating_add(1)
+        } else {
+            offset
+                .saturating_add(k)
+                .saturating_add(1)
+                .min(MAX_VECTOR_K.saturating_add(1))
+        };
+        let ranked = match self
+            .db
+            .find_similar_by_embedding_scoped(&req.embedding, fetch_k, scope)
+        {
+            Ok(r) => r,
+            Err(e) => return self.db_error(e),
+        };
+
+        let include_vectors = req.include_vectors.unwrap_or(false);
+        let now = time::now();
+        let built: Vec<SimilarityResult> = ranked
+            .into_iter()
+            .filter_map(|(node_id, score)| {
+                self.db.get_node(node_id).ok().map(|node| SimilarityResult {
+                    node: self.node_to_response(&node, include_vectors, now),
+                    score,
+                    score_breakdown: None,
+                })
+            })
+            .filter(|r| prov_filter.is_none_or(|f| f.matches(r.node.provenance.as_ref())))
+            .collect();
+
+        let has_more = built.len() > offset.saturating_add(k);
+        let page: Vec<SimilarityResult> = built.into_iter().skip(offset).take(k).collect();
+        let count = page.len();
+        let mut response = json!({
+            "results": page,
+            "count": count,
+        });
+        Self::attach_completeness(&mut response, offset, k, has_more, None);
+        self.success_json(response)
+    }
+
+    /// Provenance-weighted fused `find_similar` (Issue #3372). Re-ranks the
+    /// candidate set (scoped or unscoped, per #3349) by the fused score of
+    /// similarity × provenance-confidence × temporal-recency, attaching a
+    /// `score_breakdown` to each result. Composes with the #3348 provenance
+    /// filter (applied per-candidate before paging) and #3349 namespace scoping.
+    ///
+    /// v1: `find_similar` has no temporal params, so recency is evaluated
+    /// against the current wallclock (AS-OF fusion is satisfied on
+    /// `hybrid_query`). The queried index must use the Cosine metric.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn handle_find_similar_fused(
+        &self,
+        args: &serde_json::Value,
+        policy: &crate::db::fusion::FusionPolicy,
+        prov_filter: Option<&crate::core::ProvenanceFilter>,
+    ) -> CallToolResult {
+        use crate::db::fusion::fused_horizon;
+
+        let req: FindSimilarRequest = match serde_json::from_value(args.clone()) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let k = req.k.unwrap_or(DEFAULT_VECTOR_K).clamp(1, MAX_VECTOR_K);
+        let offset = req
+            .offset
+            .unwrap_or(0)
+            .min(MAX_PAGINATION_OFFSET)
+            .min(MAX_VECTOR_K.saturating_sub(k));
+
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        if let Err(e) = self.validate_embedding_dimensions(&req.embedding, &req.property_name) {
+            return self.invalid_argument(&e);
+        }
+        // Fusion's similarity term assumes an already-`[0,1]` score, true only
+        // for Cosine; reject other metrics rather than distorting the term
+        // (mirrors `FusionError::UnsupportedMetric`).
+        if let Some(err) = self.fusion_metric_precondition(&req.property_name) {
+            return err;
+        }
+
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+
+        // Over-fetch a `k`-scaled horizon (never a fixed page window) so a
+        // geometrically-far but high-trust candidate can still win (AC4).
+        let horizon = fused_horizon(k);
+        let candidates: Vec<(NodeId, f32)> =
+            if matches!(scope, crate::core::namespace::NamespaceScope::All) {
+                match self.db.similarity_search(
+                    crate::SimilarityQuery::from_embedding(req.embedding.clone()).k(horizon),
+                ) {
+                    Ok(r) => r,
+                    Err(e) => return self.db_error(e),
+                }
+            } else {
+                match self
+                    .db
+                    .find_similar_by_embedding_scoped(&req.embedding, horizon, &scope)
+                {
+                    Ok(r) => r,
+                    Err(e) => return self.db_error(e),
+                }
+            };
+
+        let include_vectors = req.include_vectors.unwrap_or(false);
+        let now = time::now();
+        let reference_now = now.wallclock();
+
+        // Fuse each candidate, keeping the fused score alongside the result so we
+        // can sort by it. Provenance-filter per-candidate (before paging).
+        let mut scored: Vec<(f64, NodeId, SimilarityResult)> = Vec::with_capacity(candidates.len());
+        for (node_id, similarity) in candidates {
+            let Ok(node) = self.db.get_node(node_id) else {
+                continue;
+            };
+            let response = self.node_to_response(&node, include_vectors, now);
+            if !prov_filter.is_none_or(|f| f.matches(response.provenance.as_ref())) {
+                continue;
+            }
+            let (confidence, valid_from_micros, recency_defaulted) =
+                self.node_fusion_inputs(node.current_version);
+            let recency = if recency_defaulted {
+                crate::db::fusion::DEFAULT_NEUTRAL_RECENCY
+            } else {
+                policy.recency(reference_now, valid_from_micros)
+            };
+            let mut breakdown = policy.fuse(f64::from(similarity), confidence, recency);
+            breakdown.recency_defaulted = recency_defaulted;
+            let result = SimilarityResult {
+                node: response,
+                score: similarity,
+                score_breakdown: Some(Self::fusion_breakdown_to_json(&breakdown)),
+            };
+            scored.push((breakdown.fused, node_id, result));
+        }
+
+        // Total-order sort by fused score (descending), stable node-id tie-break.
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.cmp(&b.1))
+        });
+
+        let has_more = scored.len() > offset.saturating_add(k);
+        let page: Vec<SimilarityResult> = scored
+            .into_iter()
+            .skip(offset)
+            .take(k)
+            .map(|(_, _, r)| r)
+            .collect();
+        let count = page.len();
+        let mut response = json!({
+            "results": page,
+            "count": count,
+        });
+        Self::attach_completeness(&mut response, offset, k, has_more, None);
+        self.success_json(response)
+    }
+
+    /// Read a candidate node's fusion inputs — `(confidence, valid_from_micros,
+    /// recency_defaulted)` — from its current version (Issue #3372). Mirrors the
+    /// Rust-API `node_fusion_metadata`; when metadata cannot be loaded,
+    /// `recency_defaulted` is set so the caller substitutes a **neutral**
+    /// recency (never a maximum-recency boost).
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn node_fusion_inputs(&self, version_id: VersionId) -> (Option<f64>, i64, bool) {
+        match self.db.get_node_version_read_metadata(version_id) {
+            Ok(Some((provenance, interval))) => (
+                provenance.and_then(|p| p.confidence()),
+                interval.valid_time().start().wallclock(),
+                false,
+            ),
+            _ => (None, 0, true),
+        }
+    }
+
+    // ========================================================================
+    // Embedding generation & text semantic search (Issue #2906)
+    //
+    // Design A: all five tools are advertised and dispatched unconditionally.
+    // The real work lives under `#[cfg(feature = "embeddings")]`; under
+    // `#[cfg(not(feature = "embeddings"))]` each handler returns a structured
+    // unavailable-feature error (mirroring how `handle_query` returns
+    // `language_unavailable` when the `cypher` feature is off), so the tool
+    // inventory is a single flat count regardless of feature selection.
+    // ========================================================================
+
+    /// Structured error returned by the embedding tools when the `embeddings`
+    /// feature was not compiled into this build (Design A, Issue #2906).
+    #[cfg(not(feature = "embeddings"))]
+    fn embeddings_unavailable(&self) -> CallToolResult {
+        self.error_result(
+            McpError::new(
+                McpErrorCode::FailedPrecondition,
+                "Embedding generation is unavailable: this server was built without the \
+                 `embeddings` feature. Rebuild with `--features embeddings` (and configure a \
+                 model) to use embed_query, embed_text, semantic_search, \
+                 create_node_with_embedding, and update_node_embedding.",
+            )
+            .details(json!({ "feature": "embeddings", "available": false })),
+        )
+    }
+
+    /// Run an embedding future to completion on the ambient multi-threaded
+    /// Tokio runtime, bridging the synchronous MCP dispatch path to the async
+    /// `embed_anything` API (Issue #2906).
+    ///
+    /// Returns `Err(CallToolResult)` — a structured `UNAVAILABLE` — instead of
+    /// panicking when there is no current runtime or the runtime is
+    /// single-threaded. `tokio::task::block_in_place` (which lets us block the
+    /// current worker on the embedding future without stalling the whole
+    /// runtime) is only legal on a **multi-thread** runtime worker; it panics on
+    /// a current-thread runtime. That is exactly why the current-thread flavor
+    /// is pre-checked here and short-circuited to `UNAVAILABLE` rather than
+    /// allowed to reach `block_in_place`. The `aletheia-mcp` binary and
+    /// `aletheia-server` both run on a multi-thread runtime, so the happy path
+    /// always applies there.
+    #[cfg(feature = "embeddings")]
+    #[allow(clippy::result_large_err)]
+    fn block_on_embedding<F>(&self, fut: F) -> std::result::Result<F::Output, CallToolResult>
+    where
+        F: std::future::Future,
+    {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                Ok(tokio::task::block_in_place(move || handle.block_on(fut)))
+            }
+            _ => Err(self.error_result(McpError::new(
+                McpErrorCode::Unavailable,
+                "No multi-threaded async runtime is available to run embedding generation. \
+                 Serve the MCP/HTTP surface on a multi-threaded Tokio runtime.",
+            ))),
+        }
+    }
+
+    /// The configured embedder, or a structured `FAILED_PRECONDITION` result
+    /// when none has been set (Issue #2906).
+    #[cfg(feature = "embeddings")]
+    #[allow(clippy::result_large_err)]
+    fn require_embedder(
+        &self,
+    ) -> std::result::Result<Arc<crate::embeddings::Embedder>, CallToolResult> {
+        self.embedder.as_ref().map(Arc::clone).ok_or_else(|| {
+            self.failed_precondition(
+                "No embedding model is configured on this server. Configure one via \
+                 AletheiaMcpServer::with_embedder (or the server's embedding-model option) \
+                 before using the embedding tools.",
+            )
+        })
+    }
+
+    /// Embed a single string into one dense vector (Issue #2906).
+    #[cfg(feature = "embeddings")]
+    fn handle_embed_query(&self, args: serde_json::Value) -> CallToolResult {
+        let req: EmbedQueryRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.text.len() > MAX_EMBED_TEXT_BYTES {
+            return self.invalid_argument(&format!(
+                "text exceeds the maximum of {} bytes (got {})",
+                MAX_EMBED_TEXT_BYTES,
+                req.text.len()
+            ));
+        }
+        let embedder = match self.require_embedder() {
+            Ok(e) => e,
+            Err(result) => return result,
+        };
+
+        let text = req.text;
+        let embedded = match self.block_on_embedding(async move {
+            crate::embeddings::embed_query(&[text.as_str()], embedder.as_ref(), None).await
+        }) {
+            Ok(r) => r,
+            Err(result) => return result,
+        };
+        let data = match embedded {
+            Ok(d) => d,
+            Err(e) => {
+                // Do not leak upstream provider/model/path detail to the caller.
+                eprintln!("embed_query: embedding generation failed: {e}");
+                return self.error_result(McpError::new(
+                    McpErrorCode::Internal,
+                    "embedding generation failed",
+                ));
+            }
+        };
+        match crate::embeddings::embed_data_to_dense_iter(data, Some(1)).next() {
+            Some(Ok(dense)) => {
+                let dim = dense.embedding.len();
+                self.success_json(json!({ "embedding": dense.embedding, "dim": dim }))
+            }
+            Some(Err(e)) => self.failed_precondition(&format!(
+                "Configured embedding model produced an unsupported (non-dense) result: {e}"
+            )),
+            None => self.error_result(McpError::new(
+                McpErrorCode::Internal,
+                "Embedding model returned no result",
+            )),
+        }
+    }
+
+    /// Embed multiple texts with real chunk expansion (Issue #2906): each input
+    /// document is split into contiguous character windows
+    /// ([`split_text_into_chunks`]) and every chunk is embedded independently
+    /// via [`process_chunks`](crate::embeddings::process_chunks), so a long
+    /// document produces MULTIPLE embeddings rather than one truncated vector.
+    /// Results are aligned to their source chunk through
+    /// [`EmbedData`](crate::embeddings::EmbedData) (`.text`/`.metadata`), never
+    /// a positional zip; `metadata` carries the originating `source_index` and
+    /// `chunk_index`. `max_chunks` is a hard cap on the returned embeddings; the
+    /// response sets `truncated: true` when the cap trims the expansion. A
+    /// `max_chunks` of `0` is rejected as INVALID_ARGUMENT.
+    #[cfg(feature = "embeddings")]
+    fn handle_embed_text(&self, args: serde_json::Value) -> CallToolResult {
+        let req: EmbedTextRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.texts.is_empty() {
+            return self.invalid_argument("texts must contain at least one string");
+        }
+        if req.texts.len() > MAX_EMBED_TEXTS {
+            return self.invalid_argument(&format!(
+                "texts exceeds the maximum of {} entries (got {})",
+                MAX_EMBED_TEXTS,
+                req.texts.len()
+            ));
+        }
+        if let Some(oversized) = req.texts.iter().find(|t| t.len() > MAX_EMBED_TEXT_BYTES) {
+            return self.invalid_argument(&format!(
+                "a text entry exceeds the maximum of {} bytes (got {})",
+                MAX_EMBED_TEXT_BYTES,
+                oversized.len()
+            ));
+        }
+        // A zero cap is a caller error: it can never return anything useful.
+        if req.max_chunks == Some(0) {
+            return self.invalid_argument("max_chunks must be greater than zero");
+        }
+        let chunk_cap = req
+            .max_chunks
+            .map_or(MAX_EMBED_CHUNKS, |m| m.min(MAX_EMBED_CHUNKS));
+        let embedder = match self.require_embedder() {
+            Ok(e) => e,
+            Err(result) => return result,
+        };
+
+        // Chunk-expand each input document into contiguous character windows,
+        // preserving source alignment via metadata (never a positional zip).
+        // Each chunk is embedded independently and re-aligned to its own
+        // `EmbedData` below, so a long document yields MULTIPLE embeddings
+        // instead of being silently truncated to one vector (Issue #2906 AC).
+        let mut chunk_texts: Vec<String> = Vec::new();
+        let mut chunk_meta: Vec<Option<std::collections::HashMap<String, String>>> = Vec::new();
+        for (source_index, text) in req.texts.iter().enumerate() {
+            for (chunk_index, chunk) in split_text_into_chunks(text, EMBED_CHUNK_SIZE_CHARS)
+                .into_iter()
+                .enumerate()
+            {
+                let mut meta = std::collections::HashMap::new();
+                meta.insert("source_index".to_string(), source_index.to_string());
+                meta.insert("chunk_index".to_string(), chunk_index.to_string());
+                chunk_texts.push(chunk);
+                chunk_meta.push(Some(meta));
+            }
+        }
+        // Honor `max_chunks` as a hard cap on the returned embeddings, and
+        // disclose when the cap trimmed the expansion.
+        let truncated = chunk_texts.len() > chunk_cap;
+        if truncated {
+            chunk_texts.truncate(chunk_cap);
+            chunk_meta.truncate(chunk_cap);
+        }
+
+        let embedded = match self.block_on_embedding(async move {
+            crate::embeddings::process_chunks(&chunk_texts, &chunk_meta, &embedder, None, None)
+                .await
+        }) {
+            Ok(r) => r,
+            Err(result) => return result,
+        };
+        let data = match embedded {
+            Ok(d) => d,
+            Err(e) => {
+                // Do not leak upstream provider/model/path detail to the caller.
+                eprintln!("embed_text: embedding generation failed: {e}");
+                return self.error_result(McpError::new(
+                    McpErrorCode::Internal,
+                    "embedding generation failed",
+                ));
+            }
+        };
+
+        // `process_chunks` returns a fresh `Arc<Vec<EmbedData>>` (refcount 1),
+        // so `try_unwrap` recovers the owned vector without cloning.
+        let data = Arc::try_unwrap(data).unwrap_or_else(|arc| arc.as_ref().clone());
+        let mut chunks = Vec::new();
+        for item in crate::embeddings::embed_data_to_dense_iter(data, None) {
+            match item {
+                Ok(dense) => {
+                    let dim = dense.embedding.len();
+                    chunks.push(json!({
+                        "text": dense.text,
+                        "metadata": dense.metadata,
+                        "embedding": dense.embedding,
+                        "dim": dim,
+                    }));
+                }
+                Err(e) => {
+                    return self.failed_precondition(&format!(
+                        "Configured embedding model produced an unsupported (non-dense) result: {e}"
+                    ));
+                }
+            }
+        }
+        let count = chunks.len();
+        self.success_json(json!({ "chunks": chunks, "count": count, "truncated": truncated }))
+    }
+
+    /// Embed `query_text` and reuse the exact `find_similar` path so the
+    /// response envelope is byte-identical (Issue #2906).
+    #[cfg(feature = "embeddings")]
+    fn handle_semantic_search(&self, args: serde_json::Value) -> CallToolResult {
+        let req: SemanticSearchRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.query_text.len() > MAX_EMBED_TEXT_BYTES {
+            return self.invalid_argument(&format!(
+                "query_text exceeds the maximum of {} bytes (got {})",
+                MAX_EMBED_TEXT_BYTES,
+                req.query_text.len()
+            ));
+        }
+        // Validate the target index up front (cheap, no model needed) so a
+        // missing index is a clear FAILED_PRECONDITION even before embedding.
+        if !self.db.is_vector_index_enabled_for(&req.property_name) {
+            return self.failed_precondition(&format!(
+                "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                req.property_name
+            ));
+        }
+        let embedder = match self.require_embedder() {
+            Ok(e) => e,
+            Err(result) => return result,
+        };
+
+        let query_text = req.query_text;
+        let embedded = match self.block_on_embedding(async move {
+            crate::embeddings::embed_query(&[query_text.as_str()], embedder.as_ref(), None).await
+        }) {
+            Ok(r) => r,
+            Err(result) => return result,
+        };
+        let data = match embedded {
+            Ok(d) => d,
+            Err(e) => {
+                // Do not leak upstream provider/model/path detail to the caller.
+                eprintln!("semantic_search: embedding generation failed: {e}");
+                return self.error_result(McpError::new(
+                    McpErrorCode::Internal,
+                    "embedding generation failed",
+                ));
+            }
+        };
+        let embedding =
+            match crate::embeddings::to_dense_iter(data.into_iter().map(|d| d.embedding), Some(1))
+                .next()
+            {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => {
+                    return self.failed_precondition(&format!(
+                        "Configured embedding model produced an unsupported (non-dense) result: {e}"
+                    ));
+                }
+                None => {
+                    return self.error_result(McpError::new(
+                        McpErrorCode::Internal,
+                        "Embedding model returned no result",
+                    ));
+                }
+            };
+        // Dimension mismatch is a caller-fault INVALID_ARGUMENT.
+        if let Err(e) = self.validate_embedding_dimensions(&embedding, &req.property_name) {
+            return self.invalid_argument(&e);
+        }
+
+        // Delegate to the exact find_similar handler with a rebuilt request so
+        // the success envelope (results/score/temporal/#3220 elision/#3226
+        // pagination) is byte-identical.
+        let mut find_args = serde_json::Map::new();
+        find_args.insert("property_name".to_string(), json!(req.property_name));
+        find_args.insert("embedding".to_string(), json!(embedding));
+        if let Some(k) = req.k {
+            find_args.insert("k".to_string(), json!(k));
+        }
+        if let Some(offset) = req.offset {
+            find_args.insert("offset".to_string(), json!(offset));
+        }
+        if let Some(include_vectors) = req.include_vectors {
+            find_args.insert("include_vectors".to_string(), json!(include_vectors));
+        }
+        self.handle_find_similar(serde_json::Value::Object(find_args))
+    }
+
+    /// Embed `text` and store it as a vector property on a new node, reusing
+    /// the standard `create_node_with_options` write path (Issue #2906).
+    #[cfg(feature = "embeddings")]
+    fn handle_create_node_with_embedding(&self, args: serde_json::Value) -> CallToolResult {
+        let req: CreateNodeWithEmbeddingRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.text.len() > MAX_EMBED_TEXT_BYTES {
+            return self.invalid_argument(&format!(
+                "text exceeds the maximum of {} bytes (got {})",
+                MAX_EMBED_TEXT_BYTES,
+                req.text.len()
+            ));
+        }
+        let embedder = match self.require_embedder() {
+            Ok(e) => e,
+            Err(result) => return result,
+        };
+
+        let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+        let provenance = match self.parse_opt_provenance(req.provenance) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
+
+        let embedding = match self.embed_one(&req.text, embedder) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+        // Build the property map (non-embedding props) then attach the
+        // generated vector under `embedding_property`.
+        let base = match &req.properties {
+            Some(p) => match self.json_to_property_map(p) {
+                Ok(map) => map,
+                Err(e) => return self.property_map_error(e),
+            },
+            None => PropertyMap::default(),
+        };
+        let properties = match base
+            .builder()
+            .try_insert_vector(&req.embedding_property, &embedding)
+        {
+            Ok(b) => b.build(),
+            Err(e) => {
+                return self.invalid_argument(&format!("Invalid embedding property: {}", e));
+            }
+        };
+
+        let mut options = crate::api::transaction::WriteRequestOptions::new();
+        if let Some(valid_from) = valid_from {
+            options = options.with_valid_from(valid_from);
+        }
+        if let Some(provenance) = provenance {
+            options = options.with_provenance(provenance);
+        }
+
+        match self
+            .db
+            .create_node_with_options(&req.label, properties, options)
+        {
+            Ok(node_id) => match self.db.get_node(node_id) {
+                Ok(node) => {
+                    let now = time::now();
+                    // Write path returns the full vector it just wrote.
+                    let response = self.node_to_response(&node, true, now);
+                    self.success_json(
+                        serde_json::to_value(&response)
+                            .expect("response serialization should not fail"),
+                    )
+                }
+                Err(e) => self.db_error(e),
+            },
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Embed `text` and update ONLY the embedding property of an existing node,
+    /// preserving all other properties (Issue #2906).
+    ///
+    /// The embedding is generated FIRST (a slow, network/CPU-bound step holding
+    /// no snapshot or lock), then the read-merge-write runs inside a SINGLE
+    /// [`write`](crate::db::AletheiaDB::write) transaction: `update_node`
+    /// replaces every property, so the existing properties are re-read from the
+    /// transaction's own snapshot and merged before overriding the embedding.
+    /// Doing the read and the write in one transaction closes the lost-update
+    /// race — a concurrent writer that commits in the window is caught by
+    /// commit-time conflict detection instead of being silently overwritten.
+    #[cfg(feature = "embeddings")]
+    fn handle_update_node_embedding(&self, args: serde_json::Value) -> CallToolResult {
+        let req: UpdateNodeEmbeddingRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        if req.text.len() > MAX_EMBED_TEXT_BYTES {
+            return self.invalid_argument(&format!(
+                "text exceeds the maximum of {} bytes (got {})",
+                MAX_EMBED_TEXT_BYTES,
+                req.text.len()
+            ));
+        }
+        let node_id = match NodeId::new(req.node_id) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        let embedder = match self.require_embedder() {
+            Ok(e) => e,
+            Err(result) => return result,
+        };
+
+        let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+        // Embed FIRST (slow, network/CPU-bound), holding no snapshot or lock,
+        // so the transaction window below stays as short as possible.
+        let embedding = match self.embed_one(&req.text, embedder) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+        // Stamp the authenticated principal (if any) onto the version.
+        let provenance = match self.parse_opt_provenance(None) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
+
+        // Read + merge + write inside ONE transaction so the merge sees the
+        // transaction's own snapshot and commit-time conflict detection guards
+        // against a concurrent writer being silently lost (Issue #2906 fix).
+        let embedding_property = req.embedding_property;
+
+        /// Local error type bridging the property-builder failure (a caller
+        /// fault) and storage errors through the `db.write` closure.
+        enum UpdateEmbeddingError {
+            Db(crate::core::error::Error),
+            Vector(String),
+        }
+        impl From<crate::core::error::Error> for UpdateEmbeddingError {
+            fn from(e: crate::core::error::Error) -> Self {
+                UpdateEmbeddingError::Db(e)
+            }
+        }
+
+        let write_result = self.db.write(|tx| {
+            use crate::api::transaction::ReadOps;
+            let node = tx.get_node(node_id)?;
+            let properties = node
+                .properties
+                .builder()
+                .try_insert_vector(&embedding_property, &embedding)
+                .map_err(|e| {
+                    UpdateEmbeddingError::Vector(format!("Invalid embedding property: {e}"))
+                })?
+                .build();
+
+            let mut options = crate::api::transaction::WriteRequestOptions::new();
+            if let Some(valid_from) = valid_from {
+                options = options.with_valid_from(valid_from);
+            }
+            if let Some(provenance) = provenance {
+                options = options.with_provenance(provenance);
+            }
+            tx.update_node_with_options(node_id, properties, options)?;
+            Ok::<(), UpdateEmbeddingError>(())
+        });
+
+        match write_result {
+            Ok(()) => match self.db.get_node(node_id) {
+                Ok(node) => {
+                    let now = time::now();
+                    // Write path returns the full vector it just wrote.
+                    let response = self.node_to_response(&node, true, now);
+                    self.success_json(
+                        serde_json::to_value(&response)
+                            .expect("response serialization should not fail"),
+                    )
+                }
+                Err(e) => self.db_error(e),
+            },
+            Err(UpdateEmbeddingError::Vector(msg)) => self.invalid_argument(&msg),
+            Err(UpdateEmbeddingError::Db(e)) => self.db_error(e),
+        }
+    }
+
+    /// Embed one text into a single dense vector, mapping upstream/non-dense
+    /// failures to structured error results (Issue #2906 shared helper).
+    #[cfg(feature = "embeddings")]
+    #[allow(clippy::result_large_err)]
+    fn embed_one(
+        &self,
+        text: &str,
+        embedder: Arc<crate::embeddings::Embedder>,
+    ) -> std::result::Result<Vec<f32>, CallToolResult> {
+        let owned = text.to_string();
+        let embedded = self.block_on_embedding(async move {
+            crate::embeddings::embed_query(&[owned.as_str()], embedder.as_ref(), None).await
+        })?;
+        let data = embedded.map_err(|e| {
+            // Do not leak upstream provider/model/path detail to the caller.
+            eprintln!("embed_one: embedding generation failed: {e}");
+            self.error_result(McpError::new(
+                McpErrorCode::Internal,
+                "embedding generation failed",
+            ))
+        })?;
+        match crate::embeddings::to_dense_iter(data.into_iter().map(|d| d.embedding), Some(1))
+            .next()
+        {
+            Some(Ok(v)) => Ok(v),
+            Some(Err(e)) => Err(self.failed_precondition(&format!(
+                "Configured embedding model produced an unsupported (non-dense) result: {e}"
+            ))),
+            None => Err(self.error_result(McpError::new(
+                McpErrorCode::Internal,
+                "Embedding model returned no result",
+            ))),
+        }
+    }
+
+    // Feature-off variants: return the structured unavailable-feature error.
+
+    #[cfg(not(feature = "embeddings"))]
+    fn handle_embed_query(&self, _args: serde_json::Value) -> CallToolResult {
+        self.embeddings_unavailable()
+    }
+
+    #[cfg(not(feature = "embeddings"))]
+    fn handle_embed_text(&self, _args: serde_json::Value) -> CallToolResult {
+        self.embeddings_unavailable()
+    }
+
+    #[cfg(not(feature = "embeddings"))]
+    fn handle_semantic_search(&self, _args: serde_json::Value) -> CallToolResult {
+        self.embeddings_unavailable()
+    }
+
+    #[cfg(not(feature = "embeddings"))]
+    fn handle_create_node_with_embedding(&self, _args: serde_json::Value) -> CallToolResult {
+        self.embeddings_unavailable()
+    }
+
+    #[cfg(not(feature = "embeddings"))]
+    fn handle_update_node_embedding(&self, _args: serde_json::Value) -> CallToolResult {
+        self.embeddings_unavailable()
     }
 
     fn handle_enable_vector_index(&self, args: serde_json::Value) -> CallToolResult {
@@ -4015,7 +6501,25 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&e),
         };
 
-        match self.db.get_node_at_time(node_id, valid_time, tx_time) {
+        // Issue #3349: reconstruct at the coordinate first, then filter by the
+        // (immutable) namespace scope; out of scope ⇒ NOT_FOUND. Omitted ⇒ the
+        // `default` namespace only (isolated-by-default, #3349 FIX2); `all`
+        // imposes no filter.
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        let node_result = match &scope {
+            crate::core::namespace::NamespaceScope::All => {
+                self.db.get_node_at_time(node_id, valid_time, tx_time)
+            }
+            scope => self
+                .db
+                .get_node_at_time_scoped(node_id, valid_time, tx_time, scope),
+        };
+
+        match node_result {
             Ok(node) => {
                 let now = time::now();
                 let response = self.node_to_response(&node, true, now);
@@ -4054,7 +6558,24 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&e),
         };
 
-        match self.db.get_edge_at_time(edge_id, valid_time, tx_time) {
+        // Issue #3349: reconstruct then filter by the (immutable) namespace
+        // scope. Omitted ⇒ the `default` namespace only (isolated-by-default,
+        // #3349 FIX2); `all` imposes no filter.
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        let edge_result = match &scope {
+            crate::core::namespace::NamespaceScope::All => {
+                self.db.get_edge_at_time(edge_id, valid_time, tx_time)
+            }
+            scope => self
+                .db
+                .get_edge_at_time_scoped(edge_id, valid_time, tx_time, scope),
+        };
+
+        match edge_result {
             Ok(edge) => {
                 let now = time::now();
                 let response = self.edge_to_response(&edge, true, now);
@@ -4176,12 +6697,38 @@ impl AletheiaMcpServer {
         // Snapshot-anchored cursor paging (Issue #3360); offset paging below
         // is unchanged for backward compatibility.
         if Self::cursor_requested(&args) {
+            // Issue #3349: a narrowing namespace scope does not compose with the
+            // #3360 cursor path in v1 — fail closed.
+            if let Err(result) = self.reject_unsupported_scope(
+                &args.get("namespace").cloned(),
+                "namespace scope does not compose with cursor paging (use_cursor) in v1; use \
+                 offset/limit paging with the scope instead, or \"all\".",
+            ) {
+                return result;
+            }
             return self.handle_find_nodes_at_time_cursor(&args);
         }
 
         let req: FindNodesAtTimeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        // Issue #3349 (FIX2): an omitted scope resolves to the `default`
+        // namespace only (isolated-by-default) and routes each candidate
+        // (reconstructed at the coordinate) through the immutable namespace
+        // filter, exactly like an explicit narrowing scope. For a pre-namespace
+        // database (all data is `default`) the candidate set is unchanged. Only
+        // the `all` selector falls through unscoped.
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        let scope = if matches!(scope, crate::core::namespace::NamespaceScope::All) {
+            None
+        } else {
+            Some(scope)
         };
 
         // Validate property filter: both key and value are required together
@@ -4217,15 +6764,30 @@ impl AletheiaMcpServer {
                         "Unsupported property_value type. Use strings, numbers, booleans, or null.",
                     ),
                 };
-                self.db.find_nodes_by_property_at(
-                    &req.label,
-                    prop_key,
-                    &property_value,
-                    valid_time,
-                    tx_time,
-                )
+                match &scope {
+                    Some(scope) => self.db.find_nodes_by_property_at_scoped(
+                        &req.label,
+                        prop_key,
+                        &property_value,
+                        valid_time,
+                        tx_time,
+                        scope,
+                    ),
+                    None => self.db.find_nodes_by_property_at(
+                        &req.label,
+                        prop_key,
+                        &property_value,
+                        valid_time,
+                        tx_time,
+                    ),
+                }
             } else {
-                self.db.find_nodes_at_time(&req.label, valid_time, tx_time)
+                match &scope {
+                    Some(scope) => self
+                        .db
+                        .find_nodes_at_time_scoped(&req.label, valid_time, tx_time, scope),
+                    None => self.db.find_nodes_at_time(&req.label, valid_time, tx_time),
+                }
             };
 
         match matches {
@@ -4322,24 +6884,7 @@ impl AletheiaMcpServer {
                 let changes: Vec<serde_json::Value> = page
                     .changes
                     .iter()
-                    .map(|record| {
-                        json!({
-                            "entity_id": record.entity_id,
-                            "version_id": record.version_id,
-                            "kind": record.kind.as_str(),
-                            "change_type": record.change_type.as_str(),
-                            "label": record.label,
-                            "transaction_time": time::to_iso8601(record.transaction_time()),
-                            "transaction_time_range": {
-                                "start": time::to_iso8601(record.transaction_time_range.start()),
-                                "end": time::to_iso8601(record.transaction_time_range.end()),
-                            },
-                            "valid_time_range": {
-                                "start": time::to_iso8601(record.valid_time_range.start()),
-                                "end": time::to_iso8601(record.valid_time_range.end()),
-                            },
-                        })
-                    })
+                    .map(Self::changefeed_change_json)
                     .collect();
 
                 self.success_json(json!({
@@ -4349,6 +6894,342 @@ impl AletheiaMcpServer {
                 }))
             }
             Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Serialize a single [`ChangeRecord`](crate::core::ChangeRecord) into the
+    /// changefeed row JSON shared by `list_changes` and `await_changes`, so both
+    /// surfaces emit a byte-identical change shape (Issue #3375).
+    fn changefeed_change_json(record: &crate::core::ChangeRecord) -> serde_json::Value {
+        json!({
+            "entity_id": record.entity_id,
+            "version_id": record.version_id,
+            "kind": record.kind.as_str(),
+            "change_type": record.change_type.as_str(),
+            "label": record.label,
+            "namespace": record.namespace.as_str(),
+            "transaction_time": time::to_iso8601(record.transaction_time()),
+            "transaction_time_range": {
+                "start": time::to_iso8601(record.transaction_time_range.start()),
+                "end": time::to_iso8601(record.transaction_time_range.end()),
+            },
+            "valid_time_range": {
+                "start": time::to_iso8601(record.valid_time_range.start()),
+                "end": time::to_iso8601(record.valid_time_range.end()),
+            },
+        })
+    }
+
+    /// Build the `await_changes` success envelope from a set of changes plus the
+    /// resume/timeout/has-more signals.
+    fn await_changes_success(
+        &self,
+        changes: &[crate::core::ChangeRecord],
+        resume_token: Option<String>,
+        timed_out: bool,
+        has_more: bool,
+    ) -> CallToolResult {
+        let rows: Vec<serde_json::Value> =
+            changes.iter().map(Self::changefeed_change_json).collect();
+        self.success_json(json!({
+            "changes": rows,
+            "count": changes.len(),
+            "resume_token": resume_token,
+            "timed_out": timed_out,
+            "has_more": has_more,
+        }))
+    }
+
+    /// Parse the request's `change_types` strings into [`ChangeType`]s, returning
+    /// the offending token's error message for any unrecognized value (the
+    /// caller wraps it in a structured `INVALID_ARGUMENT`). Returns a small `Err`
+    /// (`String`) rather than a `CallToolResult` to keep the `Result` compact.
+    fn parse_change_types(raw: &[String]) -> Result<Vec<ChangeType>, String> {
+        raw.iter()
+            .map(|s| match s.as_str() {
+                "created" => Ok(ChangeType::Created),
+                "modified" => Ok(ChangeType::Modified),
+                "deleted" => Ok(ChangeType::Deleted),
+                other => Err(format!(
+                    "Invalid change_type '{other}': expected one of created, modified, deleted"
+                )),
+            })
+            .collect()
+    }
+
+    /// Long-poll for the next committed changes (the push changefeed's blocking
+    /// surface, Issue #3375).
+    ///
+    /// Stateless per call: subscribe (capturing the committed frontier so no
+    /// change between catch-up and blocking is lost), optionally catch up from a
+    /// prior `from_token` via `list_changes` (returning immediately if any change
+    /// already exists), otherwise block up to the clamped `timeout_ms`. Error
+    /// mappings (Issue #3234): a lagged subscription → retriable
+    /// `RESOURCE_EXHAUSTED` with `details.resume_token`; a subscribe cap breach →
+    /// retriable `UNAVAILABLE`; a malformed `from_token` → `INVALID_ARGUMENT`.
+    ///
+    /// This synchronous entry is now reached only via `dispatch_tool`
+    /// (embedded / programmatic / test callers): the native MCP `call_tool`
+    /// seam intercepts `await_changes` and routes it through the event-driven
+    /// [`Self::dispatch_await_changes_async`] instead (Issue #3673), so the
+    /// `block_in_place` worker bridge below no longer runs on the live MCP
+    /// server surface.
+    fn handle_await_changes(
+        &self,
+        args: serde_json::Value,
+        principal_override: Option<String>,
+    ) -> CallToolResult {
+        match self.await_changes_prelude(args, principal_override) {
+            AwaitChangesStep::Immediate(result) => *result,
+            AwaitChangesStep::Block { sub, timeout } => {
+                // Synchronous Condvar long-poll for embedded/programmatic callers
+                // (and any non-`call_tool` sync dispatch). SAFETY/why:
+                // `recv_timeout` parks this worker for up to 60s. On a multi-thread
+                // Tokio runtime, run it inside `block_in_place` so Tokio can spin up
+                // a replacement worker; on a current-thread runtime or with no
+                // runtime (embedded/programmatic callers) `block_in_place` would
+                // panic, so call inline. The event-driven native `call_tool` and
+                // HTTP `/changes/await` paths instead use the async
+                // [`Self::dispatch_await_changes_async`] wait, which pins no worker
+                // and releases promptly on client disconnect (Issue #3673).
+                let recv_result = match tokio::runtime::Handle::try_current() {
+                    Ok(handle)
+                        if handle.runtime_flavor()
+                            == tokio::runtime::RuntimeFlavor::MultiThread =>
+                    {
+                        tokio::task::block_in_place(|| sub.recv_timeout(timeout))
+                    }
+                    _ => sub.recv_timeout(timeout),
+                };
+                self.finish_await_recv(&sub, recv_result)
+            }
+        }
+    }
+
+    /// Event-driven async counterpart to [`handle_await_changes`] (Issue #3673).
+    ///
+    /// Runs the identical subscribe + catch-up prelude, then — for the blocking
+    /// leg — awaits [`Subscription::recv_async`] instead of parking a worker on
+    /// the synchronous `recv_timeout`. Because the wait is a suspended future, N
+    /// concurrent long-polls pin **zero** worker threads (fixing the AC(a)
+    /// `block_in_place` pin), and dropping this future on client disconnect drops
+    /// the `Subscription` immediately, freeing its per-principal slot without
+    /// waiting out the timeout. Used by the native MCP `call_tool` seam and the
+    /// HTTP `/changes/await` projection.
+    pub(crate) async fn dispatch_await_changes_async(
+        &self,
+        args: serde_json::Value,
+        principal_override: Option<String>,
+    ) -> CallToolResult {
+        match self.await_changes_prelude(args, principal_override) {
+            AwaitChangesStep::Immediate(result) => *result,
+            AwaitChangesStep::Block { sub, timeout } => {
+                let recv_result = sub.recv_async(timeout).await;
+                self.finish_await_recv(&sub, recv_result)
+            }
+        }
+    }
+
+    /// The synchronous prelude shared by [`handle_await_changes`] (sync Condvar
+    /// wait) and [`dispatch_await_changes_async`] (event-driven Notify wait),
+    /// Issue #3673: it resolves the principal bucket, builds the filter,
+    /// subscribes (capturing the frontier), and runs the optional catch-up — all
+    /// fast, non-blocking work — returning either an [`AwaitChangesStep::Immediate`]
+    /// result or a live [`Subscription`] to wait on. Factoring it out guarantees
+    /// both surfaces run byte-identical subscribe/catch-up logic and differ ONLY
+    /// in how they wait, so delivery semantics stay unchanged (AC c).
+    fn await_changes_prelude(
+        &self,
+        args: serde_json::Value,
+        principal_override: Option<String>,
+    ) -> AwaitChangesStep {
+        let req: AwaitChangesRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => {
+                return AwaitChangesStep::Immediate(Box::new(
+                    self.invalid_argument(&format!("Invalid arguments: {}", e)),
+                ));
+            }
+        };
+
+        // Resolve the per-principal quota bucket (Issue #3678): the surface-supplied
+        // override (HTTP route), else the authenticated MCP session principal, else
+        // the shared "anonymous" bucket — so every surface enforces the quota and no
+        // single (even anonymous) caller can exhaust the global cap and starve others.
+        let principal_key = principal_override
+            .or_else(|| self.session_principal().map(|p| p.id))
+            .unwrap_or_else(|| "anonymous".to_string());
+
+        // Build the change filter (label/type/change-type dimensions).
+        let mut filter = ChangeFilter::all();
+        if let Some(labels) = &req.node_labels {
+            filter = filter.with_node_labels(labels.iter().cloned());
+        }
+        if let Some(types) = &req.edge_types {
+            filter = filter.with_edge_types(types.iter().cloned());
+        }
+        if let Some(change_types) = &req.change_types {
+            let parsed = match Self::parse_change_types(change_types) {
+                Ok(v) => v,
+                Err(msg) => {
+                    return AwaitChangesStep::Immediate(Box::new(self.invalid_argument(&msg)));
+                }
+            };
+            filter = filter.with_change_types(parsed);
+        }
+
+        // Namespace scope (Issue #3349, PR3c). An omitted scope resolves to the
+        // `default` namespace only (isolated-by-default, mirroring the PR3a read
+        // tools) via `.unwrap_or_default()`; `"all"` imposes no namespace filter.
+        // A malformed / empty scope is a structured INVALID_ARGUMENT (never a
+        // silently-unscoped subscription).
+        let scope = match self.parse_opt_scope(&req.namespace) {
+            Ok(opt) => opt.unwrap_or_default(),
+            Err(result) => return AwaitChangesStep::Immediate(Box::new(result)),
+        };
+        filter = filter.with_namespace_scope(scope);
+
+        let limit = req
+            .limit
+            .unwrap_or(DEFAULT_RESULT_LIMIT)
+            .clamp(1, MAX_RESULT_LIMIT);
+
+        // Subscribe FIRST so the frontier is captured before the catch-up read:
+        // any change committed after this point is buffered in the subscription,
+        // so the catch-up→block handoff is gap-free. Clone the filter into the
+        // subscription so the handler retains a copy to post-filter the catch-up
+        // page with (the blocking leg is filtered by the subscription itself, so
+        // the catch-up leg must apply the SAME predicate — Fix 1).
+        let sub = match self
+            .db
+            .subscribe_changes_for_principal(Some(&principal_key), filter.clone())
+        {
+            Ok(s) => s,
+            Err(e) => {
+                // A per-principal quota breach (Issue #3678) falls through to
+                // `db_error`, which classifies it as a retriable RESOURCE_EXHAUSTED
+                // with `details {principal, current, limit}`. A GLOBAL cap breach is
+                // transient (another consumer may disconnect): override the default
+                // FAILED_PRECONDITION with a retriable UNAVAILABLE carrying the
+                // capacity metadata.
+                if let crate::core::error::Error::Storage(
+                    crate::core::error::StorageError::CapacityExceeded {
+                        resource,
+                        current,
+                        limit,
+                    },
+                ) = &e
+                {
+                    return AwaitChangesStep::Immediate(Box::new(
+                        self.error_result(
+                            McpError::new(McpErrorCode::Unavailable, e.to_string())
+                                .retriable(true)
+                                .details(json!({
+                                    "resource": resource,
+                                    "current": current,
+                                    "limit": limit,
+                                })),
+                        ),
+                    ));
+                }
+                return AwaitChangesStep::Immediate(Box::new(self.db_error(e)));
+            }
+        };
+
+        // Catch-up path: if the caller has a resume token, pull everything
+        // committed strictly after it via the durable `list_changes` feed and
+        // return immediately when anything is available.
+        if let Some(token) = req.from_token.as_deref() {
+            let decoded = match ChangeCursor::decode(token) {
+                Ok(c) => c,
+                Err(_) => {
+                    return AwaitChangesStep::Immediate(Box::new(
+                        self.invalid_argument("Invalid from_token: malformed continuation token"),
+                    ));
+                }
+            };
+            let query = ChangeFeedQuery {
+                tx_from: Timestamp::from(decoded.tx_wallclock),
+                tx_to: time::now(),
+                valid_from: None,
+                valid_to: None,
+                label: None,
+                limit,
+                cursor: Some(token.to_string()),
+            };
+            match self.db.list_changes(&query) {
+                // The window scanned rows: post-filter them with the SAME
+                // ChangeFilter the blocking leg's subscription applies, so a
+                // filtered subscription's resume path never returns
+                // non-matching changes (Fix 1). The resume token is the last
+                // SCANNED cursor (page.next_cursor, or the last scanned row's
+                // cursor when the scan reached the window's end) — NOT the last
+                // matching row — so a page that filters down to nothing still
+                // advances the caller past every scanned row (no re-scan/stall).
+                Ok(page) if !page.changes.is_empty() => {
+                    let filtered: Vec<crate::core::ChangeRecord> = page
+                        .changes
+                        .iter()
+                        .filter(|r| filter.matches(r))
+                        .cloned()
+                        .collect();
+                    let resume = page
+                        .next_cursor
+                        .clone()
+                        .or_else(|| page.changes.last().map(|r| r.cursor().encode()));
+                    return AwaitChangesStep::Immediate(Box::new(self.await_changes_success(
+                        &filtered,
+                        resume,
+                        false,
+                        page.next_cursor.is_some(),
+                    )));
+                }
+                Ok(_) => { /* nothing buffered yet — fall through to block */ }
+                Err(e) => return AwaitChangesStep::Immediate(Box::new(self.db_error(e))),
+            }
+        }
+
+        // Block for the next change up to the clamped timeout (default 25s, hard
+        // cap 60s). `recv_*(0)` returns instantly (Ok(empty)).
+        let timeout_ms = req.timeout_ms.unwrap_or(25_000).min(60_000);
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        AwaitChangesStep::Block { sub, timeout }
+    }
+
+    /// Format a completed `recv` (sync `recv_timeout` or async `recv_async`) into
+    /// the `await_changes` response envelope, Issue #3673 — shared by both wait
+    /// paths so they return a byte-identical result and only the wait mechanism
+    /// differs.
+    fn finish_await_recv(
+        &self,
+        sub: &Subscription,
+        recv_result: std::result::Result<Vec<crate::core::ChangeRecord>, RecvError>,
+    ) -> CallToolResult {
+        match recv_result {
+            Ok(recs) if !recs.is_empty() => {
+                let resume = recs.last().map(|r| r.cursor().encode());
+                self.await_changes_success(&recs, resume, false, false)
+            }
+            Ok(_) => {
+                // Timed out with nothing buffered: an honest empty result plus a
+                // resume anchor (the subscribe-time baseline if nothing drained).
+                self.await_changes_success(&[], sub.resume_token(), true, false)
+            }
+            Err(RecvError::Lagged { resume_token }) => {
+                let details = match &resume_token {
+                    Some(tok) => json!({ "reason": "changefeed_lagged", "resume_token": tok }),
+                    None => json!({ "reason": "changefeed_lagged" }),
+                };
+                self.error_result(
+                    McpError::new(
+                        McpErrorCode::ResourceExhausted,
+                        "The changefeed subscription lagged and was disconnected; resume \
+                         losslessly by calling list_changes with the provided resume_token.",
+                    )
+                    .retriable(true)
+                    .details(details),
+                )
+            }
         }
     }
 
@@ -4751,12 +7632,31 @@ impl AletheiaMcpServer {
             })
             .collect();
 
+        // Per-namespace current node/edge counts (Issue #3349, PR3a): one
+        // `{name, node_count, edge_count}` entry per registered-or-populated
+        // namespace, sorted by name. Empty for a bi-temporal (`as_of`) schema
+        // (the membership index is a current-state acceleration structure).
+        // NamespaceCount.name is a user-facing namespace name, never the elided
+        // ride-along key.
+        let namespaces: Vec<serde_json::Value> = schema
+            .namespaces
+            .iter()
+            .map(|n| {
+                json!({
+                    "name": n.name,
+                    "node_count": n.node_count,
+                    "edge_count": n.edge_count,
+                })
+            })
+            .collect();
+
         json!({
             "node_labels": node_labels,
             "edge_types": edge_types,
             "total_nodes": schema.total_nodes,
             "total_edges": schema.total_edges,
             "sampled": schema.sampled,
+            "namespaces": namespaces,
             "as_of": schema.as_of.map(|instant| json!({
                 "valid_time": time::to_iso8601(instant.valid_time),
                 "transaction_time": time::to_iso8601(instant.transaction_time),
@@ -4994,6 +7894,1094 @@ impl AletheiaMcpServer {
         self.handle_lineage_query(args, false)
     }
 
+    // ========================================================================
+    // Belief-revision audit (Issue #3362)
+    //
+    // Advertised unconditionally (Design A). The real handler body lives under
+    // `#[cfg(feature = "semantic-temporal")]`; a `#[cfg(not(...))]` twin returns
+    // a structured `FAILED_PRECONDITION` (mirroring `semantic_search_unavailable`)
+    // so a caller on a build without the feature gets an actionable error rather
+    // than an "unknown tool".
+    // ========================================================================
+
+    /// Structured `FAILED_PRECONDITION` returned by `get_belief_revisions` when
+    /// the `semantic-temporal` feature is not compiled into this build.
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_get_belief_revisions(&self, _args: serde_json::Value) -> CallToolResult {
+        self.error_result(
+            McpError::new(
+                McpErrorCode::FailedPrecondition,
+                "Tool 'get_belief_revisions' requires the `semantic-temporal` feature, which is \
+                 not compiled into this build. Rebuild AletheiaDB with `--features \
+                 semantic-temporal` to enable it."
+                    .to_string(),
+            )
+            .details(json!({
+                "tool": "get_belief_revisions",
+                "required_feature": "semantic-temporal",
+            })),
+        )
+    }
+
+    /// Handle the `get_belief_revisions` tool (Issue #3362): classify an
+    /// entity's stored belief revisions and return the §9 JSON shape.
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_get_belief_revisions(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::core::id::EntityId;
+        use crate::experimental::temporal::belief_revision::RevisionOptions;
+
+        let req: GetBeliefRevisionsRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        // Resolve the entity id (an out-of-range id is a caller fault →
+        // INVALID_ARGUMENT with the bare id-validation message).
+        let entity = match req.entity_kind.as_str() {
+            "node" => match NodeId::new(req.id) {
+                Ok(id) => EntityId::Node(id),
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            },
+            "edge" => match EdgeId::new(req.id) {
+                Ok(id) => EntityId::Edge(id),
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            },
+            other => {
+                return self.invalid_argument(&format!(
+                    "entity_kind must be 'node' or 'edge', got '{other}'"
+                ));
+            }
+        };
+
+        let mut options = RevisionOptions::new();
+        if let Some(ref key) = req.property_key {
+            options = options.with_property_key(key.clone());
+        }
+        if let Some(ref ts_str) = req.as_of_transaction_time {
+            let ts = match self.parse_timestamp(ts_str) {
+                Ok(t) => t,
+                Err(e) => return self.invalid_argument(&e),
+            };
+            options = options.with_as_of_transaction_time(ts);
+        }
+        if let Some(limit) = req.limit {
+            options = options.with_limit(limit);
+        }
+
+        match self.db.belief_revisions(entity, &options) {
+            Ok(log) => self.success_json(self.belief_revision_log_to_json(&log)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Serialize a [`BeliefRevisionLog`] into the Issue #3362 §9 JSON shape.
+    #[cfg(feature = "semantic-temporal")]
+    fn belief_revision_log_to_json(
+        &self,
+        log: &crate::experimental::temporal::belief_revision::BeliefRevisionLog,
+    ) -> serde_json::Value {
+        use crate::core::id::EntityId;
+
+        let (kind, id) = match log.entity {
+            EntityId::Node(nid) => ("node", nid.as_u64()),
+            EntityId::Edge(eid) => ("edge", eid.as_u64()),
+        };
+
+        let revisions: Vec<serde_json::Value> = log
+            .revisions
+            .iter()
+            .map(|r| self.revision_to_json(r))
+            .collect();
+
+        let confidence_trajectory: Vec<serde_json::Value> = log
+            .revisions
+            .iter()
+            .map(|r| match r.confidence {
+                Some(c) => json!(c),
+                None => serde_json::Value::Null,
+            })
+            .collect();
+
+        json!({
+            "entity": { "kind": kind, "id": id },
+            "property_key": log.property_key,
+            "as_of_transaction_time": log
+                .as_of_transaction_time
+                .map(Self::format_timestamp_rfc3339),
+            "revisions": revisions,
+            "confidence_trajectory": confidence_trajectory,
+            "has_more": log.has_more,
+        })
+    }
+
+    /// Serialize a single [`Revision`] entry (Issue #3362 §9).
+    #[cfg(feature = "semantic-temporal")]
+    fn revision_to_json(
+        &self,
+        rev: &crate::experimental::temporal::belief_revision::Revision,
+    ) -> serde_json::Value {
+        let changes: Vec<serde_json::Value> = rev
+            .changes
+            .iter()
+            .map(|c| {
+                json!({
+                    "key": c.key,
+                    "prior": c.prior.as_ref().map(Self::property_value_to_exported_json),
+                    "new": c.new.as_ref().map(Self::property_value_to_exported_json),
+                })
+            })
+            .collect();
+
+        let provenance = rev.provenance.as_ref().map(|p| {
+            json!({
+                "source": p.source(),
+                "confidence": p.confidence(),
+                "note": p.note(),
+                "correlation_id": p.correlation_id(),
+                "principal": p.principal(),
+            })
+        });
+
+        json!({
+            "version_number": rev.version_number,
+            "version_id": rev.version_id.as_u64(),
+            "transaction_time": Self::format_timestamp_rfc3339(rev.transaction_time),
+            "valid_from": Self::format_timestamp_rfc3339(rev.valid_from),
+            "valid_to": rev.valid_to.map(Self::format_timestamp_rfc3339),
+            "classification": rev.class.as_str(),
+            "changes": changes,
+            "provenance": provenance,
+            "confidence": rev.confidence,
+        })
+    }
+
+    /// Serialize a [`PropertyValue`] into the self-describing tagged shape used
+    /// by belief-revision `changes` (mirrors `audit::model::ExportedValue`:
+    /// `{"type": "...", "value": ...}`), independent of the `audit-export`
+    /// feature so it is available under a bare `semantic-temporal` build.
+    #[cfg(feature = "semantic-temporal")]
+    fn property_value_to_exported_json(value: &PropertyValue) -> serde_json::Value {
+        match value {
+            PropertyValue::Null => json!({ "type": "null" }),
+            PropertyValue::Bool(b) => json!({ "type": "bool", "value": b }),
+            PropertyValue::Int(i) => json!({ "type": "int", "value": i }),
+            PropertyValue::Float(f) => json!({ "type": "float", "value": f.to_string() }),
+            PropertyValue::String(s) => json!({ "type": "string", "value": s.to_string() }),
+            PropertyValue::Bytes(b) => {
+                json!({ "type": "bytes", "hex": crate::core::hex::encode(b) })
+            }
+            PropertyValue::Array(values) => json!({
+                "type": "array",
+                "values": values
+                    .iter()
+                    .map(Self::property_value_to_exported_json)
+                    .collect::<Vec<_>>(),
+            }),
+            PropertyValue::Vector(v) => json!({
+                "type": "vector",
+                "values": v.iter().map(|f| f64::from(*f).to_string()).collect::<Vec<_>>(),
+            }),
+            PropertyValue::SparseVector(sv) => json!({
+                "type": "sparse_vector",
+                "dimension": sv.dimension(),
+                "indices": sv.indices().to_vec(),
+                "values": sv.values().iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
+            }),
+        }
+    }
+
+    // ========================================================================
+    // Temporal drift-alarm management (Issue #3367 / PR #3728).
+    //
+    // Advertised unconditionally (Design A). Real handlers gate on
+    // `semantic-temporal`; a `#[cfg(not(...))]` twin returns a structured
+    // FAILED_PRECONDITION with `{tool, required_feature}`.
+    // ========================================================================
+
+    /// Structured FAILED_PRECONDITION for a `semantic-temporal`-gated tool when
+    /// the feature is not compiled into this build.
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn semantic_temporal_unavailable(&self, tool: &str) -> CallToolResult {
+        self.error_result(
+            McpError::new(
+                McpErrorCode::FailedPrecondition,
+                format!(
+                    "Tool '{tool}' requires the `semantic-temporal` feature, which is not \
+                     compiled into this build. Rebuild AletheiaDB with `--features \
+                     semantic-temporal` to enable it."
+                ),
+            )
+            .details(json!({ "tool": tool, "required_feature": "semantic-temporal" })),
+        )
+    }
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_create_drift_monitor(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_temporal_unavailable("create_drift_monitor")
+    }
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_list_drift_monitors(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_temporal_unavailable("list_drift_monitors")
+    }
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_delete_drift_monitor(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_temporal_unavailable("delete_drift_monitor")
+    }
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_query_drift_alarms(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_temporal_unavailable("query_drift_alarms")
+    }
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_resolve_drift_alarm(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_temporal_unavailable("resolve_drift_alarm")
+    }
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_contradiction_genealogy(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_temporal_unavailable("contradiction_genealogy")
+    }
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_find_contradictions(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_temporal_unavailable("find_contradictions")
+    }
+
+    #[cfg(not(feature = "semantic-temporal"))]
+    fn handle_counterfactual_replay(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_temporal_unavailable("counterfactual_replay")
+    }
+
+    /// Parse a `cosine` / `euclidean` / `angular` metric token.
+    #[cfg(feature = "semantic-temporal")]
+    fn parse_drift_metric(
+        &self,
+        s: &str,
+    ) -> std::result::Result<crate::index::vector::temporal::DriftMetric, String> {
+        use crate::index::vector::temporal::DriftMetric;
+        match s.trim().to_ascii_lowercase().as_str() {
+            "cosine" => Ok(DriftMetric::Cosine),
+            "euclidean" => Ok(DriftMetric::Euclidean),
+            "angular" => Ok(DriftMetric::Angular),
+            other => Err(format!(
+                "metric must be 'cosine', 'euclidean', or 'angular', got '{other}'"
+            )),
+        }
+    }
+
+    /// Lowercase token for a drift metric.
+    #[cfg(feature = "semantic-temporal")]
+    fn drift_metric_str(m: crate::index::vector::temporal::DriftMetric) -> &'static str {
+        use crate::index::vector::temporal::DriftMetric;
+        match m {
+            DriftMetric::Cosine => "cosine",
+            DriftMetric::Euclidean => "euclidean",
+            DriftMetric::Angular => "angular",
+        }
+    }
+
+    /// Serialize a [`DriftMonitor`] to its documented JSON shape.
+    #[cfg(feature = "semantic-temporal")]
+    fn drift_monitor_to_json(
+        &self,
+        m: &crate::experimental::temporal::drift_alarm::DriftMonitor,
+    ) -> serde_json::Value {
+        use crate::experimental::temporal::drift_alarm::EvalMode;
+        let spec = &m.spec;
+        let (mode, interval): (&str, serde_json::Value) = match spec.mode {
+            EvalMode::OnWrite => ("on_write", serde_json::Value::Null),
+            EvalMode::Scheduled { interval } => (
+                "scheduled",
+                json!(u64::try_from(interval.as_micros()).unwrap_or(u64::MAX)),
+            ),
+        };
+        json!({
+            "id": m.id.get(),
+            "created_at": Self::format_timestamp_rfc3339(m.created_at),
+            "spec": {
+                "property_key": spec.property_key,
+                "label": spec.label,
+                "entities": spec
+                    .entities
+                    .as_ref()
+                    .map(|v| v.iter().map(|n| n.as_u64()).collect::<Vec<_>>()),
+                "metric": Self::drift_metric_str(spec.metric),
+                "threshold": spec.threshold,
+                "window_micros": u64::try_from(spec.window.as_micros()).unwrap_or(u64::MAX),
+                "target": spec.target.as_str(),
+                "mode": mode,
+                "scheduled_interval_micros": interval,
+            },
+        })
+    }
+
+    /// Serialize a [`DriftAlarm`] to its documented JSON shape.
+    #[cfg(feature = "semantic-temporal")]
+    fn drift_alarm_to_json(
+        &self,
+        a: &crate::experimental::temporal::drift_alarm::DriftAlarm,
+    ) -> serde_json::Value {
+        json!({
+            "alarm_id": a.alarm_id.as_u64(),
+            "monitor_id": a.monitor_id.get(),
+            "entity": a.entity.map(|n| n.as_u64()),
+            "label": a.label,
+            "measured_distance": a.measured_distance,
+            "threshold": a.threshold,
+            "metric": Self::drift_metric_str(a.metric),
+            "compared_now": Self::format_timestamp_rfc3339(a.compared_now),
+            "compared_past": Self::format_timestamp_rfc3339(a.compared_past),
+            "from_version": a.from_version.map(|v| v.as_u64()),
+            "to_version": a.to_version.map(|v| v.as_u64()),
+            "resolved": a.resolved,
+            "fired_at": Self::format_timestamp_rfc3339(a.fired_at),
+        })
+    }
+
+    /// Handle `create_drift_monitor` (Write, Issue #3367).
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_create_drift_monitor(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::experimental::temporal::drift_alarm::{DriftMonitorSpec, DriftTarget, EvalMode};
+
+        let req: CreateDriftMonitorRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let metric = match self.parse_drift_metric(&req.metric) {
+            Ok(m) => m,
+            Err(msg) => return self.invalid_argument(&msg),
+        };
+        let target = match req.target.as_str() {
+            "per_entity" => DriftTarget::PerEntity,
+            "label_centroid" => DriftTarget::LabelCentroid,
+            other => {
+                return self.invalid_argument(&format!(
+                    "target must be 'per_entity' or 'label_centroid', got '{other}'"
+                ));
+            }
+        };
+        let mode = match req.mode.as_str() {
+            "on_write" => EvalMode::OnWrite,
+            "scheduled" => match req.scheduled_interval_micros {
+                Some(us) => EvalMode::Scheduled {
+                    interval: std::time::Duration::from_micros(us),
+                },
+                None => {
+                    return self
+                        .invalid_argument("mode 'scheduled' requires scheduled_interval_micros");
+                }
+            },
+            other => {
+                return self.invalid_argument(&format!(
+                    "mode must be 'on_write' or 'scheduled', got '{other}'"
+                ));
+            }
+        };
+        let entities = match req.entities {
+            Some(ids) => {
+                let mut out = Vec::with_capacity(ids.len());
+                for raw in ids {
+                    match NodeId::new(raw) {
+                        Ok(id) => out.push(id),
+                        Err(e) => return self.invalid_argument(&e.to_string()),
+                    }
+                }
+                Some(out)
+            }
+            None => None,
+        };
+
+        let spec = DriftMonitorSpec {
+            property_key: req.property_key,
+            label: req.label,
+            entities,
+            metric,
+            threshold: req.threshold,
+            window: std::time::Duration::from_micros(req.window_micros),
+            target,
+            mode,
+        };
+
+        match self.db.create_drift_monitor(spec) {
+            Ok(monitor) => self.success_json(self.drift_monitor_to_json(&monitor)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Handle `list_drift_monitors` (Read, Issue #3367).
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_list_drift_monitors(&self, args: serde_json::Value) -> CallToolResult {
+        let _req: ListDriftMonitorsRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        let monitors = self.db.list_drift_monitors();
+        let list: Vec<serde_json::Value> = monitors
+            .iter()
+            .map(|m| self.drift_monitor_to_json(m))
+            .collect();
+        self.success_json(json!({ "monitors": list, "count": monitors.len() }))
+    }
+
+    /// Handle `delete_drift_monitor` (Write, Issue #3367).
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_delete_drift_monitor(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::experimental::temporal::drift_alarm::MonitorId;
+        let req: DeleteDriftMonitorRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        match self.db.delete_drift_monitor(MonitorId::new(req.id)) {
+            Ok(()) => self.success_json(json!({ "deleted": true, "id": req.id })),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Handle `query_drift_alarms` (Read, Issue #3367).
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_query_drift_alarms(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::experimental::temporal::drift_alarm::{
+            DEFAULT_ALARM_QUERY_LIMIT, DriftAlarmFilter, MonitorId,
+        };
+        let req: QueryDriftAlarmsRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let time_range = match (&req.time_range_start, &req.time_range_end) {
+            (Some(s), Some(e)) => {
+                let start = match self.parse_timestamp(s) {
+                    Ok(t) => t,
+                    Err(m) => return self.invalid_argument(&m),
+                };
+                let end = match self.parse_timestamp(e) {
+                    Ok(t) => t,
+                    Err(m) => return self.invalid_argument(&m),
+                };
+                Some((start, end))
+            }
+            (None, None) => None,
+            _ => {
+                return self.invalid_argument(
+                    "time_range_start and time_range_end must be provided together",
+                );
+            }
+        };
+
+        let filter = DriftAlarmFilter {
+            monitor_id: req.monitor_id.map(MonitorId::new),
+            label: req.label,
+            resolved: req.resolved,
+            time_range,
+            limit: req.limit.unwrap_or(DEFAULT_ALARM_QUERY_LIMIT),
+        };
+
+        match self.db.query_drift_alarms(&filter) {
+            Ok(alarms) => {
+                let list: Vec<serde_json::Value> =
+                    alarms.iter().map(|a| self.drift_alarm_to_json(a)).collect();
+                self.success_json(json!({ "alarms": list, "count": alarms.len() }))
+            }
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Handle `resolve_drift_alarm` (Write, Issue #3367).
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_resolve_drift_alarm(&self, args: serde_json::Value) -> CallToolResult {
+        let req: ResolveDriftAlarmRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+        let alarm_id = match NodeId::new(req.alarm_id) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        match self.db.resolve_drift_alarm(alarm_id) {
+            Ok(a) => self.success_json(self.drift_alarm_to_json(&a)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    // ========================================================================
+    // Contradiction genealogy (Issue #3352 / PR #3742).
+    // ========================================================================
+
+    /// Serialize a [`ClaimRef`] to `{entity_kind, id, version}`.
+    #[cfg(feature = "semantic-temporal")]
+    fn claim_ref_to_json(
+        r: &crate::experimental::temporal::contradiction_genealogy::ClaimRef,
+    ) -> serde_json::Value {
+        let (kind, id) = Self::lineage_entity_parts(r.entity);
+        json!({ "entity_kind": kind, "id": id, "version": r.version.as_u64() })
+    }
+
+    /// Serialize a bi-temporal coordinate.
+    #[cfg(feature = "semantic-temporal")]
+    fn bitemporal_coord_to_json(
+        c: crate::experimental::temporal::contradiction_genealogy::BiTemporalCoordinate,
+    ) -> serde_json::Value {
+        json!({
+            "transaction_time": Self::format_timestamp_rfc3339(c.transaction_time),
+            "valid_time": Self::format_timestamp_rfc3339(c.valid_time),
+        })
+    }
+
+    /// Serialize a competing claim.
+    #[cfg(feature = "semantic-temporal")]
+    fn competing_claim_to_json(
+        &self,
+        c: &crate::experimental::temporal::contradiction_genealogy::CompetingClaim,
+    ) -> serde_json::Value {
+        json!({
+            "claim": Self::claim_ref_to_json(&c.claim),
+            "value_display": c.value_display,
+            "valid_from": Self::format_timestamp_rfc3339(c.valid_from),
+            "valid_to": c.valid_to.map(Self::format_timestamp_rfc3339),
+            "transaction_from": Self::format_timestamp_rfc3339(c.transaction_from),
+            "transaction_to": c.transaction_to.map(Self::format_timestamp_rfc3339),
+            "is_current": c.is_current,
+            "provenance": c.provenance.as_ref().map(|p| json!({
+                "source": p.source,
+                "confidence": p.confidence,
+                "note": p.note,
+            })),
+            "origin": c.origin.as_str(),
+            "supersedes": c.supersedes.map(|v| v.as_u64()),
+            "superseded_by": c.superseded_by.map(|v| v.as_u64()),
+        })
+    }
+
+    /// Serialize a divergence pair.
+    #[cfg(feature = "semantic-temporal")]
+    fn divergence_pair_to_json(
+        p: &crate::experimental::temporal::contradiction_genealogy::DivergencePair,
+    ) -> serde_json::Value {
+        json!({
+            "earlier": Self::claim_ref_to_json(&p.earlier),
+            "later": Self::claim_ref_to_json(&p.later),
+            "kind": p.kind.as_str(),
+            "coordinate": Self::bitemporal_coord_to_json(p.coordinate),
+            "overlapping_valid_from": Self::format_timestamp_rfc3339(p.overlapping_valid_from),
+            "overlapping_valid_to": p.overlapping_valid_to.map(Self::format_timestamp_rfc3339),
+        })
+    }
+
+    /// Serialize a per-source summary.
+    #[cfg(feature = "semantic-temporal")]
+    fn source_summary_to_json(
+        s: &crate::experimental::temporal::contradiction_genealogy::SourceSummary,
+    ) -> serde_json::Value {
+        json!({
+            "source": s.source,
+            "backs_values": s.backs_values,
+            "claim_count": s.claim_count,
+            "min_confidence": s.min_confidence,
+            "max_confidence": s.max_confidence,
+            "latest_confidence": s.latest_confidence,
+            "most_recent_assertion": Self::format_timestamp_rfc3339(s.most_recent_assertion),
+        })
+    }
+
+    /// Serialize a full [`ContradictionGenealogy`].
+    #[cfg(feature = "semantic-temporal")]
+    fn contradiction_genealogy_to_json(
+        &self,
+        g: &crate::experimental::temporal::contradiction_genealogy::ContradictionGenealogy,
+    ) -> serde_json::Value {
+        json!({
+            "entity": g.entity.map(|e| {
+                let (kind, id) = Self::lineage_entity_parts(e);
+                json!({ "entity_kind": kind, "id": id })
+            }),
+            "property": g.property,
+            "claims": g
+                .claims
+                .iter()
+                .map(|c| self.competing_claim_to_json(c))
+                .collect::<Vec<_>>(),
+            "pairs": g.pairs.iter().map(Self::divergence_pair_to_json).collect::<Vec<_>>(),
+            "divergence_point": g.divergence_point.map(Self::bitemporal_coord_to_json),
+            "sources": g.sources.iter().map(Self::source_summary_to_json).collect::<Vec<_>>(),
+            "narrative": g.narrative,
+            "truncated": g.truncated,
+        })
+    }
+
+    /// Serialize a [`ContradictionScan`].
+    #[cfg(feature = "semantic-temporal")]
+    fn contradiction_scan_to_json(
+        &self,
+        scan: &crate::experimental::temporal::contradiction_genealogy::ContradictionScan,
+    ) -> serde_json::Value {
+        let contradictions: Vec<serde_json::Value> = scan
+            .contradictions
+            .iter()
+            .map(|s| {
+                let (kind, id) = Self::lineage_entity_parts(s.entity);
+                json!({
+                    "entity": { "entity_kind": kind, "id": id },
+                    "property": s.property,
+                    "claim_count": s.claim_count,
+                    "divergence_point": Self::bitemporal_coord_to_json(s.divergence_point),
+                    "classification": s.classification.as_str(),
+                })
+            })
+            .collect();
+        json!({
+            "contradictions": contradictions,
+            "scanned_entities": scan.scanned_entities,
+            "sampled": scan.sampled,
+            "has_more": scan.has_more,
+            "next_offset": scan.next_offset,
+        })
+    }
+
+    /// Parse an `entity_kind` + id into an [`EntityId`], returning a structured
+    /// `INVALID_ARGUMENT` `CallToolResult` on a bad kind or out-of-range id.
+    // clippy::result_large_err: Err is rmcp's `CallToolResult` (~176B); this is
+    // the established pattern for the MCP arg-parsing helpers (see the
+    // `parse_lineage_ref` cluster above).
+    #[cfg(feature = "semantic-temporal")]
+    #[allow(clippy::result_large_err)]
+    fn parse_entity_kind_ct(
+        &self,
+        kind: &str,
+        id: u64,
+    ) -> std::result::Result<crate::core::id::EntityId, CallToolResult> {
+        use crate::core::id::EntityId;
+        match kind.trim().to_ascii_lowercase().as_str() {
+            "node" => NodeId::new(id)
+                .map(EntityId::Node)
+                .map_err(|e| self.invalid_argument(&e.to_string())),
+            "edge" => EdgeId::new(id)
+                .map(EntityId::Edge)
+                .map_err(|e| self.invalid_argument(&e.to_string())),
+            other => Err(self.invalid_argument(&format!(
+                "entity_kind must be 'node' or 'edge', got '{other}'"
+            ))),
+        }
+    }
+
+    /// Handle `contradiction_genealogy` (Read, Issue #3352).
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_contradiction_genealogy(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::experimental::temporal::contradiction_genealogy::{
+            ClaimRef, ContradictionTarget, GenealogyOptions,
+        };
+
+        let req: ContradictionGenealogyRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let target = if let Some(claims) = req.claims {
+            let mut refs = Vec::with_capacity(claims.len());
+            for c in &claims {
+                let entity = match self.parse_entity_kind_ct(&c.entity_kind, c.id) {
+                    Ok(e) => e,
+                    Err(r) => return r,
+                };
+                let version = match VersionId::new(c.version) {
+                    Ok(v) => v,
+                    Err(e) => return self.invalid_argument(&e.to_string()),
+                };
+                refs.push(ClaimRef { entity, version });
+            }
+            ContradictionTarget::Claims(refs)
+        } else {
+            let kind = match &req.entity_kind {
+                Some(s) => s.as_str(),
+                None => {
+                    return self.invalid_argument(
+                        "provide either 'claims' or 'entity_kind' + 'id' + 'property'",
+                    );
+                }
+            };
+            let id = match req.id {
+                Some(i) => i,
+                None => {
+                    return self
+                        .invalid_argument("'id' is required when targeting a single entity");
+                }
+            };
+            let property = match req.property {
+                Some(p) => p,
+                None => {
+                    return self
+                        .invalid_argument("'property' is required when targeting a single entity");
+                }
+            };
+            let entity = match self.parse_entity_kind_ct(kind, id) {
+                Ok(e) => e,
+                Err(r) => return r,
+            };
+            ContradictionTarget::EntityProperty { entity, property }
+        };
+
+        let mut options = GenealogyOptions::new();
+        if let Some(ts) = req.as_of_transaction_time {
+            let t = match self.parse_timestamp(&ts) {
+                Ok(t) => t,
+                Err(m) => return self.invalid_argument(&m),
+            };
+            options = options.with_as_of_transaction_time(t);
+        }
+        if let Some(m) = req.max_claims {
+            options = options.with_max_claims(m);
+        }
+        if let Some(m) = req.max_sources {
+            options = options.with_max_sources(m);
+        }
+
+        match self.db.contradiction_genealogy(target, &options) {
+            Ok(g) => self.success_json(self.contradiction_genealogy_to_json(&g)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    /// Handle `find_contradictions` (Read, Issue #3352).
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_find_contradictions(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::experimental::temporal::contradiction_genealogy::{
+            ContradictionScope, DEFAULT_CONTRADICTION_LIMIT, EntityKindScope,
+        };
+
+        let req: FindContradictionsRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let entity_kind = match req.entity_kind.trim().to_ascii_lowercase().as_str() {
+            "nodes" => EntityKindScope::Nodes,
+            "edges" => EntityKindScope::Edges,
+            "both" => EntityKindScope::Both,
+            other => {
+                return self.invalid_argument(&format!(
+                    "entity_kind must be 'nodes', 'edges', or 'both', got '{other}'"
+                ));
+            }
+        };
+
+        let valid_time_window = match (&req.valid_time_start, &req.valid_time_end) {
+            (Some(s), Some(e)) => {
+                let start = match self.parse_timestamp(s) {
+                    Ok(t) => t,
+                    Err(m) => return self.invalid_argument(&m),
+                };
+                let end = match self.parse_timestamp(e) {
+                    Ok(t) => t,
+                    Err(m) => return self.invalid_argument(&m),
+                };
+                Some((start, end))
+            }
+            (None, None) => None,
+            _ => {
+                return self.invalid_argument(
+                    "valid_time_start and valid_time_end must be provided together",
+                );
+            }
+        };
+        let transaction_time_window = match (&req.transaction_time_start, &req.transaction_time_end)
+        {
+            (Some(s), Some(e)) => {
+                let start = match self.parse_timestamp(s) {
+                    Ok(t) => t,
+                    Err(m) => return self.invalid_argument(&m),
+                };
+                let end = match self.parse_timestamp(e) {
+                    Ok(t) => t,
+                    Err(m) => return self.invalid_argument(&m),
+                };
+                Some((start, end))
+            }
+            (None, None) => None,
+            _ => {
+                return self.invalid_argument(
+                    "transaction_time_start and transaction_time_end must be provided together",
+                );
+            }
+        };
+
+        let scope = ContradictionScope {
+            entity_kind,
+            label: req.label,
+            property: req.property,
+            valid_time_window,
+            transaction_time_window,
+            limit: req.limit.unwrap_or(DEFAULT_CONTRADICTION_LIMIT),
+            offset: req.offset.unwrap_or(0),
+        };
+
+        match self.db.find_contradictions(&scope) {
+            Ok(scan) => self.success_json(self.contradiction_scan_to_json(&scan)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
+    // ========================================================================
+    // Counterfactual replay (Issue #3357 / PR #3743).
+    // ========================================================================
+
+    /// Serialize a [`DivergenceReport`], stamping the AC8 `counterfactual: true`
+    /// per-response marker.
+    #[cfg(feature = "semantic-temporal")]
+    fn counterfactual_report_to_json(
+        &self,
+        r: &crate::experimental::temporal::counterfactual::DivergenceReport,
+    ) -> serde_json::Value {
+        let entity_json = |e: &crate::core::id::EntityId| {
+            let (kind, id) = Self::lineage_entity_parts(*e);
+            json!({ "entity_kind": kind, "id": id })
+        };
+        json!({
+            "counterfactual": true,
+            "excluded_writes": r.excluded_writes(),
+            "unattributed_writes_encountered": r.unattributed_writes_encountered(),
+            "orphaned_updates": r.orphaned_updates(),
+            "entities_changed": r.entities_changed(),
+            "entities_removed": r.entities_removed(),
+            "changed_entities": r.changed_entities().iter().map(entity_json).collect::<Vec<_>>(),
+            "removed_entities": r.removed_entities().iter().map(entity_json).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Handle `counterfactual_replay` (Read, Issue #3357).
+    #[cfg(feature = "semantic-temporal")]
+    fn handle_counterfactual_replay(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::experimental::temporal::counterfactual::{
+            CounterfactualConfig, CounterfactualError, ExclusionPredicate,
+        };
+
+        let CounterfactualReplayRequest {
+            name,
+            exclude_source,
+            exclude_sources,
+            within_transaction_from,
+            within_transaction_to,
+            max_replay_versions,
+        } = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let mut predicate = match (exclude_source, exclude_sources) {
+            (Some(s), None) => ExclusionPredicate::source(s),
+            (None, Some(list)) => {
+                if list.is_empty() {
+                    return self.invalid_argument("exclude_sources must be a non-empty array");
+                }
+                ExclusionPredicate::sources(list)
+            }
+            (None, None) => {
+                return self.invalid_argument(
+                    "provide exactly one of 'exclude_source' or 'exclude_sources'",
+                );
+            }
+            (Some(_), Some(_)) => {
+                return self.invalid_argument(
+                    "provide only one of 'exclude_source' or 'exclude_sources', not both",
+                );
+            }
+        };
+
+        let from =
+            match self.parse_opt_timestamp("within_transaction_from", &within_transaction_from) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+        let to = match self.parse_opt_timestamp("within_transaction_to", &within_transaction_to) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        if from.is_some() || to.is_some() {
+            predicate = predicate.within_transaction_time(from, to);
+        }
+
+        let mut config = CounterfactualConfig::default();
+        if let Some(cap) = max_replay_versions {
+            config.max_replay_versions = cap;
+        }
+
+        match self.db.counterfactual_replay(name, predicate, config) {
+            Ok(view) => self.success_json(self.counterfactual_report_to_json(view.report())),
+            Err(CounterfactualError::HistoryTooLarge { versions, cap }) => self.error_result(
+                McpError::new(
+                    McpErrorCode::FailedPrecondition,
+                    format!(
+                        "recorded history too large for counterfactual replay: {versions} \
+                         versions exceeds cap of {cap}"
+                    ),
+                )
+                .details(json!({ "versions": versions, "cap": cap })),
+            ),
+            Err(CounterfactualError::NotFound(m)) => {
+                self.error_result(McpError::new(McpErrorCode::NotFound, m))
+            }
+            Err(CounterfactualError::Internal(m)) => {
+                self.error_result(McpError::new(McpErrorCode::Internal, m))
+            }
+        }
+    }
+
+    // ========================================================================
+    // Trust propagation (Issue #3382 / PR #3748). Gated on `semantic-reasoning`.
+    // ========================================================================
+
+    /// Structured FAILED_PRECONDITION for a `semantic-reasoning`-gated tool when
+    /// the feature is not compiled into this build.
+    #[cfg(not(feature = "semantic-reasoning"))]
+    fn semantic_reasoning_unavailable(&self, tool: &str) -> CallToolResult {
+        self.error_result(
+            McpError::new(
+                McpErrorCode::FailedPrecondition,
+                format!(
+                    "Tool '{tool}' requires the `semantic-reasoning` feature, which is not \
+                     compiled into this build. Rebuild AletheiaDB with `--features \
+                     semantic-reasoning` to enable it."
+                ),
+            )
+            .details(json!({ "tool": tool, "required_feature": "semantic-reasoning" })),
+        )
+    }
+
+    #[cfg(not(feature = "semantic-reasoning"))]
+    fn handle_trust_breakdown(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_reasoning_unavailable("trust_breakdown")
+    }
+
+    #[cfg(not(feature = "semantic-reasoning"))]
+    fn handle_list_trust_policies(&self, _args: serde_json::Value) -> CallToolResult {
+        self.semantic_reasoning_unavailable("list_trust_policies")
+    }
+
+    /// Serialize a [`TrustBreakdown`] tree recursively.
+    #[cfg(feature = "semantic-reasoning")]
+    fn trust_breakdown_to_json(
+        &self,
+        b: &crate::experimental::reasoning::trust_propagation::TrustBreakdown,
+    ) -> serde_json::Value {
+        let (kind, id) = Self::lineage_entity_parts(b.reference.entity);
+        json!({
+            "reference": {
+                "entity_kind": kind,
+                "id": id,
+                "version": b.reference.version.as_u64(),
+            },
+            "status": b.status.as_str(),
+            "confidence": b.confidence,
+            "source": b.source.as_str(),
+            "combinator": b.combinator.map(|c| c.as_str()),
+            "truncated": b.truncated,
+            "children": b
+                .children
+                .iter()
+                .map(|c| self.trust_breakdown_to_json(c))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    /// Whether any node in a breakdown tree was truncated.
+    #[cfg(feature = "semantic-reasoning")]
+    fn trust_breakdown_has_more(
+        b: &crate::experimental::reasoning::trust_propagation::TrustBreakdown,
+    ) -> bool {
+        b.truncated || b.children.iter().any(Self::trust_breakdown_has_more)
+    }
+
+    /// Handle `trust_breakdown` (Read, Issue #3382).
+    #[cfg(feature = "semantic-reasoning")]
+    fn handle_trust_breakdown(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::core::id::EntityId;
+        use crate::core::lineage::LineageRef;
+        use crate::experimental::reasoning::trust_propagation::TrustOptions;
+
+        let req: TrustBreakdownRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let entity = match req.entity_kind.trim().to_ascii_lowercase().as_str() {
+            "node" => match NodeId::new(req.id) {
+                Ok(id) => EntityId::Node(id),
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            },
+            "edge" => match EdgeId::new(req.id) {
+                Ok(id) => EntityId::Edge(id),
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            },
+            other => {
+                return self.invalid_argument(&format!(
+                    "entity_kind must be 'node' or 'edge', got '{other}'"
+                ));
+            }
+        };
+        let version = match VersionId::new(req.version) {
+            Ok(v) => v,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        let root = LineageRef::new(entity, version);
+
+        let mut options = TrustOptions::new();
+        if let Some(d) = req.max_depth {
+            options = options.with_max_depth(d);
+        }
+        if let Some(n) = req.limit {
+            options = options.with_max_nodes(n);
+        }
+        if let Some(ts) = req.as_of_transaction_time {
+            let t = match self.parse_timestamp(&ts) {
+                Ok(t) => t,
+                Err(m) => return self.invalid_argument(&m),
+            };
+            options = options.with_as_of(t);
+        }
+
+        let breakdown = self.db.trust_breakdown(root, &options);
+        let mut response = self.trust_breakdown_to_json(&breakdown);
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert(
+                "has_more".to_string(),
+                json!(Self::trust_breakdown_has_more(&breakdown)),
+            );
+        }
+        self.success_json(response)
+    }
+
+    /// Handle `list_trust_policies` (Read, Issue #3382).
+    #[cfg(feature = "semantic-reasoning")]
+    fn handle_list_trust_policies(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::experimental::reasoning::trust_propagation::{
+            MissingConfidencePolicy, TrustPolicy,
+        };
+
+        let _req: ListTrustPoliciesRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let view = self.db.list_trust_policies();
+        let missing_str = |m: MissingConfidencePolicy| match m {
+            MissingConfidencePolicy::Zero => "zero",
+            MissingConfidencePolicy::Neutral => "neutral",
+            MissingConfidencePolicy::Ignore => "ignore",
+        };
+        let policy_json = |p: &TrustPolicy| json!({ "combinator": p.combinator.as_str(), "missing": missing_str(p.missing) });
+        let labels: Vec<serde_json::Value> = view
+            .labels
+            .iter()
+            .map(|(label, policy)| json!({ "label": label, "policy": policy_json(policy) }))
+            .collect();
+        self.success_json(json!({
+            "default": policy_json(&view.default),
+            "labels": labels,
+        }))
+    }
+
     /// Handle the `audit_export` tool (Issue #3358).
     ///
     /// Produces a signed, offline-verifiable evidence artifact of an entity's
@@ -5075,7 +9063,23 @@ impl AletheiaMcpServer {
     /// [`AletheiaDB::stats`] snapshot and serializes it — no storage logic
     /// lives here. The underlying getters are all O(1)/cached (see
     /// `src/db/stats.rs`), so this never triggers a version scan.
-    fn handle_database_stats(&self, args: serde_json::Value) -> CallToolResult {
+    ///
+    /// `include_per_principal` gates the changefeed per-principal breakdown
+    /// (Issue #3678): the scalar aggregates (`active_subscriptions`, the
+    /// `#3368 resource_limits` counters, everything else) stay at the
+    /// `database_stats` tool's `metrics` access tier, but the
+    /// `changefeed.per_principal` identity list — which would let a
+    /// lowest-privilege `metrics`/`reader` credential enumerate every other
+    /// principal's id + live count — is **omitted** unless the caller is
+    /// admin. Both surfaces route here: the MCP dispatch passes
+    /// [`caller_is_admin`](Self::caller_is_admin) (session-derived), the HTTP
+    /// route passes its own authenticated principal's admin-ness via
+    /// [`database_stats_with_visibility`](Self::database_stats_with_visibility).
+    fn handle_database_stats(
+        &self,
+        args: serde_json::Value,
+        include_per_principal: bool,
+    ) -> CallToolResult {
         // The tool takes no required arguments; clients may send no
         // `arguments` at all (surfaced here as JSON null) or an empty
         // object. Normalize null so both forms are accepted.
@@ -5090,7 +9094,58 @@ impl AletheiaMcpServer {
         };
 
         match serde_json::to_value(self.db.stats()) {
-            Ok(value) => self.success_json(value),
+            Ok(mut value) => {
+                // Surface the Issue #3368 over-limit termination counters
+                // alongside the storage-layer stats. Additive: the
+                // `DatabaseStats` struct and storage layer are untouched; these
+                // are MCP-surface atomics folded in here. Row-cap breaches are
+                // NOT terminations (they self-disclose via `truncated`/
+                // `has_more`), so there is deliberately no row counter.
+                if let Some(obj) = value.as_object_mut() {
+                    let snap = self.limit_counters.snapshot();
+                    // Engine-lane counters (Issue #3368 engine lane): terminations
+                    // from the executor's cooperative `ResourceGuardIterator`
+                    // (the `query` tool's memory budget + cooperative timeout, and
+                    // every Rust-API `db.query()....with_*` caller). A distinct
+                    // family from the MCP-surface atoms above, nested under
+                    // `engine` so the two are never conflated or double-counted.
+                    let engine = self.db.query_limit_counters();
+                    obj.insert(
+                        "resource_limits".to_string(),
+                        json!({
+                            "timeout_terminations": snap.wall_clock_timeout,
+                            "byte_cap_terminations": snap.result_bytes,
+                            "memory_terminations": snap.memory_bytes,
+                            "override_rejections": snap.override_rejected,
+                            "engine": {
+                                "timeout_terminations": engine.wall_clock_timeout,
+                                "row_cap_terminations": engine.result_rows,
+                                "memory_terminations": engine.memory_bytes,
+                                "override_rejections": engine.override_rejected,
+                            },
+                        }),
+                    );
+                }
+                // Admin-gate the per-principal changefeed identity roster
+                // (Issue #3678). For a non-admin caller the whole
+                // `changefeed.per_principal` key is removed — not emptied — so
+                // the response carries NO other principal's identity, while the
+                // scalar `changefeed.active_subscriptions` aggregate remains
+                // for monitoring at the metrics tier. Expressed as a single
+                // `if let` over a combinator to avoid a nested (collapsible)
+                // `if` without introducing a `let`-chain.
+                if let Some(changefeed) = (!include_per_principal)
+                    .then(|| {
+                        value
+                            .get_mut("changefeed")
+                            .and_then(serde_json::Value::as_object_mut)
+                    })
+                    .flatten()
+                {
+                    changefeed.remove("per_principal");
+                }
+                self.success_json(value)
+            }
             Err(e) => self.error_result(McpError::new(
                 McpErrorCode::Internal,
                 format!("Failed to serialize database stats: {}", e),
@@ -5206,10 +9261,53 @@ impl AletheiaMcpServer {
         self.failed_precondition(&e.to_string())
     }
 
+    /// Thread a namespace read scope into a [`QueryBuilder`] (Issue #3349, PR3d).
+    ///
+    /// `All` becomes the explicit no-op `in_all_namespaces` (identical to the
+    /// pre-scope path); a single/union scope threads through
+    /// `in_namespace`/`in_namespaces` so the executor applies the source-leaf
+    /// filter + traversal boundary. Generic over the builder state so it composes
+    /// at any point in the fluent chain.
+    fn scoped_builder<S: crate::query::builder::QueryState>(
+        builder: crate::query::QueryBuilder<S>,
+        scope: &crate::core::namespace::NamespaceScope,
+    ) -> crate::query::QueryBuilder<S> {
+        use crate::core::namespace::NamespaceScope;
+        match scope {
+            NamespaceScope::All => builder.in_all_namespaces(),
+            NamespaceScope::Single(ns) => builder.in_namespace(ns.clone()),
+            NamespaceScope::List(list) => builder.in_namespaces(list.iter().cloned()),
+        }
+    }
+
     fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
+        // Issue #3349 (PR3d): real namespace scoping. Parse the optional
+        // `namespace` read scope (omitted ⇒ `default`-only, `"all"` ⇒ no filter),
+        // then validate it up front so unknown ns ⇒ NOT_FOUND / empty list ⇒
+        // INVALID_ARGUMENT is returned even on the single-node paths that don't
+        // route through the scope-validating executor.
+        let scope = match self.parse_opt_scope(&args.get("namespace").cloned()) {
+            Ok(s) => s,
+            Err(result) => return result,
+        }
+        .unwrap_or_default();
+        if let Err(e) = self.db.validate_scope(&scope) {
+            return self.db_error(e);
+        }
+        let scope_is_restricting = !matches!(scope, crate::core::namespace::NamespaceScope::All);
+
         // Issue #3348: parse the optional provenance filter before consuming args.
         let prov_filter = match self.parse_provenance_filter(&args) {
             Ok(f) => f,
+            Err(result) => return result,
+        };
+
+        // Issue #3372: parse the optional fusion policy (feature-gated) before
+        // consuming args. When present, results are re-ranked by the fused score
+        // and each carries a `score_breakdown`; omitting it is unchanged.
+        #[cfg(feature = "semantic-retrieval-fusion")]
+        let fusion_policy = match self.parse_fusion_policy(&args) {
+            Ok(p) => p,
             Err(result) => return result,
         };
 
@@ -5280,6 +9378,7 @@ impl AletheiaMcpServer {
                                         .collect()
                                 }),
                                 timestamp: row.timestamp.map(|t| t.wallclock().to_string()),
+                                score_breakdown: None,
                             })
                         } else {
                             None
@@ -5302,23 +9401,37 @@ impl AletheiaMcpServer {
                 // Temporal query for a single node
                 return match self.db.get_node_at_time(node_id, vt, tt) {
                     Ok(node) => {
+                        // Issue #3349 (PR3d): a start node outside the read scope
+                        // is filtered out (empty result), never leaked.
+                        let in_scope = !scope_is_restricting || scope.contains(&node.namespace());
                         let response = self.node_to_response(&node, include_vectors, now);
                         // Issue #3348: apply the provenance filter (evaluated on
                         // the version resolved at this coordinate) to the single
                         // result; a fail yields an empty result set, never a
                         // fabricated row.
-                        let results: Vec<HybridQueryResult> = if prov_filter_ref
-                            .is_none_or(|f| f.matches(response.provenance.as_ref()))
+                        #[allow(unused_mut)]
+                        let mut results: Vec<HybridQueryResult> = if in_scope
+                            && prov_filter_ref
+                                .is_none_or(|f| f.matches(response.provenance.as_ref()))
                         {
                             vec![HybridQueryResult {
                                 node: response,
                                 similarity_score: None,
                                 traversal_path: Some(vec![node_id.as_u64()]),
                                 timestamp: Some(vt.wallclock().to_string()),
+                                score_breakdown: None,
                             }]
                         } else {
                             Vec::new()
                         };
+                        // Issue #3372 (MED-3): attach the fused `score_breakdown`
+                        // on the single-node AS-OF path too. Ranking is a no-op
+                        // for one result; AC6 confidence/recency are resolved at
+                        // the (valid, tx) coordinate here.
+                        #[cfg(feature = "semantic-retrieval-fusion")]
+                        if let Some(policy) = fusion_policy.as_ref() {
+                            self.apply_fusion_to_hybrid(&mut results, policy, valid_time, tx_time);
+                        }
                         self.success_json(json!({
                             "results": results,
                             "count": results.len(),
@@ -5345,20 +9458,34 @@ impl AletheiaMcpServer {
                 // Just return the start node
                 return match self.db.get_node(node_id) {
                     Ok(node) => {
+                        // Issue #3349 (PR3d): filter an out-of-scope start node.
+                        let in_scope = !scope_is_restricting || scope.contains(&node.namespace());
                         let response = self.node_to_response(&node, include_vectors, now);
                         // Issue #3348: filter the single start node.
-                        let results: Vec<HybridQueryResult> = if prov_filter_ref
-                            .is_none_or(|f| f.matches(response.provenance.as_ref()))
+                        #[allow(unused_mut)]
+                        let mut results: Vec<HybridQueryResult> = if in_scope
+                            && prov_filter_ref
+                                .is_none_or(|f| f.matches(response.provenance.as_ref()))
                         {
                             vec![HybridQueryResult {
                                 node: response,
                                 similarity_score: None,
                                 traversal_path: Some(vec![node_id.as_u64()]),
                                 timestamp: None,
+                                score_breakdown: None,
                             }]
                         } else {
                             Vec::new()
                         };
+                        // Issue #3372 (MED-3): attach the fused `score_breakdown`
+                        // on the single-node (no-traverse) path too. Ranking is a
+                        // no-op for one result; with no full (valid, tx) AS-OF
+                        // set here, confidence/recency resolve from the current
+                        // version (documented partial-coordinate limitation).
+                        #[cfg(feature = "semantic-retrieval-fusion")]
+                        if let Some(policy) = fusion_policy.as_ref() {
+                            self.apply_fusion_to_hybrid(&mut results, policy, valid_time, tx_time);
+                        }
                         self.success_json(json!({
                             "results": results,
                             "count": results.len(),
@@ -5368,11 +9495,25 @@ impl AletheiaMcpServer {
                 };
             };
 
-            // Execute and collect results
+            // Execute and collect results. Issue #3349 (PR3d): thread the read
+            // scope through the executor (source-leaf filter + traversal
+            // boundary) so a graph-first hybrid never crosses an out-of-scope
+            // edge/node.
+            let builder = Self::scoped_builder(builder, &scope);
             match builder.limit(limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
-                        let hybrid_results = rows_to_results(rows);
+                        #[allow(unused_mut)]
+                        let mut hybrid_results = rows_to_results(rows);
+                        #[cfg(feature = "semantic-retrieval-fusion")]
+                        if let Some(policy) = fusion_policy.as_ref() {
+                            self.apply_fusion_to_hybrid(
+                                &mut hybrid_results,
+                                policy,
+                                valid_time,
+                                tx_time,
+                            );
+                        }
                         self.success_json(json!({
                             "results": hybrid_results,
                             "count": hybrid_results.len()
@@ -5400,22 +9541,66 @@ impl AletheiaMcpServer {
                 return self.invalid_argument(&e);
             }
 
-            // Issue #3348 (AC6): with a provenance filter, over-fetch the
-            // candidate horizon so the returned top rows are all
-            // filter-passing rather than a short post-truncation. Ranked order
-            // is preserved; the page is truncated back to `limit` after
-            // filtering.
-            let (fetch_k, fetch_limit) = if prov_filter.is_some() {
+            // Issue #3372 (MED-2): with a fusion policy, reject a non-Cosine
+            // index up front — mirroring `handle_find_similar_fused` — rather
+            // than feeding a distance whose scores are not in [0,1] into the
+            // fused score.
+            #[cfg(feature = "semantic-retrieval-fusion")]
+            if fusion_policy.is_some()
+                && let Some(err) = self.fusion_metric_precondition(property_name)
+            {
+                return err;
+            }
+
+            // Issue #3372 (HIGH-1): when a fusion policy is present, over-fetch
+            // the `k`-scaled fused horizon (never the similarity top-k) so a
+            // geometrically-far but high-trust candidate can still enter the
+            // fused ranking, rather than degenerating into a post-hoc re-sort of
+            // the similarity top-k. Mirrors `handle_find_similar_fused`'s
+            // `fused_horizon(k)` over-fetch.
+            #[cfg(feature = "semantic-retrieval-fusion")]
+            let fusion_fetch = fusion_policy
+                .as_ref()
+                .map(|_| crate::db::fusion::fused_horizon(k).min(MAX_VECTOR_K));
+            #[cfg(not(feature = "semantic-retrieval-fusion"))]
+            let fusion_fetch: Option<usize> = None;
+
+            // Issue #3348 (AC6) / #3349 (PR3d): with a provenance filter OR a
+            // restricting namespace scope, over-fetch the candidate horizon so
+            // the returned top rows are all filter-passing (filter-complete)
+            // rather than a short post-truncation — mirroring
+            // `find_similar_scoped`. Ranked order is preserved; the page is
+            // truncated back to `limit` after filtering. The namespace filter is
+            // applied by the executor (source-leaf scope filter) and stays
+            // ignorant of *why* a vector is absent (e.g. a crypto-shredded
+            // embedding is simply never a candidate), composing with GDPR HNSW
+            // exclusion.
+            let (fetch_k, fetch_limit) = if prov_filter.is_some() || scope_is_restricting {
                 (MAX_VECTOR_K, MAX_VECTOR_K)
+            } else if let Some(horizon) = fusion_fetch {
+                (horizon, horizon)
             } else {
                 (k, limit)
             };
             let builder = crate::query::QueryBuilder::new().find_similar(embedding, fetch_k);
+            let builder = Self::scoped_builder(builder, &scope);
 
             match builder.limit(fetch_limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
                         let mut hybrid_results = rows_to_results(rows);
+                        // Issue #3372: re-rank the candidate set by the fused
+                        // score BEFORE truncating to `limit`, so a high-trust
+                        // candidate below the similarity-only page still surfaces.
+                        #[cfg(feature = "semantic-retrieval-fusion")]
+                        if let Some(policy) = fusion_policy.as_ref() {
+                            self.apply_fusion_to_hybrid(
+                                &mut hybrid_results,
+                                policy,
+                                valid_time,
+                                tx_time,
+                            );
+                        }
                         hybrid_results.truncate(limit);
                         self.success_json(json!({
                             "results": hybrid_results,
@@ -5428,13 +9613,24 @@ impl AletheiaMcpServer {
                 Err(e) => self.db_error(e),
             }
         } else if let Some(ref label) = req.filter_label {
-            // Label scan query
+            // Label scan query. Issue #3349 (PR3d): thread the read scope.
             let builder = crate::query::QueryBuilder::new().scan_label(label);
+            let builder = Self::scoped_builder(builder, &scope);
 
             match builder.limit(limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
-                        let hybrid_results = rows_to_results(rows);
+                        #[allow(unused_mut)]
+                        let mut hybrid_results = rows_to_results(rows);
+                        #[cfg(feature = "semantic-retrieval-fusion")]
+                        if let Some(policy) = fusion_policy.as_ref() {
+                            self.apply_fusion_to_hybrid(
+                                &mut hybrid_results,
+                                policy,
+                                valid_time,
+                                tx_time,
+                            );
+                        }
                         self.success_json(json!({
                             "results": hybrid_results,
                             "count": hybrid_results.len()
@@ -5449,6 +9645,96 @@ impl AletheiaMcpServer {
                 "Must specify either start_node_id, query_embedding, or filter_label",
             )
         }
+    }
+
+    /// Reject a non-Cosine vector index for a provenance-weighted fused search
+    /// (Issue #3372). Fusion's similarity term assumes an already-`[0,1]` score,
+    /// true only for Cosine; a Euclidean/dot index would silently distort the
+    /// fused score. Returns the structured `FAILED_PRECONDITION`
+    /// (`FusionError::UnsupportedMetric`) when the queried property's index uses
+    /// another metric, else `None`. Shared by the `find_similar` and
+    /// `hybrid_query` fused paths.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn fusion_metric_precondition(&self, property_name: &str) -> Option<CallToolResult> {
+        if let Some(info) = self
+            .db
+            .list_vector_indexes()
+            .into_iter()
+            .find(|i| i.property_name == property_name)
+            && info.distance_metric != DistanceMetric::Cosine
+        {
+            return Some(self.failed_precondition(&format!(
+                "provenance-weighted fusion requires a Cosine vector index; the index for '{}' \
+                 uses {:?}, whose scores are not in [0,1] (v1 supports Cosine only)",
+                property_name, info.distance_metric
+            )));
+        }
+        None
+    }
+
+    /// Re-rank `results` by the provenance-weighted fused score (Issue #3372)
+    /// and attach a `score_breakdown` to each. Confidence/recency are read from
+    /// the version resolved at the bi-temporal coordinate when a full `(valid,
+    /// tx)` `AS OF` is set (AC6), else from the current version. Recency is
+    /// evaluated against the `valid_time` coordinate when set, else `now`.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn apply_fusion_to_hybrid(
+        &self,
+        results: &mut Vec<HybridQueryResult>,
+        policy: &crate::db::fusion::FusionPolicy,
+        valid_time: Option<Timestamp>,
+        tx_time: Option<Timestamp>,
+    ) {
+        let reference_now = valid_time.map_or_else(|| time::now().wallclock(), |t| t.wallclock());
+        let mut scored: Vec<(f64, HybridQueryResult)> = std::mem::take(results)
+            .into_iter()
+            .map(|mut r| {
+                let (confidence, valid_from_micros, recency_defaulted) =
+                    NodeId::new(r.node.id).ok().map_or((None, 0, true), |id| {
+                        self.hybrid_fusion_inputs(id, valid_time, tx_time)
+                    });
+                let recency = if recency_defaulted {
+                    crate::db::fusion::DEFAULT_NEUTRAL_RECENCY
+                } else {
+                    policy.recency(reference_now, valid_from_micros)
+                };
+                let similarity = r.similarity_score.map_or(0.0, f64::from);
+                let mut breakdown = policy.fuse(similarity, confidence, recency);
+                breakdown.recency_defaulted = recency_defaulted;
+                r.score_breakdown = Some(Self::fusion_breakdown_to_json(&breakdown));
+                (breakdown.fused, r)
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.node.id.cmp(&b.1.node.id))
+        });
+        *results = scored.into_iter().map(|(_, r)| r).collect();
+    }
+
+    /// Resolve a hybrid result node's fusion inputs (Issue #3372): when a full
+    /// bi-temporal `(valid, tx)` coordinate is set, read from the version at
+    /// that coordinate (AC6); otherwise from the current version.
+    #[cfg(feature = "semantic-retrieval-fusion")]
+    fn hybrid_fusion_inputs(
+        &self,
+        id: NodeId,
+        valid_time: Option<Timestamp>,
+        tx_time: Option<Timestamp>,
+    ) -> (Option<f64>, i64, bool) {
+        let version_id = if let (Some(vt), Some(tt)) = (valid_time, tx_time) {
+            match self.db.get_node_at_time(id, vt, tt) {
+                Ok(node) => node.current_version,
+                Err(_) => return (None, 0, true),
+            }
+        } else {
+            match self.db.get_node(id) {
+                Ok(node) => node.current_version,
+                Err(_) => return (None, 0, true),
+            }
+        };
+        self.node_fusion_inputs(version_id)
     }
 
     // ========================================================================
@@ -5536,9 +9822,49 @@ impl AletheiaMcpServer {
     /// Map an engine error from query execution into a structured query-tool error.
     fn map_query_error(&self, error: crate::core::error::Error, language: &str) -> CallToolResult {
         use crate::core::error::{Error, QueryError};
+        use crate::core::namespace::NamespaceError;
         match error {
             Error::Query(QueryError::SyntaxError { message }) => {
                 self.query_error("parse_error", &message, None, Some(language))
+            }
+            // Issue #3349 (PR3d): a namespace scope error surfaces through the
+            // query envelope carrying `details.namespace` (the offending name),
+            // so a caller self-corrects exactly as on the structured scoped read
+            // tools. All namespace errors are caller faults (non-retriable).
+            Error::Namespace(ns_err) => {
+                let (kind, code, details) = match &ns_err {
+                    NamespaceError::NotFound { namespace } => (
+                        "runtime_error",
+                        McpErrorCode::NotFound,
+                        json!({ "namespace": namespace }),
+                    ),
+                    NamespaceError::InvalidName { name, .. } => (
+                        "invalid_params",
+                        McpErrorCode::InvalidArgument,
+                        json!({ "namespace": name }),
+                    ),
+                    // Issue #3349: a programmatic scope colliding with an
+                    // in-query `USE / IN NAMESPACE` clause is a malformed
+                    // *request* (the caller specified the scope in two
+                    // conflicting places) — `invalid_request`, not
+                    // `unsupported_construct` (the clause IS supported now).
+                    // No `details.namespace` is carried: the message and
+                    // details must never disclose an isolation boundary.
+                    NamespaceError::ScopeConflict => (
+                        "invalid_request",
+                        McpErrorCode::InvalidArgument,
+                        serde_json::Value::Null,
+                    ),
+                    NamespaceError::AlreadyExists { .. }
+                    | NamespaceError::ReservedPropertyKey { .. }
+                    | NamespaceError::Immutable => (
+                        "invalid_params",
+                        McpErrorCode::InvalidArgument,
+                        serde_json::Value::Null,
+                    ),
+                };
+                let message = Error::Namespace(ns_err).to_string();
+                self.query_error_with_details(kind, code, false, &message, Some(language), details)
             }
             Error::Query(QueryError::UnsupportedFeature { feature }) => self.query_error(
                 "unsupported_construct",
@@ -5565,6 +9891,44 @@ impl AletheiaMcpServer {
             ),
             Error::Query(QueryError::ExecutionError { message }) => {
                 self.query_error("runtime_error", &message, None, Some(language))
+            }
+            // A per-query engine-lane resource limit was breached mid-drain
+            // (Issue #3368 cooperative enforcement): the executor's
+            // `ResourceGuardIterator` aborted the scan cooperatively rather
+            // than letting it run to completion. Surfaced with the same
+            // structured `details.{dimension, limit, consumed}` shape the
+            // MCP-surface timeout/byte-cap builders already use, so a caller
+            // branches on `details.dimension` identically regardless of
+            // which layer (MCP-surface or engine) caught the breach.
+            // `retriable` is threaded straight from the engine error: `true`
+            // only for the wall-clock dimension (a read-only re-run is
+            // safe), `false` for the memory-budget dimension (a re-run
+            // deterministically breaches again).
+            Error::Query(QueryError::ResourceExhausted {
+                dimension,
+                limit,
+                consumed,
+                retriable,
+            }) => {
+                let message = Error::Query(QueryError::ResourceExhausted {
+                    dimension,
+                    limit,
+                    consumed,
+                    retriable,
+                })
+                .to_string();
+                self.query_error_with_details(
+                    "runtime_error",
+                    McpErrorCode::ResourceExhausted,
+                    retriable,
+                    &message,
+                    Some(language),
+                    json!({
+                        "dimension": dimension,
+                        "limit": limit,
+                        "consumed": consumed,
+                    }),
+                )
             }
             // Anything else keeps kind "runtime_error" (the tool's own
             // contract) but classifies code/retriable from the actual error,
@@ -5751,6 +10115,21 @@ impl AletheiaMcpServer {
         // (Issue #3360); captured before `args` is consumed by deserialization.
         let cursor_requested = Self::cursor_requested(&args);
 
+        // Issue #3349: real declarative (AQL/Cypher) namespace scoping. Parse the
+        // optional `namespace` read scope as the *programmatic* scope `P`. It is
+        // kept as an `Option` (NOT collapsed to `default` here): the executor's
+        // `reconcile_namespace_scope` distinguishes an omitted parameter (`None`
+        // — let any in-query `USE / IN NAMESPACE` clause govern, else the
+        // fail-closed `default` namespace) from an explicit one (`Some` — a hard
+        // ceiling that must match any in-query clause). `"all"` imposes no
+        // filter. Captured before `args` is consumed by deserialization;
+        // validated (unknown ns ⇒ NOT_FOUND, empty list ⇒ INVALID_ARGUMENT)
+        // inside the scoped executor.
+        let scope = match self.parse_opt_scope(&args.get("namespace").cloned()) {
+            Ok(s) => s,
+            Err(result) => return result,
+        };
+
         let req: QueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => {
@@ -5853,7 +10232,7 @@ impl AletheiaMcpServer {
             requested
         };
 
-        self.run_query_under_timeout(effective, language, req, row_limit)
+        self.run_query_under_timeout(effective, language, req, row_limit, scope)
     }
 
     /// Run the `query` tool's execution under the effective wall-clock timeout
@@ -5875,11 +10254,12 @@ impl AletheiaMcpServer {
         language: String,
         req: QueryRequest,
         row_limit: usize,
+        scope: Option<crate::core::namespace::NamespaceScope>,
     ) -> CallToolResult {
         if effective.timeout_ms == 0 {
             // Inline (unlimited-timeout) path: no worker thread is spawned, so
             // the in-flight guard does not apply (Issue #3368).
-            return self.execute_query_core(effective, &language, &req, row_limit);
+            return self.execute_query_core(effective, &language, &req, row_limit, &scope);
         }
 
         // Bounded in-flight-query DoS guard (Issue #3368): the timeout race
@@ -5896,7 +10276,7 @@ impl AletheiaMcpServer {
         let server = self.clone();
         let lang = language.clone();
         let outcome = self.race_deadline(effective.timeout_ms, guard, move || {
-            server.execute_query_core(effective, &lang, &req, row_limit)
+            server.execute_query_core(effective, &lang, &req, row_limit, &scope)
         });
         match outcome {
             RaceOutcome::Completed(result) => result,
@@ -6038,6 +10418,60 @@ impl AletheiaMcpServer {
         )
     }
 
+    /// Derive the engine-lane [`QueryResourceLimits`] (Issue #3368 engine
+    /// core) that `execute_query_core` threads into the reconciled `_limited`
+    /// entry points, from the MCP surface's already-resolved `effective`
+    /// limits.
+    ///
+    /// **Deadline (cooperative timeout).** The caller-facing timeout is, and
+    /// remains, [`race_deadline`](Self::race_deadline)'s deterministic
+    /// `timeout_ms` race — every existing timeout test keeps observing exactly
+    /// that boundary. This method computes a SEPARATE, LATER deadline
+    /// (`engine_deadline_ms = timeout_ms + max(timeout_ms / 2, 100)`) handed to
+    /// the executor's [`ResourceGuardIterator`](crate::query::executor::ResourceGuardIterator)
+    /// so the DETACHED WORKER itself cooperatively self-cancels within a
+    /// bounded grace period after the caller has already timed out, instead of
+    /// running a (possibly pathological) query to completion on an abandoned
+    /// thread. This releases the worker's CPU and its in-flight slot promptly
+    /// (AC3 "releases its resources", AC8 neighbor protection) without
+    /// changing what the caller observes. `timeout_ms == 0` (unlimited) yields
+    /// `deadline: None`.
+    ///
+    /// **Memory.** `max_memory_bytes` is folded from the MCP-surface memory
+    /// budget (`effective.max_query_memory_bytes`, default-off / `0` =
+    /// unlimited under the default config — zero behavior change unless an
+    /// operator opts in), enforced by the SAME `ResourceGuardIterator` via its
+    /// real per-row [`estimate_row_bytes`](crate::query::limits::estimate_row_bytes)
+    /// accounting during the drain — a cooperative, mid-scan enforcement
+    /// distinct from (and additive to) the post-hoc serialized-response-size
+    /// proxy [`enforce_memory_budget`](Self::enforce_memory_budget) applies to
+    /// the wrapped read tools.
+    ///
+    /// **Rows.** Always `None` here: the `query` tool's existing
+    /// `take_n(row_limit + 1)` / `truncated: true` contract already owns row
+    /// truncation as a disclosed, successful response — turning that into an
+    /// engine-level error would be a behavior change, not an addition.
+    fn engine_query_limits(effective: EffectiveQueryLimits) -> QueryResourceLimits {
+        let deadline = if effective.timeout_ms > 0 {
+            let engine_deadline_ms = effective
+                .timeout_ms
+                .saturating_add(effective.timeout_ms.saturating_div(2).max(100));
+            Some(Instant::now() + Duration::from_millis(engine_deadline_ms))
+        } else {
+            None
+        };
+        let max_memory_bytes = if effective.max_query_memory_bytes > 0 {
+            Some(effective.max_query_memory_bytes)
+        } else {
+            None
+        };
+        QueryResourceLimits {
+            deadline,
+            max_rows: None,
+            max_memory_bytes,
+        }
+    }
+
     /// Execute the query, collect up to `row_limit` rows (disclosing truncation
     /// via `truncated`), serialize, and enforce the effective result-byte cap
     /// (Issue #3368).
@@ -6049,15 +10483,32 @@ impl AletheiaMcpServer {
     /// short-circuits to an error (which the budget shaper passes through
     /// untouched), while a within-cap response is then optionally shaped by the
     /// caller's own token budget with the #3353 disclosed ladder.
+    ///
+    /// The declarative execution itself now runs under the engine-lane
+    /// cooperative [`QueryResourceLimits`] derived by
+    /// [`engine_query_limits`](Self::engine_query_limits) (Issue #3368): a
+    /// breach surfaces as `Error::Query(QueryError::ResourceExhausted { .. })`,
+    /// mapped by [`map_query_error`](Self::map_query_error) into the same
+    /// structured `details.{dimension, limit, consumed}` envelope the
+    /// MCP-surface timeout/byte-cap builders already use.
     fn execute_query_core(
         &self,
         effective: EffectiveQueryLimits,
         language: &str,
         req: &QueryRequest,
         row_limit: usize,
+        scope: &Option<crate::core::namespace::NamespaceScope>,
     ) -> CallToolResult {
         let has_params = req.params.as_ref().is_some_and(|p| !p.is_empty());
+        let engine_limits = Self::engine_query_limits(effective);
 
+        // Issue #3349: the query executes under the *reconciled* namespace read
+        // scope. `scope` is the programmatic parameter `P` (`None` when omitted);
+        // the executor's `reconcile_namespace_scope` folds it with any in-query
+        // `USE / IN NAMESPACE` clause `C` (omitted+none ⇒ `default`-only,
+        // omitted+clause ⇒ the clause, explicit ⇒ a ceiling that must match the
+        // clause), then rides the `Query` IR into the same executor source-leaf
+        // filter + traversal boundary the Rust builder uses.
         let execution = match language {
             "aql" => {
                 if has_params {
@@ -6069,14 +10520,26 @@ impl AletheiaMcpServer {
                         Some("aql"),
                     );
                 }
-                self.db.execute_aql(&req.query)
+                self.db
+                    .execute_aql_reconciled_limited(&req.query, scope.clone(), engine_limits)
             }
             "cypher" => {
                 #[cfg(feature = "cypher")]
                 {
                     match self.json_to_cypher_params(req.params.as_ref()) {
-                        Ok(params) if params.is_empty() => self.db.execute_cypher(&req.query),
-                        Ok(params) => self.db.execute_cypher_with_params(&req.query, params),
+                        Ok(params) if params.is_empty() => {
+                            self.db.execute_cypher_reconciled_limited(
+                                &req.query,
+                                scope.clone(),
+                                engine_limits,
+                            )
+                        }
+                        Ok(params) => self.db.execute_cypher_with_params_reconciled_limited(
+                            &req.query,
+                            params,
+                            scope.clone(),
+                            engine_limits,
+                        ),
                         Err((parameter, reason)) => {
                             return self.query_error(
                                 "invalid_params",
@@ -6258,26 +10721,45 @@ impl AletheiaMcpServer {
         if let Err(err) = self.auth.authorize_tool(name) {
             return self.error_result(err);
         }
+        // Read-only replica enforcement (Issue #3355, Slice A). Runs after
+        // authorization (so an unauthenticated/unauthorized caller still
+        // gets the uniform auth error first) but before any handler: a
+        // write/admin-class tool called against a replica-role node is
+        // refused uniformly here, regardless of which handler would have
+        // run. Read and Metrics-class tools (including an unclassified/
+        // unknown tool name) are unaffected.
+        if self.db.is_replica()
+            && matches!(
+                tool_access_class(name),
+                Some(AccessClass::Write) | Some(AccessClass::Admin)
+            )
+        {
+            return self.error_result(read_only_replica_error());
+        }
         // Token-budget-aware response shaping (Issue #3353). For the read tools
         // listed in `BUDGETABLE_READ_TOOLS`, an optional `max_response_tokens` /
         // `max_response_bytes` shapes the successful response to fit the stated
         // budget with a disclosed truncation contract. Omitting the budget
         // parameters leaves behavior completely unchanged.
         if is_budgetable_read_tool(name) {
-            match budget::parse_budget(&args) {
+            match budget::parse_budget(&args, self.max_priority_properties) {
                 Ok(Some(budget_req)) => {
                     // Retain the original arguments so the rung-4 truncation
                     // handle can emit a concrete offset-based resume call
                     // (Issue #3353 F1/F5).
                     let orig_args = args.clone();
-                    let result = self.dispatch_read_tool(name, args);
+                    // Resource limits (#3368) run first — the byte cap short-
+                    // circuits an oversized response to an error before the
+                    // #3353 budget shaper sees it — so a within-cap response is
+                    // what gets shaped to the caller's token budget.
+                    let result = self.dispatch_read_tool_limited(name, args);
                     return self.apply_budget(name, result, &budget_req, &orig_args);
                 }
                 Ok(None) => {}
                 Err(err) => return self.error_result(err),
             }
         }
-        self.dispatch_read_tool(name, args)
+        self.dispatch_read_tool_limited(name, args)
     }
 
     /// Apply the parsed token budget to a handler's result. Errors pass through
@@ -6352,6 +10834,21 @@ impl AletheiaMcpServer {
             "get_incoming_edges" => self.handle_get_incoming_edges(args),
             "traverse" => self.handle_traverse(args),
             "find_similar" => self.handle_find_similar(args),
+            // Embedding generation & text semantic search (Issue #2906).
+            "embed_query" => self.handle_embed_query(args),
+            "embed_text" => self.handle_embed_text(args),
+            "semantic_search" => self.handle_semantic_search(args),
+            "create_node_with_embedding" => self.handle_create_node_with_embedding(args),
+            "update_node_embedding" => self.handle_update_node_embedding(args),
+            // Semantic-search analysis tools (Issue #2907). Advertised and
+            // dispatched unconditionally (Design A); the handler bodies gate on
+            // the `semantic-search` feature.
+            "semantic_path" => self.handle_semantic_path(args),
+            "concept_analogy" => self.handle_concept_analogy(args),
+            "concept_mean" => self.handle_concept_mean(args),
+            "find_duplicate_candidates" => self.handle_find_duplicate_candidates(args),
+            "semantic_horizon" => self.handle_semantic_horizon(args),
+            "context_aspects" => self.handle_context_aspects(args),
             "enable_vector_index" => self.handle_enable_vector_index(args),
             "list_vector_indexes" => self.handle_list_vector_indexes(args),
             "enable_unique_constraint" => self.handle_enable_unique_constraint(args),
@@ -6360,6 +10857,7 @@ impl AletheiaMcpServer {
             "get_edge_at_time" => self.handle_get_edge_at_time(args),
             "find_nodes_at_time" => self.handle_find_nodes_at_time(args),
             "list_changes" => self.handle_list_changes(args),
+            "await_changes" => self.handle_await_changes(args, None),
             "get_node_at_valid_time" => self.handle_get_node_at_valid_time(args),
             "get_node_at_transaction_time" => self.handle_get_node_at_transaction_time(args),
             "get_node_history" => self.handle_get_node_history(args),
@@ -6368,6 +10866,27 @@ impl AletheiaMcpServer {
             "get_edge_at_transaction_time" => self.handle_get_edge_at_transaction_time(args),
             "get_edge_history" => self.handle_get_edge_history(args),
             "diff_edge_versions" => self.handle_diff_edge_versions(args),
+            // Belief-revision audit (Issue #3362). Advertised and dispatched
+            // unconditionally (Design A); the handler body gates on the
+            // `semantic-temporal` feature.
+            "get_belief_revisions" => self.handle_get_belief_revisions(args),
+            // Temporal drift-alarm management (Issue #3367). Advertised and
+            // dispatched unconditionally (Design A); handler bodies gate on the
+            // `semantic-temporal` feature.
+            "create_drift_monitor" => self.handle_create_drift_monitor(args),
+            "list_drift_monitors" => self.handle_list_drift_monitors(args),
+            "delete_drift_monitor" => self.handle_delete_drift_monitor(args),
+            "query_drift_alarms" => self.handle_query_drift_alarms(args),
+            "resolve_drift_alarm" => self.handle_resolve_drift_alarm(args),
+            // Contradiction genealogy (Issue #3352).
+            "contradiction_genealogy" => self.handle_contradiction_genealogy(args),
+            "find_contradictions" => self.handle_find_contradictions(args),
+            // Counterfactual replay (Issue #3357).
+            "counterfactual_replay" => self.handle_counterfactual_replay(args),
+            // Trust propagation (Issue #3382). Handler bodies gate on the
+            // `semantic-reasoning` feature.
+            "trust_breakdown" => self.handle_trust_breakdown(args),
+            "list_trust_policies" => self.handle_list_trust_policies(args),
             "hybrid_query" => self.handle_hybrid_query(args),
             "query" => self.handle_query(args),
             "get_schema" => self.handle_get_schema(args),
@@ -6375,16 +10894,268 @@ impl AletheiaMcpServer {
             "lineage_upstream" => self.handle_lineage_upstream(args),
             "lineage_downstream" => self.handle_lineage_downstream(args),
             "audit_export" => self.handle_audit_export(args),
-            "database_stats" => self.handle_database_stats(args),
+            "database_stats" => self.handle_database_stats(args, self.caller_is_admin()),
             "verify_chain" => self.handle_verify_chain(args),
             "export_chain_head" => self.handle_export_chain_head(args),
+            // Namespace management (Issue #3349, PR3b).
+            "create_namespace" => self.handle_create_namespace(args),
+            "list_namespaces" => self.handle_list_namespaces(args),
+            "describe_namespace" => self.handle_describe_namespace(args),
+            // GDPR crypto-shred — ADMIN-class (Issue #3359, Slice 4b).
+            "designate_subject" => self.handle_designate_subject(args),
+            "erase_subject" => self.handle_erase_subject(args),
             _ => self.error_result(
                 McpError::new(McpErrorCode::NotFound, format!("Unknown tool: {}", name))
                     .details(json!({ "tool": name })),
             ),
         }
     }
+
+    /// Dispatch a read tool under the per-query resource limits (Issue #3368
+    /// residue): the wall-clock timeout and the result-byte cap, reusing the
+    /// exact machinery the `query` tool self-enforces (the timeout thread-race,
+    /// the bounded in-flight-worker DoS guard, and the structured
+    /// `RESOURCE_EXHAUSTED` error builders + termination counters).
+    ///
+    /// Tools not in [`RESOURCE_LIMITED_READ_TOOLS`] — including `query`, which
+    /// self-enforces inline — pass straight through to
+    /// [`dispatch_read_tool`](Self::dispatch_read_tool) unchanged. For the
+    /// covered tools this resolves the server-default effective limits (no
+    /// per-call override in v1):
+    ///
+    /// - **Timeout.** The zero-overhead inline path (no thread spawn, no clone,
+    ///   no in-flight guard) applies **only when the effective timeout is `0`**
+    ///   — i.e. the `disabled()` config. Under the *default* config the
+    ///   effective timeout is 30_000 ms (not 0), so each covered call takes the
+    ///   timeout-race worker path (reserve an in-flight slot — rejected
+    ///   `UNAVAILABLE` at the cap — then race the handler against the deadline
+    ///   on a detached worker, exactly like the `query` tool): a `TimedOut`
+    ///   outcome maps to the retriable `RESOURCE_EXHAUSTED` timeout error, a
+    ///   `WorkerDied` (panic) outcome to the non-retriable INTERNAL error. The
+    ///   response bytes are unchanged versus a bare `dispatch_read_tool`, but
+    ///   the per-call worker spawn is real overhead on hot-path reads
+    ///   (including cheap `get_node_at_time` / `get_edge_at_time`); a
+    ///   quantifying micro-benchmark is a deferred (Lane-2) follow-up.
+    /// - **Byte cap.** A *non-error* response is then held to the effective
+    ///   response-byte cap post-hoc (see
+    ///   [`enforce_result_byte_cap`](Self::enforce_result_byte_cap)); errors
+    ///   pass through untouched.
+    ///
+    /// Ordering (Issue #3360 / #3353): the cursor page is resolved inside the
+    /// handler, the resource byte cap is applied here, and the #3353 token
+    /// budget shaper (in [`dispatch_tool`](Self::dispatch_tool)) then runs
+    /// *after* on the within-cap response — never before the cap.
+    fn dispatch_read_tool_limited(&self, name: &str, args: serde_json::Value) -> CallToolResult {
+        if !is_resource_limited_read_tool(name) {
+            return self.dispatch_read_tool(name, args);
+        }
+
+        // No per-call override for these tools in v1, so `effective(None)` is
+        // infallible (an override is the only thing that can be rejected). Fall
+        // back defensively to "unlimited" rather than `unwrap`, keeping the
+        // production path panic-free per the coding standards.
+        let eff = self
+            .query_limits
+            .effective(None)
+            .unwrap_or_else(|_| EffectiveQueryLimits::unlimited());
+        let cap = eff.max_response_bytes;
+        let mem_cap = eff.max_query_memory_bytes;
+
+        let result = if eff.timeout_ms == 0 {
+            // Inline (unlimited-timeout) fast path: no worker thread, no guard,
+            // no clone — zero overhead over a bare `dispatch_read_tool` call.
+            self.dispatch_read_tool(name, args)
+        } else {
+            let in_flight_cap = self.query_limits.max_in_flight_queries;
+            let guard = match self.try_acquire_in_flight(in_flight_cap) {
+                Some(guard) => guard,
+                None => return self.in_flight_capacity_error(name, in_flight_cap),
+            };
+            let server = self.clone();
+            let tool = name.to_string();
+            match self.race_deadline(eff.timeout_ms, guard, move || {
+                server.dispatch_read_tool(&tool, args)
+            }) {
+                RaceOutcome::Completed(result) => result,
+                RaceOutcome::TimedOut => {
+                    return self.read_tool_timeout_error(name, eff.timeout_ms);
+                }
+                RaceOutcome::WorkerDied => return self.worker_died_error(name),
+            }
+        };
+
+        let result = self.enforce_result_byte_cap(name, result, cap);
+        self.enforce_memory_budget(name, result, mem_cap)
+    }
+
+    /// Enforce the result-byte cap on a resource-limited read tool's response
+    /// (Issue #3368 residue), post-hoc.
+    ///
+    /// A `cap` of `0` (unlimited) and any error response pass straight through.
+    /// Otherwise, if the serialized response text exceeds `cap`, the response is
+    /// replaced with the structured non-retriable `RESOURCE_EXHAUSTED`
+    /// result-byte error (which also records the termination counter); a
+    /// within-cap response is returned unchanged. The single text content item
+    /// each read handler produces *is* the serialized JSON response, so its
+    /// byte length is the response size — measured in place without consuming
+    /// the result, so a within-cap response is returned byte-for-byte identical.
+    fn enforce_result_byte_cap(
+        &self,
+        name: &str,
+        result: CallToolResult,
+        cap: usize,
+    ) -> CallToolResult {
+        if cap == 0 || result.is_error.unwrap_or(false) {
+            return result;
+        }
+        let len = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.len()))
+            .unwrap_or(0);
+        if len > cap {
+            return self.read_tool_byte_cap_error(name, len, cap);
+        }
+        result
+    }
+
+    /// Enforce the estimated-memory budget on a resource-limited read tool's
+    /// response (Issue #3368 memory-budget dimension), post-hoc and default-off.
+    ///
+    /// A `mem_cap` of `0` (unlimited — the default config) and any error
+    /// response pass straight through, so this is a no-op unless an operator
+    /// opts in. Otherwise the working-memory proxy is estimated as the
+    /// serialized response length scaled by [`MEMORY_WORKING_SET_EXPANSION`]:
+    /// the in-RAM materialized representation that produced the response (parsed
+    /// entities, property maps, vectors, hashmap/enum/capacity overhead) is a
+    /// documented multiple of the compact serialized JSON. If that estimate
+    /// exceeds `mem_cap`, the response is replaced with the non-retriable
+    /// `RESOURCE_EXHAUSTED` / `memory_bytes` error (recording the termination
+    /// counter). This is an honest *proxy*, not true per-task allocation
+    /// accounting — the same class of post-hoc honesty as the byte cap; see the
+    /// design note in `docs/guides/mcp-query-tool.md`.
+    fn enforce_memory_budget(
+        &self,
+        name: &str,
+        result: CallToolResult,
+        mem_cap: usize,
+    ) -> CallToolResult {
+        if mem_cap == 0 || result.is_error.unwrap_or(false) {
+            return result;
+        }
+        let len = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.len()))
+            .unwrap_or(0);
+        let estimated = len.saturating_mul(MEMORY_WORKING_SET_EXPANSION);
+        if estimated > mem_cap {
+            return self.read_tool_memory_error(name, estimated, mem_cap);
+        }
+        result
+    }
+
+    /// Tool-agnostic wall-clock-timeout error for the six wrapped read tools
+    /// (Issue #3368 residue).
+    ///
+    /// Unlike the `query` tool's
+    /// [`wall_clock_timeout_error`](Self::wall_clock_timeout_error) — whose
+    /// `kind: "runtime_error"` and `language` fields are meaningful for a query
+    /// *language* — these tools are not a query language and expose no per-call
+    /// `limits` override in v1. Reusing the query builder would emit a
+    /// semantically wrong `language: "<toolname>"`, a spurious `kind`, and
+    /// remediation telling the caller to raise `limits.timeout_ms`, which they
+    /// cannot set. This emitter instead produces the neutral #3234 envelope
+    /// (`{error:{code,message,retriable,details}}` — no `kind`, no `language`)
+    /// with tool-neutral remediation. Records the `WallClockTimeout`
+    /// termination exactly once; retriable, since these tools are read-only so
+    /// a narrower retry is always sound.
+    fn read_tool_timeout_error(&self, name: &str, timeout_ms: u64) -> CallToolResult {
+        self.limit_counters
+            .record_termination(LimitDimension::WallClockTimeout);
+        self.error_result(
+            McpError::new(
+                McpErrorCode::ResourceExhausted,
+                format!(
+                    "Tool '{name}' exceeded the wall-clock timeout of {timeout_ms} ms; narrow \
+                     the request (smaller depth/limit/time window) and retry."
+                ),
+            )
+            .retriable(true)
+            .details(json!({
+                "dimension": LimitDimension::WallClockTimeout.as_str(),
+                "limit": timeout_ms,
+            })),
+        )
+    }
+
+    /// Tool-agnostic result-byte-cap error for the six wrapped read tools
+    /// (Issue #3368 residue). The neutral #3234 counterpart to the `query`
+    /// tool's [`result_bytes_error`](Self::result_bytes_error): no `kind`, no
+    /// `language`, and no unactionable `limits.max_response_bytes` advice (these
+    /// tools have no per-call override). Records the `ResultBytes` termination
+    /// exactly once; non-retriable — the same request yields the same oversized
+    /// response, so the caller must narrow it.
+    fn read_tool_byte_cap_error(&self, name: &str, consumed: usize, cap: usize) -> CallToolResult {
+        self.limit_counters
+            .record_termination(LimitDimension::ResultBytes);
+        self.error_result(
+            McpError::new(
+                McpErrorCode::ResourceExhausted,
+                format!(
+                    "Tool '{name}' response of {consumed} bytes exceeded the {cap}-byte cap; \
+                     narrow the request (smaller depth/limit/k) and retry."
+                ),
+            )
+            .retriable(false)
+            .details(json!({
+                "dimension": LimitDimension::ResultBytes.as_str(),
+                "limit": cap,
+                "consumed": consumed,
+            })),
+        )
+    }
+
+    /// Tool-agnostic estimated-memory-budget error for the wrapped read tools
+    /// (Issue #3368 memory-budget dimension). The neutral #3234 counterpart to
+    /// [`read_tool_byte_cap_error`](Self::read_tool_byte_cap_error): no `kind`,
+    /// no `language`, no per-call `limits` advice. `consumed` is the *estimated*
+    /// working-memory proxy (a documented multiple of the serialized size), not
+    /// a measured allocation. Records the `Memory` termination exactly once;
+    /// non-retriable — the same request materializes the same estimate, so the
+    /// caller must narrow it.
+    fn read_tool_memory_error(&self, name: &str, consumed: usize, cap: usize) -> CallToolResult {
+        self.limit_counters
+            .record_termination(LimitDimension::Memory);
+        self.error_result(
+            McpError::new(
+                McpErrorCode::ResourceExhausted,
+                format!(
+                    "Tool '{name}' estimated working memory of {consumed} bytes exceeded the \
+                     {cap}-byte memory budget; narrow the request (smaller depth/limit/k) and \
+                     retry."
+                ),
+            )
+            .retriable(false)
+            .details(json!({
+                "dimension": LimitDimension::Memory.as_str(),
+                "limit": cap,
+                "consumed": consumed,
+            })),
+        )
+    }
 }
+
+/// In-memory expansion factor for the Issue #3368 memory-budget proxy.
+///
+/// The working-set memory used to materialize a read response (parsed graph
+/// entities, `PropertyMap` hashmaps, `Vec<f32>` embeddings, `String` keys, plus
+/// capacity slack and enum/hashmap overhead) is empirically a small multiple of
+/// the compact serialized JSON that leaves the seam. `4×` is the documented v1
+/// estimate of that multiple; it is a fixed constant, not response-shape
+/// adaptive (a Lane-2 follow-up). See the design note in
+/// `docs/guides/mcp-query-tool.md`.
+pub(crate) const MEMORY_WORKING_SET_EXPANSION: usize = 4;
 
 /// The read tools that honor the Issue #3353 token budget (`max_response_tokens`
 /// / `max_response_bytes`). Kept as a single source of truth so the dispatch
@@ -6399,16 +11170,86 @@ pub(crate) const BUDGETABLE_READ_TOOLS: &[&str] = &[
     "get_incoming_edges",
     "traverse",
     "find_similar",
+    "semantic_search",
     "hybrid_query",
     "query",
     "find_nodes_at_time",
     "get_node_history",
     "get_schema",
+    // Belief-revision audit (Issue #3362) — array-returning read, enrolled in
+    // the token budget for parity with its `get_node_history` sibling (#3353).
+    "get_belief_revisions",
+    // Deferred MCP-registry batch reads (Issue #3367 / #3352 / #3382) — each has
+    // a budgetable sibling and can return large arrays/trees, so budgetable.
+    // `counterfactual_replay` is deliberately EXCLUDED (its AC8 `counterfactual:
+    // true` marker must never be stripped by budget-ladder truncation), and
+    // `list_trust_policies` is small/bounded (like `list_vector_indexes`).
+    "list_drift_monitors",
+    "query_drift_alarms",
+    "contradiction_genealogy",
+    "find_contradictions",
+    "trust_breakdown",
+    // Semantic-search analysis tools (Issue #2907) — all read-only and
+    // potentially large, so budgetable.
+    "semantic_path",
+    "concept_analogy",
+    "concept_mean",
+    "find_duplicate_candidates",
+    "semantic_horizon",
+    "context_aspects",
 ];
 
 /// Does this tool honor the token budget parameters (Issue #3353)?
 pub(crate) fn is_budgetable_read_tool(name: &str) -> bool {
     BUDGETABLE_READ_TOOLS.contains(&name)
+}
+
+/// The read tools whose responses are governed by the per-query resource
+/// limits (Issue #3368 residue): the wall-clock timeout and the result-byte
+/// cap. The `query` tool self-enforces the same limits inline (see
+/// [`AletheiaMcpServer::handle_query`]) and is deliberately *not* listed here,
+/// so it is never double-wrapped. Kept as a single source of truth so the
+/// dispatch wrapper and any future schema/documentation path cannot drift.
+///
+/// v1 scope (Lane-2 follow-ups deferred): these tools honor only the server
+/// **defaults** — there is no per-call `limits` override for them (unlike the
+/// `query` tool), no memory-budget dimension, and no engine-level cooperative
+/// cancellation; the timed computation runs to completion on a detached worker
+/// and its result is discarded on timeout (identical to the `query` tool's
+/// non-cancellable race). The byte cap is enforced **post-hoc** on the fully
+/// serialized response (the `query` tool's incremental row-by-row guard is not
+/// reused here); a within-cap response is then optionally shaped by the #3353
+/// token budget.
+pub(crate) const RESOURCE_LIMITED_READ_TOOLS: &[&str] = &[
+    "traverse",
+    "hybrid_query",
+    "find_similar",
+    "get_node_at_time",
+    "get_edge_at_time",
+    "find_nodes_at_time",
+    // Contradiction analysis (Issue #3352): `find_contradictions` runs an
+    // O(entities * versions^2) scan and `contradiction_genealogy` an
+    // O(versions^2) reconstruction — both potentially slow, so they enroll for
+    // the uniform wall-clock-timeout + result-byte-cap coverage (Issue #3368).
+    "contradiction_genealogy",
+    "find_contradictions",
+    // Semantic-search analysis tools (Issue #2907): read-only, potentially slow
+    // graph+vector scans. They carry their own per-operation bounds, but enroll
+    // here for the uniform wall-clock-timeout + result-byte-cap coverage every
+    // other slow read gets (Issue #3368). At the default 30s timeout their
+    // responses are unchanged.
+    "semantic_path",
+    "concept_analogy",
+    "concept_mean",
+    "find_duplicate_candidates",
+    "semantic_horizon",
+    "context_aspects",
+];
+
+/// Does this tool have its response governed by the per-query resource limits
+/// (Issue #3368 residue)?
+pub(crate) fn is_resource_limited_read_tool(name: &str) -> bool {
+    RESOURCE_LIMITED_READ_TOOLS.contains(&name)
 }
 
 /// Read tools that honor the Issue #3348 provenance filter parameters
@@ -6779,6 +11620,62 @@ fn tool_definitions() -> Vec<Tool> {
             make_input_schema::<FindSimilarRequest>(),
         ),
         Tool::new(
+            "embed_query",
+            "Generate a single dense embedding vector from a text string using the server's \
+                     configured embedding model (Issue #2906). Returns `{embedding, dim}`. Use it \
+                     to build a query vector for find_similar, or as a general text-to-vector \
+                     utility. Requires the server to be built with the `embeddings` feature and to \
+                     have a model configured; otherwise returns a structured \
+                     FAILED_PRECONDITION error. Input size is bounded.",
+            make_input_schema::<EmbedQueryRequest>(),
+        ),
+        Tool::new(
+            "embed_text",
+            "Generate dense embeddings for multiple texts with real chunk expansion (Issue \
+                     #2906): each input document is split into contiguous character windows and \
+                     every chunk is embedded independently, so a long document yields MULTIPLE \
+                     embeddings instead of one truncated vector. Returns per-chunk results \
+                     `{text, metadata, embedding, dim}` aligned to their source chunk via the \
+                     model's own chunk output (never a positional zip); `metadata` carries the \
+                     originating `source_index` and `chunk_index`. An optional `max_chunks` caps \
+                     the returned embeddings (a value of 0 is rejected as INVALID_ARGUMENT); the \
+                     response sets `truncated: true` when the cap trims the expansion. Requires \
+                     the `embeddings` feature and a configured model; otherwise returns a \
+                     structured FAILED_PRECONDITION error. Input count and size are bounded.",
+            make_input_schema::<EmbedTextRequest>(),
+        ),
+        Tool::new(
+            "semantic_search",
+            "Text semantic search (Issue #2906): embed `query_text` with the server's \
+                     configured model, then run the exact find_similar k-NN path against the vector \
+                     index on `property_name`, so the response envelope is identical to \
+                     find_similar (results, score, temporal block, #3220 vector elision, #3226 \
+                     pagination). Refuses with FAILED_PRECONDITION if the index/property does not \
+                     exist, INVALID_ARGUMENT on an embedding-dimension mismatch. Requires the \
+                     `embeddings` feature and a configured model.",
+            make_input_schema::<SemanticSearchRequest>(),
+        ),
+        Tool::new(
+            "create_node_with_embedding",
+            "Create a node whose embedding is generated from `text` (Issue #2906): embed the \
+                     text with the server's configured model and store the vector under \
+                     `embedding_property` (alongside any other `properties`), compatible with \
+                     enable_vector_index / find_similar / semantic_search. Supports optional \
+                     `valid_time` and `provenance`. Requires the `embeddings` feature and a \
+                     configured model.",
+            make_input_schema::<CreateNodeWithEmbeddingRequest>(),
+        ),
+        Tool::new(
+            "update_node_embedding",
+            "Regenerate a node's embedding from `text` and update ONLY the embedding property \
+                     (Issue #2906). Because update_node replaces all properties, this first reads \
+                     the node and MERGES its existing properties, then overrides `embedding_property` \
+                     with the freshly generated vector — every other property is preserved. \
+                     Supports optional `valid_time`. Requires the `embeddings` feature and a \
+                     configured model.",
+            make_input_schema::<UpdateNodeEmbeddingRequest>(),
+        ),
+        Tool::new(
             "enable_vector_index",
             "Enable vector indexing on a property.",
             make_input_schema::<EnableVectorIndexRequest>(),
@@ -6836,6 +11733,11 @@ fn tool_definitions() -> Vec<Tool> {
             make_input_schema::<ListChangesRequest>(),
         ),
         Tool::new(
+            "await_changes",
+            "Long-poll for the next committed changes matching an optional node-label / edge-type / change-type filter. Blocks up to timeout_ms (default 25000, max 60000); resume losslessly by passing the prior resume_token back as from_token. The streaming counterpart to list_changes.",
+            make_input_schema::<AwaitChangesRequest>(),
+        ),
+        Tool::new(
             "get_node_at_valid_time",
             "Get node state at a specific valid time (independent dimension query).",
             make_input_schema::<GetNodeAtValidTimeRequest>(),
@@ -6874,6 +11776,92 @@ fn tool_definitions() -> Vec<Tool> {
             "diff_edge_versions",
             "Compute the difference between two versions of an edge.",
             make_input_schema::<DiffEdgeVersionsRequest>(),
+        ),
+        Tool::new(
+            "get_belief_revisions",
+            "Audit when and why the database changed its mind about a node or edge \
+             (Issue #3362): classify each stored version transition as \
+             initial_assertion / correction / world_change / retraction / reaffirmation, \
+             with the provenance and confidence trajectory. Optionally scope to one \
+             property key or a transaction-time coordinate. Requires the \
+             `semantic-temporal` feature.",
+            make_input_schema::<GetBeliefRevisionsRequest>(),
+        ),
+        Tool::new(
+            "create_drift_monitor",
+            "Declare a semantic-drift monitor (Issue #3367): watch a vector \
+             property and fire a durable, queryable alarm when meaning drifts \
+             past a threshold over a time window (per-entity or label-centroid; \
+             on-write or scheduled). Requires the `semantic-temporal` feature.",
+            make_input_schema::<CreateDriftMonitorRequest>(),
+        ),
+        Tool::new(
+            "list_drift_monitors",
+            "List all declared drift monitors and their specs (Issue #3367). \
+             Requires the `semantic-temporal` feature.",
+            make_input_schema::<ListDriftMonitorsRequest>(),
+        ),
+        Tool::new(
+            "delete_drift_monitor",
+            "Delete a drift monitor by id, removing it from future evaluation \
+             (Issue #3367). Requires the `semantic-temporal` feature.",
+            make_input_schema::<DeleteDriftMonitorRequest>(),
+        ),
+        Tool::new(
+            "query_drift_alarms",
+            "Query fired drift alarms (Issue #3367), filtered by monitor, label, \
+             resolved state, and fire-time window. Each alarm carries the measured \
+             distance, threshold, metric, both compared coordinates, and version \
+             refs. Requires the `semantic-temporal` feature.",
+            make_input_schema::<QueryDriftAlarmsRequest>(),
+        ),
+        Tool::new(
+            "resolve_drift_alarm",
+            "Resolve a drift alarm (Issue #3367) as a recorded, AS OF-stable \
+             update (the alarm is never deleted). Requires the `semantic-temporal` \
+             feature.",
+            make_input_schema::<ResolveDriftAlarmRequest>(),
+        ),
+        Tool::new(
+            "contradiction_genealogy",
+            "Reconstruct how conflicting claims about one fact evolved across \
+             bi-temporal history and provenance (Issue #3352): every competing \
+             claim's valid/transaction intervals, provenance, supersession chain, \
+             the divergence point, per-source trust summary, and a prose narrative. \
+             Requires the `semantic-temporal` feature.",
+            make_input_schema::<ContradictionGenealogyRequest>(),
+        ),
+        Tool::new(
+            "find_contradictions",
+            "Scan the database (by label / property / time window, paginated) for \
+             entity+property pairs holding conflicting values over overlapping \
+             valid-time intervals (Issue #3352). Requires the `semantic-temporal` \
+             feature.",
+            make_input_schema::<FindContradictionsRequest>(),
+        ),
+        Tool::new(
+            "counterfactual_replay",
+            "Materialize a read-only counterfactual view that excludes a source's \
+             writes and report the blast radius — which entities changed or were \
+             removed (Issue #3357). The real database is never mutated; the \
+             response carries a `counterfactual: true` marker. Requires the \
+             `semantic-temporal` feature.",
+            make_input_schema::<CounterfactualReplayRequest>(),
+        ),
+        Tool::new(
+            "trust_breakdown",
+            "Explain a fact's computed confidence as a tree over its derivation \
+             lineage (Issue #3382): each node's version-pinned reference, status, \
+             computed confidence, classification, and combinator. Requires the \
+             `semantic-reasoning` feature.",
+            make_input_schema::<TrustBreakdownRequest>(),
+        ),
+        Tool::new(
+            "list_trust_policies",
+            "List the active trust-propagation policies (Issue #3382): the \
+             database default combinator + missing-confidence rule and per-label \
+             overrides. Requires the `semantic-reasoning` feature.",
+            make_input_schema::<ListTrustPoliciesRequest>(),
         ),
         Tool::new(
             "hybrid_query",
@@ -7031,6 +12019,63 @@ fn tool_definitions() -> Vec<Tool> {
              for per-label breakdowns use get_schema.",
             make_input_schema::<DatabaseStatsRequest>(),
         ),
+        // ── Semantic-search analysis tools (Issue #2907) ──────────────────
+        Tool::new(
+            "semantic_path",
+            "Find a path between two nodes guided by vector similarity (A* over the \
+             `semantic-search` cohort's Semantic Navigator). Returns the node-id path plus its \
+             length. Requires a vector index on `property_name`; both endpoints must carry that \
+             embedding. The search is bounded (a node-expansion budget derived from `max_depth`, \
+             clamped to 20) so it is safe on large graphs. Requires the `semantic-search` \
+             feature; otherwise returns a FAILED_PRECONDITION.",
+            make_input_schema::<SemanticPathRequest>(),
+        ),
+        Tool::new(
+            "concept_analogy",
+            "Solve a vector analogy `a : b :: c : ?` over node embeddings (Concept Algebra): \
+             returns the top-k nodes nearest `b - a + c`, each with a similarity score. Requires \
+             a vector index on `property_name`. Requires the `semantic-search` feature; otherwise \
+             returns a FAILED_PRECONDITION.",
+            make_input_schema::<ConceptAnalogyRequest>(),
+        ),
+        Tool::new(
+            "concept_mean",
+            "Rank the top-k nodes nearest the centroid (mean embedding) of a set of nodes \
+             (Concept Algebra). Useful for 'find things like this whole group'. Requires a vector \
+             index on `property_name`; the node set is capped. Requires the `semantic-search` \
+             feature; otherwise returns a FAILED_PRECONDITION.",
+            make_input_schema::<ConceptMeanRequest>(),
+        ),
+        Tool::new(
+            "find_duplicate_candidates",
+            "Find near-duplicate candidates for a node by embedding similarity (Highlander \
+             entity-resolution detector): returns candidates at or above `threshold`, each with a \
+             similarity score. v1 note: the search uses the node's own indexed embedding; \
+             `property_name` selects the vector index whose existence is validated, not an \
+             arbitrary property vector. Requires the `semantic-search` feature; otherwise returns \
+             a FAILED_PRECONDITION.",
+            make_input_schema::<FindDuplicateCandidatesRequest>(),
+        ),
+        Tool::new(
+            "semantic_horizon",
+            "Map a node's semantic event horizon (Horizon engine): starting from `seed`, expand \
+             through neighbours whose similarity is at or above `threshold` (the interior); the \
+             first neighbours to fall below form the horizon (boundary). Returns sorted interior \
+             and horizon node-id sets with counts. `threshold` must be in [0, 1]; `max_depth` is \
+             clamped to 20. Requires a vector index on `property_name` and the `semantic-search` \
+             feature; otherwise returns a FAILED_PRECONDITION.",
+            make_input_schema::<SemanticHorizonRequest>(),
+        ),
+        Tool::new(
+            "context_aspects",
+            "Decompose a node's neighbourhood into distinct semantic aspects (Chameleon): each \
+             aspect carries a weight, representative exemplar node ids, and a centroid vector \
+             (elided by default per #3220 — pass `include_vectors: true` for the full array). \
+             Useful for disentangling multi-faceted context. Requires a vector index on \
+             `property_name` and the `semantic-search` feature; otherwise returns a \
+             FAILED_PRECONDITION.",
+            make_input_schema::<ContextAspectsRequest>(),
+        ),
         Tool::new(
             "verify_chain",
             "Verify the tamper-evident provenance hash chain (Issue #3351) — proof that the \
@@ -7056,6 +12101,60 @@ fn tool_definitions() -> Vec<Tool> {
              the chain to be enabled; otherwise returns a FAILED_PRECONDITION error.",
             make_input_schema::<ExportChainHeadRequest>(),
         ),
+        // Namespace management (Issue #3349, PR3b).
+        Tool::new(
+            "create_namespace",
+            "Create (register) an agent-scoped namespace so it is listable/describable even \
+             when empty (Issue #3349). Pass `name` (e.g. 'agent:planner'; charset \
+             [A-Za-z0-9._:/-], max 128 bytes) and an optional `description`. Returns the created \
+             namespace {name, description, created_at}. A duplicate name (or the implicit \
+             'default') is a CONFLICT; a malformed name or the reserved 'all' selector is \
+             INVALID_ARGUMENT. Registering up front is optional — writing to an unknown namespace \
+             auto-registers it — but doing so lets you record a description and detect typos via \
+             list_namespaces.",
+            make_input_schema::<CreateNamespaceRequest>(),
+        ),
+        Tool::new(
+            "list_namespaces",
+            "List all registered namespaces (the implicit 'default' first, then others in \
+             creation order), so a caller can discover every scope and catch a mistyped \
+             auto-registered namespace (Issue #3349). No arguments. Returns \
+             {namespaces:[{name, description, created_at, node_count, edge_count}], count}; the \
+             per-namespace current-state node/edge counts are O(1) membership-index reads.",
+            make_input_schema::<ListNamespacesRequest>(),
+        ),
+        Tool::new(
+            "describe_namespace",
+            "Describe a single namespace by name (Issue #3349). Pass `name`; returns \
+             {name, description, created_at, node_count, edge_count}. The implicit 'default' \
+             namespace always resolves; an unregistered name returns NOT_FOUND with \
+             details.namespace.",
+            make_input_schema::<DescribeNamespaceRequest>(),
+        ),
+        // GDPR crypto-shred — ADMIN-class (Issue #3359, Slice 4b). The first
+        // Admin-class MCP tools.
+        Tool::new(
+            "designate_subject",
+            "ADMIN. Designate a GDPR erasure subject over one or more targets — whole \
+             nodes/edges and/or specific property keys (Issue #3359). Pass `subject_id` \
+             (non-empty, <=256 bytes, no control chars) and a non-empty `targets` array of \
+             {entity_kind:'node'|'edge', id, keys?} — `keys` present seals only those \
+             properties, absent/empty seals the whole entity. Designating an already-active \
+             subject merges the new targets in. Requires encryption configured, else \
+             FAILED_PRECONDITION. Erasure of the designated subject later renders its sealed \
+             payload permanently undecryptable.",
+            make_input_schema::<DesignateSubjectRequest>(),
+        ),
+        Tool::new(
+            "erase_subject",
+            "ADMIN. Irreversibly erase a designated GDPR subject: destroy its key material so \
+             its sealed payload becomes permanently undecryptable, and return a signed erasure \
+             attestation {subject_id, entity_count, timestamp, timestamp_micros, signature (hex), \
+             signer_public_key (hex)} — never any property content or key material. Pass \
+             `subject_id`. Erasing an undesignated subject is FAILED_PRECONDITION; re-erasing is \
+             an idempotent no-op returning the recorded attestation.",
+            make_input_schema::<EraseSubjectRequest>(),
+        ),
     ];
 
     // Advertise the Issue #3353 token budget on every budgetable read tool by
@@ -7080,9 +12179,73 @@ fn tool_definitions() -> Vec<Tool> {
             desc.push_str(PROVENANCE_FILTER_TOOL_HINT);
             tool.description = Some(std::borrow::Cow::Owned(desc));
         }
+        // Advertise the Issue #3372 provenance-weighted fusion policy on
+        // `find_similar` / `hybrid_query`, only when the feature is compiled
+        // (so an unusable param is never advertised). Count-neutral: adds a
+        // param, not a tool.
+        #[cfg(feature = "semantic-retrieval-fusion")]
+        if is_fusion_policy_tool(&tool.name) {
+            inject_fusion_policy_schema_params(&mut tool.input_schema);
+            let mut desc = tool.description.as_deref().unwrap_or("").to_string();
+            desc.push_str(FUSION_POLICY_TOOL_HINT);
+            tool.description = Some(std::borrow::Cow::Owned(desc));
+        }
     }
     tools
 }
+
+/// The two tools that accept an optional Issue #3372 `fusion_policy` param.
+#[cfg(feature = "semantic-retrieval-fusion")]
+pub(crate) const FUSION_POLICY_TOOLS: &[&str] = &["find_similar", "hybrid_query"];
+
+/// Whether `name` accepts the Issue #3372 `fusion_policy` param.
+#[cfg(feature = "semantic-retrieval-fusion")]
+pub(crate) fn is_fusion_policy_tool(name: &str) -> bool {
+    FUSION_POLICY_TOOLS.contains(&name)
+}
+
+/// Inject the optional Issue #3372 `fusion_policy` object parameter into a
+/// tool's generated JSON `inputSchema.properties`. Optional, so `required` is
+/// untouched. Idempotent.
+#[cfg(feature = "semantic-retrieval-fusion")]
+fn inject_fusion_policy_schema_params(
+    schema: &mut Arc<serde_json::Map<String, serde_json::Value>>,
+) {
+    let schema = Arc::make_mut(schema);
+    let props = schema
+        .entry("properties".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(props) = props.as_object_mut() else {
+        return;
+    };
+    props.entry("fusion_policy".to_string()).or_insert_with(|| {
+        json!({
+            "type": "object",
+            "description": "Optional provenance-weighted fusion policy (Issue #3372): re-rank \
+                candidates by a weighted mean of vector similarity, provenance confidence, and \
+                temporal recency instead of similarity alone, attaching a per-result \
+                `score_breakdown`. Omit for unchanged (similarity-only) behavior. Invalid weights \
+                return INVALID_ARGUMENT.",
+            "properties": {
+                "w_similarity": { "type": "number", "minimum": 0 },
+                "w_confidence": { "type": "number", "minimum": 0 },
+                "w_recency": { "type": "number", "minimum": 0 },
+                "neutral_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+                "recency_half_life_secs": { "type": "number", "exclusiveMinimum": 0 }
+            }
+        })
+    });
+}
+
+/// Uniform description suffix documenting the `fusion_policy` parameter
+/// (Issue #3372), appended to `find_similar` / `hybrid_query`.
+#[cfg(feature = "semantic-retrieval-fusion")]
+const FUSION_POLICY_TOOL_HINT: &str = " Optional provenance-weighted fusion (Issue #3372): pass \
+    `fusion_policy` (an object with any of `w_similarity`, `w_confidence`, `w_recency` \
+    (each >= 0), `neutral_confidence` (in [0,1]), `recency_half_life_secs` (> 0)) to re-rank \
+    results by a weighted mean of vector similarity, provenance confidence, and temporal recency; \
+    each result then carries a `score_breakdown`. Invalid weights return INVALID_ARGUMENT. Omit \
+    for unchanged similarity-only behavior.";
 
 /// Inject the four optional Issue #3348 provenance-filter parameters into a
 /// tool's generated JSON `inputSchema.properties`, so a client introspecting
@@ -7245,6 +12408,20 @@ impl ServerHandler for AletheiaMcpServer {
             .map(serde_json::Value::Object)
             .unwrap_or(serde_json::Value::Null);
 
+        // `await_changes` is an event-driven long-poll (Issue #3673): route it
+        // through the async dispatch so the suspended future pins NO worker thread
+        // and drops (freeing its per-principal slot) the moment the caller's
+        // future is cancelled on disconnect. It is deliberately excluded from the
+        // #3353/#3368/#3360 wrappers `dispatch_tool` applies, so bypassing them
+        // changes nothing but the wait mechanism — but auth must still be enforced
+        // here to mirror `dispatch_tool`.
+        if request.name.as_ref() == "await_changes" {
+            if let Err(err) = self.auth.authorize_tool("await_changes") {
+                return Ok(self.error_result(err));
+            }
+            return Ok(self.dispatch_await_changes_async(args, None).await);
+        }
+
         Ok(self.dispatch_tool(request.name.as_ref(), args))
     }
 }
@@ -7262,6 +12439,107 @@ mod server_unit_tests {
 
     fn make_server() -> AletheiaMcpServer {
         AletheiaMcpServer::new(Arc::new(AletheiaDB::new().expect("db init")))
+    }
+
+    /// Configurable interner cap (finding 1): a REAL `create_node` whose property
+    /// KEY tips the interner over must render as an actionable
+    /// `FAILED_PRECONDITION` with `{resource,current,limit}` details naming
+    /// `persistence.max_interned_strings` — NOT a generic `INVALID_ARGUMENT`.
+    ///
+    /// Lowers the process-global interner cap, so it runs in a SUBPROCESS to
+    /// isolate the mutation from concurrent tests.
+    #[test]
+    fn interner_cap_property_key_breach_is_failed_precondition_via_subprocess() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let exe = std::env::current_exe().expect("failed to locate current test binary");
+        let mut child = Command::new(exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "mcp::server::server_unit_tests::interner_cap_property_key_breach_helper",
+            ])
+            .spawn()
+            .expect("failed to spawn subprocess for interner-cap property-key test");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(status.success(), "interner-cap property-key helper failed");
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("interner-cap property-key helper did not complete");
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("failed while polling subprocess: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn interner_cap_property_key_breach_helper() {
+        use super::CreateNodeRequest;
+        use crate::core::GLOBAL_INTERNER;
+        use std::collections::HashMap;
+
+        let server = make_server();
+
+        // Pin the cap exactly at the live interner size, so the NEXT new intern —
+        // the fresh property KEY below, interned by `json_to_property_map` before
+        // the node label — tips it over. (No capacity rollbacks have occurred in
+        // this fresh subprocess, so next_id == len().)
+        let base = GLOBAL_INTERNER.len();
+        GLOBAL_INTERNER.set_max_capacity(base);
+
+        let mut props = HashMap::new();
+        props.insert(
+            "uniq_property_key_that_tips_the_interner_over".to_string(),
+            serde_json::json!("some_value"),
+        );
+        let req = CreateNodeRequest {
+            label: "TipLabel".to_string(),
+            properties: Some(props),
+            valid_time: None,
+            provenance: None,
+            derived_from: None,
+            namespace: None,
+        };
+
+        let resp = server.create_node(req);
+        let val: serde_json::Value =
+            serde_json::from_str(&resp).expect("create_node must return JSON");
+
+        // AFTER the fix: FAILED_PRECONDITION with structured details + actionable
+        // message. (BEFORE the fix this was INVALID_ARGUMENT with no details.)
+        assert_eq!(
+            val["error"]["code"], "FAILED_PRECONDITION",
+            "property-KEY interner breach must be FAILED_PRECONDITION, got: {resp}"
+        );
+        assert_eq!(val["error"]["retriable"], false);
+        assert_eq!(val["error"]["details"]["resource"], "string interner");
+        assert!(
+            val["error"]["details"]["limit"].is_number(),
+            "details must carry a numeric limit, got: {resp}"
+        );
+        assert!(
+            val["error"]["details"]["current"].is_number(),
+            "details must carry a numeric current, got: {resp}"
+        );
+        assert!(
+            val["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("persistence.max_interned_strings"),
+            "message must name the knob, got: {resp}"
+        );
     }
 
     fn error_kind(server: &AletheiaMcpServer, err: Error) -> String {
@@ -7355,6 +12633,7 @@ mod server_unit_tests {
             timeout_ms: 60_000,
             max_result_rows: 0,
             max_response_bytes: 0,
+            max_query_memory_bytes: 0,
         };
         let out = server.race_deadline(effective.timeout_ms, test_guard(&server), || {
             panic!("boom");
@@ -7709,6 +12988,21 @@ mod server_unit_tests {
     }
 
     #[test]
+    fn map_query_error_scope_conflict_yields_invalid_request() {
+        use crate::core::namespace::NamespaceError;
+        let server = make_server();
+        let payload = error_payload(&server, Error::Namespace(NamespaceError::ScopeConflict));
+        assert_eq!(payload["kind"].as_str(), Some("invalid_request"));
+        assert_eq!(payload["code"].as_str(), Some("INVALID_ARGUMENT"));
+        assert_eq!(payload["retriable"].as_bool(), Some(false));
+        // Must not disclose namespace contents.
+        assert!(
+            payload["details"].is_null(),
+            "no namespace details: {payload}"
+        );
+    }
+
+    #[test]
     fn map_query_error_invalid_parameter_yields_invalid_params() {
         let server = make_server();
         let err = Error::Query(QueryError::InvalidParameter {
@@ -7762,6 +13056,74 @@ mod server_unit_tests {
         assert_eq!(error["kind"], "runtime_error", "got: {error}");
         assert_eq!(error["code"], "UNAVAILABLE", "got: {error}");
         assert_eq!(error["retriable"], true, "got: {error}");
+    }
+
+    /// A `QueryError::ResourceExhausted` for the memory dimension maps to a
+    /// non-retriable `RESOURCE_EXHAUSTED` `runtime_error` carrying
+    /// `details.{dimension, limit, consumed}` (Issue #3368 cooperative
+    /// enforcement).
+    #[test]
+    fn map_query_error_resource_exhausted_memory_yields_resource_exhausted_non_retriable() {
+        let server = make_server();
+        let payload = error_payload(
+            &server,
+            Error::Query(QueryError::ResourceExhausted {
+                dimension: "memory_bytes",
+                limit: 1024,
+                consumed: 2048,
+                retriable: false,
+            }),
+        );
+        assert_eq!(payload["kind"].as_str(), Some("runtime_error"), "{payload}");
+        assert_eq!(
+            payload["code"].as_str(),
+            Some("RESOURCE_EXHAUSTED"),
+            "{payload}"
+        );
+        assert_eq!(payload["retriable"].as_bool(), Some(false), "{payload}");
+        assert_eq!(
+            payload["details"]["dimension"].as_str(),
+            Some("memory_bytes"),
+            "{payload}"
+        );
+        assert_eq!(
+            payload["details"]["limit"].as_u64(),
+            Some(1024),
+            "{payload}"
+        );
+        assert_eq!(
+            payload["details"]["consumed"].as_u64(),
+            Some(2048),
+            "{payload}"
+        );
+    }
+
+    /// The wall-clock-timeout dimension of the same engine error is retriable
+    /// (a read-only re-run is safe), unlike the memory dimension above (Issue
+    /// #3368).
+    #[test]
+    fn map_query_error_resource_exhausted_timeout_yields_retriable() {
+        let server = make_server();
+        let payload = error_payload(
+            &server,
+            Error::Query(QueryError::ResourceExhausted {
+                dimension: "wall_clock_timeout",
+                limit: 500,
+                consumed: 501,
+                retriable: true,
+            }),
+        );
+        assert_eq!(
+            payload["code"].as_str(),
+            Some("RESOURCE_EXHAUSTED"),
+            "{payload}"
+        );
+        assert_eq!(payload["retriable"].as_bool(), Some(true), "{payload}");
+        assert_eq!(
+            payload["details"]["dimension"].as_str(),
+            Some("wall_clock_timeout"),
+            "{payload}"
+        );
     }
 
     #[test]
@@ -8013,9 +13375,15 @@ mod server_unit_tests {
                 PropertyMapBuilder::new().insert("name", "Acme").build(),
             )
             .unwrap();
+        // A multi-variable-pattern MATCH rejects any *restricting* namespace
+        // scope (v1, src/db/query.rs), and the MCP `query` tool defaults an
+        // omitted `namespace` to `default`-only (fail-closed / isolated-by-
+        // default, #3349 / PR3d #3731). This test must therefore pass
+        // `"namespace": "all"` to run the cartesian product unscoped.
         let result = server.handle_query(serde_json::json!({
             "language": "cypher",
-            "query": "MATCH (a:Person),(b:Company) RETURN a,b"
+            "query": "MATCH (a:Person),(b:Company) RETURN a,b",
+            "namespace": "all"
         }));
         let text = AletheiaMcpServer::extract_text(result);
         let val: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -8034,5 +13402,1163 @@ mod server_unit_tests {
             cols.contains(&"a".to_string()) && cols.contains(&"b".to_string()),
             "columns must name the bound variables: {val}"
         );
+    }
+
+    /// Fail-closed guard (companion to
+    /// `handle_query_multi_pattern_returns_non_null_bindings`): the SAME
+    /// multi-variable-pattern MATCH with NO `namespace` arg must be rejected,
+    /// not silently unscoped. An omitted `namespace` defaults to `default`-only
+    /// (#3349 / PR3d #3731), and a multi-variable-pattern MATCH rejects any
+    /// restricting scope (v1, src/db/query.rs), so the tool returns a
+    /// structured `unsupported_construct` / `INVALID_ARGUMENT` error. This pins
+    /// the fail-closed semantics so a future change can't silently unscope it.
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn handle_query_multi_pattern_omitted_scope_is_rejected() {
+        use crate::core::PropertyMapBuilder;
+        let server = make_server();
+        server
+            .db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        server
+            .db
+            .create_node(
+                "Company",
+                PropertyMapBuilder::new().insert("name", "Acme").build(),
+            )
+            .unwrap();
+        // No `namespace` arg -> defaults to `default`-only (fail-closed).
+        let result = server.handle_query(serde_json::json!({
+            "language": "cypher",
+            "query": "MATCH (a:Person),(b:Company) RETURN a,b"
+        }));
+        let text = AletheiaMcpServer::extract_text(result);
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            val["error"]["code"].as_str(),
+            Some("INVALID_ARGUMENT"),
+            "got: {val}"
+        );
+        assert_eq!(
+            val["error"]["kind"].as_str(),
+            Some("unsupported_construct"),
+            "got: {val}"
+        );
+    }
+
+    // ===================================================================
+    // Per-query resource limits extended to the read tools (Issue #3368
+    // residue): wall-clock timeout + result-byte cap on
+    // traverse/hybrid_query/find_similar/get_node_at_time/get_edge_at_time/
+    // find_nodes_at_time, plus the `database_stats.resource_limits` counters.
+    // These drive the full `dispatch_tool` seam (auth -> #3368 wrapper ->
+    // #3353 budget), so they exercise the wrapper end to end.
+    // ===================================================================
+
+    use crate::core::property::PropertyMap;
+
+    /// Seed a star graph: one root with `leaves` outgoing `LINK` edges to
+    /// leaf nodes. Returns the root's id. A wide star makes a single-hop
+    /// traverse do real (multi-node) work, so a 1 ms wall-clock timeout races
+    /// against a computation that reliably overruns it.
+    fn seed_star(db: &Arc<AletheiaDB>, leaves: usize) -> u64 {
+        let root = db.create_node("Root", PropertyMap::new()).expect("root");
+        for _ in 0..leaves {
+            let leaf = db.create_node("Leaf", PropertyMap::new()).expect("leaf");
+            db.create_edge(root, leaf, "LINK", PropertyMap::new())
+                .expect("edge");
+        }
+        root.as_u64()
+    }
+
+    fn parse(result: CallToolResult) -> serde_json::Value {
+        serde_json::from_str(&AletheiaMcpServer::extract_text(result)).expect("json response")
+    }
+
+    /// The wrapper covers the residue read tools plus the enrolled #2907
+    /// semantic-search analysis tools, and never the self-enforcing `query`
+    /// tool.
+    #[test]
+    fn resource_limited_read_tools_membership() {
+        for t in [
+            "traverse",
+            "hybrid_query",
+            "find_similar",
+            "get_node_at_time",
+            "get_edge_at_time",
+            "find_nodes_at_time",
+            // Issue #2907 semantic-search tools enrolled for uniform coverage.
+            "semantic_path",
+            "concept_analogy",
+            "concept_mean",
+            "find_duplicate_candidates",
+            "semantic_horizon",
+            "context_aspects",
+        ] {
+            assert!(
+                super::is_resource_limited_read_tool(t),
+                "{t} must be covered"
+            );
+        }
+        // `query` self-enforces inline; it must NOT be double-wrapped.
+        assert!(!super::is_resource_limited_read_tool("query"));
+        assert!(!super::is_resource_limited_read_tool("get_node"));
+        assert!(!super::is_resource_limited_read_tool("database_stats"));
+    }
+
+    /// A pathological `traverse` under a 1 ms wall-clock timeout is terminated
+    /// with a retriable RESOURCE_EXHAUSTED whose `details.dimension` is
+    /// `wall_clock_timeout`, and the timeout counter is bumped exactly once.
+    #[test]
+    fn traverse_wall_clock_timeout_is_resource_exhausted() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        // Enough leaves that a single-hop traverse + serialization dwarfs 1 ms.
+        let root = seed_star(&db, 3_000);
+        let server = AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig {
+            default_timeout_ms: 1,
+            ..super::QueryLimitsConfig::default()
+        });
+        assert_eq!(server.limit_termination_counts().wall_clock_timeout, 0);
+
+        let result = server.dispatch_tool(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": root,
+                "edge_label": "LINK",
+                "depth": 1,
+                "limit": 10_000,
+            }),
+        );
+        assert_eq!(result.is_error, Some(true), "expected a timeout error");
+        let val = parse(result);
+        let err = &val["error"];
+        assert_eq!(err["code"].as_str(), Some("RESOURCE_EXHAUSTED"), "{val}");
+        assert_eq!(err["retriable"].as_bool(), Some(true), "{val}");
+        assert_eq!(
+            err["details"]["dimension"].as_str(),
+            Some("wall_clock_timeout"),
+            "{val}"
+        );
+        // Tool-agnostic envelope (Issue #3368 residue): NO query-tool `kind` /
+        // `language` fields (a wrapped read tool is not a query language), and
+        // no unactionable `limits.timeout_ms` remediation (these tools have no
+        // per-call override).
+        assert!(err.get("kind").is_none(), "no kind field: {val}");
+        assert!(err.get("language").is_none(), "no language field: {val}");
+        let msg = err["message"].as_str().unwrap_or_default();
+        assert!(
+            !msg.contains("limits.timeout_ms"),
+            "message must not reference limits.timeout_ms: {val}"
+        );
+        assert!(
+            msg.contains("traverse"),
+            "message must name the tool: {val}"
+        );
+        assert_eq!(server.limit_termination_counts().wall_clock_timeout, 1);
+    }
+
+    /// A `traverse` response that exceeds the result-byte cap fails closed with
+    /// a non-retriable RESOURCE_EXHAUSTED / `result_bytes` error whose
+    /// `details.consumed` exceeds the cap, bumping the byte-cap counter. Uses
+    /// the inline (unlimited-timeout) path so only the post-hoc byte cap is
+    /// under test.
+    #[test]
+    fn traverse_result_byte_cap_fails_closed() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let root = seed_star(&db, 5);
+        let server = AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig {
+            default_timeout_ms: 0,          // inline path (no timeout race)
+            default_max_response_bytes: 64, // tiny cap the response exceeds
+            max_response_bytes: 0,          // no ceiling to interfere
+            ..super::QueryLimitsConfig::default()
+        });
+        assert_eq!(server.limit_termination_counts().result_bytes, 0);
+
+        let result = server.dispatch_tool(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": root,
+                "edge_label": "LINK",
+                "depth": 1,
+                "limit": 100,
+            }),
+        );
+        assert_eq!(result.is_error, Some(true), "expected a byte-cap error");
+        let val = parse(result);
+        let err = &val["error"];
+        assert_eq!(err["code"].as_str(), Some("RESOURCE_EXHAUSTED"), "{val}");
+        assert_eq!(err["retriable"].as_bool(), Some(false), "{val}");
+        assert_eq!(
+            err["details"]["dimension"].as_str(),
+            Some("result_bytes"),
+            "{val}"
+        );
+        assert_eq!(err["details"]["limit"].as_u64(), Some(64), "{val}");
+        assert!(
+            err["details"]["consumed"].as_u64().unwrap_or(0) > 64,
+            "consumed must exceed the cap: {val}"
+        );
+        // Tool-agnostic envelope (Issue #3368 residue): NO query-tool `kind` /
+        // `language` fields, and no unactionable `limits.max_response_bytes`
+        // remediation.
+        assert!(err.get("kind").is_none(), "no kind field: {val}");
+        assert!(err.get("language").is_none(), "no language field: {val}");
+        let msg = err["message"].as_str().unwrap_or_default();
+        assert!(
+            !msg.contains("limits.max_response_bytes"),
+            "message must not reference limits.max_response_bytes: {val}"
+        );
+        assert!(
+            msg.contains("traverse"),
+            "message must name the tool: {val}"
+        );
+        assert_eq!(server.limit_termination_counts().result_bytes, 1);
+    }
+
+    /// A large-but-within-limits result is a success that self-discloses
+    /// incompleteness via `has_more`/`next_offset` (row-cap breaches are the
+    /// tool's own `limit`, NOT a resource-limit termination): no counter moves.
+    #[test]
+    fn row_limited_result_is_success_and_uncounted() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let root = seed_star(&db, 5);
+        // Default limits (generous timeout + byte cap) over the seeded db.
+        let server = AletheiaMcpServer::new(db);
+
+        let result = server.dispatch_tool(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": root,
+                "edge_label": "LINK",
+                "depth": 1,
+                "limit": 1, // fewer than the 5 leaves -> a partial page
+            }),
+        );
+        assert_ne!(result.is_error, Some(true), "row limit is not an error");
+        let val = parse(result);
+        assert_eq!(val["count"].as_u64(), Some(1), "{val}");
+        assert_eq!(val["has_more"].as_bool(), Some(true), "{val}");
+        assert!(val.get("next_offset").is_some(), "{val}");
+        let counts = server.limit_termination_counts();
+        assert_eq!(counts.wall_clock_timeout, 0);
+        assert_eq!(counts.result_bytes, 0);
+    }
+
+    /// `database_stats` surfaces the over-limit termination counters under an
+    /// additive `resource_limits` block: zero on a fresh server, and reflecting
+    /// forced terminations afterwards.
+    #[test]
+    fn database_stats_surfaces_resource_limit_counters() {
+        let server = make_server();
+
+        // Fresh: block present, all zero.
+        let val = parse(server.dispatch_tool("database_stats", serde_json::json!({})));
+        let rl = &val["resource_limits"];
+        assert_eq!(rl["timeout_terminations"].as_u64(), Some(0), "{val}");
+        assert_eq!(rl["byte_cap_terminations"].as_u64(), Some(0), "{val}");
+        assert_eq!(rl["memory_terminations"].as_u64(), Some(0), "{val}");
+        assert_eq!(rl["override_rejections"].as_u64(), Some(0), "{val}");
+
+        // Force one of each termination through the shared counters (the exact
+        // tool-agnostic builders the wrapper invokes on TimedOut / over-cap).
+        let _ = server.read_tool_timeout_error("traverse", 1);
+        let _ = server.read_tool_byte_cap_error("traverse", 4096, 64);
+        let _ = server.read_tool_memory_error("traverse", 4096, 64);
+
+        let val = parse(server.dispatch_tool("database_stats", serde_json::json!({})));
+        let rl = &val["resource_limits"];
+        assert_eq!(rl["timeout_terminations"].as_u64(), Some(1), "{val}");
+        assert_eq!(rl["byte_cap_terminations"].as_u64(), Some(1), "{val}");
+        assert_eq!(rl["memory_terminations"].as_u64(), Some(1), "{val}");
+    }
+
+    /// A `traverse` response whose estimated working memory (serialized length ×
+    /// the documented expansion factor) exceeds a configured
+    /// `default_max_query_memory_bytes` fails closed with a non-retriable
+    /// RESOURCE_EXHAUSTED / `memory_bytes` error whose `details.consumed`
+    /// exceeds the cap, bumping the memory-termination counter. Uses the inline
+    /// (unlimited-timeout) path and no byte cap so only the post-hoc memory
+    /// budget is under test.
+    #[test]
+    fn traverse_memory_budget_fails_closed() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let root = seed_star(&db, 5);
+        let server = AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig {
+            default_timeout_ms: 0,              // inline path (no timeout race)
+            default_max_response_bytes: 0,      // no byte cap to interfere
+            max_response_bytes: 0,              // no ceiling to interfere
+            default_max_query_memory_bytes: 64, // tiny memory budget
+            max_query_memory_bytes: 0,          // no ceiling to interfere
+            ..super::QueryLimitsConfig::default()
+        });
+        assert_eq!(server.limit_termination_counts().memory_bytes, 0);
+
+        let result = server.dispatch_tool(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": root,
+                "edge_label": "LINK",
+                "depth": 1,
+                "limit": 100,
+            }),
+        );
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "expected a memory-budget error"
+        );
+        let val = parse(result);
+        let err = &val["error"];
+        assert_eq!(err["code"].as_str(), Some("RESOURCE_EXHAUSTED"), "{val}");
+        assert_eq!(err["retriable"].as_bool(), Some(false), "{val}");
+        assert_eq!(
+            err["details"]["dimension"].as_str(),
+            Some("memory_bytes"),
+            "{val}"
+        );
+        assert_eq!(err["details"]["limit"].as_u64(), Some(64), "{val}");
+        assert!(
+            err["details"]["consumed"].as_u64().unwrap_or(0) > 64,
+            "estimated consumed must exceed the cap: {val}"
+        );
+        // Tool-agnostic envelope: NO query-tool `kind` / `language` fields.
+        assert!(err.get("kind").is_none(), "no kind field: {val}");
+        assert!(err.get("language").is_none(), "no language field: {val}");
+        assert!(
+            err["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("traverse"),
+            "message must name the tool: {val}"
+        );
+        assert_eq!(server.limit_termination_counts().memory_bytes, 1);
+    }
+
+    /// Default config is memory-budget-OFF: a normal `traverse` succeeds and the
+    /// memory-termination counter never moves (zero behavior change unless an
+    /// operator opts in).
+    #[test]
+    fn default_config_leaves_memory_budget_off() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let root = seed_star(&db, 5);
+        let server = AletheiaMcpServer::new(db); // default config
+
+        let result = server.dispatch_tool(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": root,
+                "edge_label": "LINK",
+                "depth": 1,
+                "limit": 100,
+            }),
+        );
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "default config must not engage the memory budget"
+        );
+        // Self-evidently a non-trivial response (the five LINK leaves are
+        // present) — so "a response that would exceed a small cap" needs no
+        // cross-reference to the sibling fails-closed test.
+        let text = AletheiaMcpServer::extract_text(result);
+        assert!(
+            text.contains("Leaf"),
+            "response must carry the traversed leaf nodes: {text}"
+        );
+        assert_eq!(server.limit_termination_counts().memory_bytes, 0);
+    }
+
+    /// Pins the ×4 expansion factor itself (the actual novel arithmetic).
+    ///
+    /// `enforce_memory_budget` is fed a synthetic success response of a *known*
+    /// text length N with a cap set STRICTLY BETWEEN N and N×4, so the budget
+    /// can only trip because of the expansion multiply: the raw serialized size
+    /// (N) is within cap, but the estimated working set (N×4) is not. The
+    /// assertions lock `consumed == N×4` and `limit == cap` to the literal
+    /// values, so this test goes red if the factor is changed to anything other
+    /// than 4 (e.g. 1 leaves the estimate within cap and no error is produced at
+    /// all; 2 or 3 likewise fail the strict-between trip; any factor still emits
+    /// a `consumed` that no longer equals 400).
+    #[test]
+    fn memory_budget_pins_expansion_factor() {
+        // N = 100 raw bytes; cap = 250 is strictly between 100 and 100×4 = 400.
+        const N: usize = 100;
+        const CAP: usize = 250;
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let server = AletheiaMcpServer::new(db);
+
+        let synthetic = CallToolResult::success(vec![Content::text("a".repeat(N))]);
+        assert_eq!(server.limit_termination_counts().memory_bytes, 0);
+
+        let result = server.enforce_memory_budget("traverse", synthetic, CAP);
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "N×4 must exceed the strictly-between cap"
+        );
+        let val = parse(result);
+        let details = &val["error"]["details"];
+        assert_eq!(details["dimension"].as_str(), Some("memory_bytes"), "{val}");
+        // The load-bearing assertion: consumed is EXACTLY N×4, locking factor 4.
+        assert_eq!(details["consumed"].as_u64(), Some(400), "{val}");
+        assert_eq!(details["limit"].as_u64(), Some(250), "{val}");
+        assert_eq!(server.limit_termination_counts().memory_bytes, 1);
+
+        // Control: the same response under a cap >= N×4 passes through untouched
+        // (proves the trip above is the multiply, not an always-on rejection).
+        let ok = server.enforce_memory_budget(
+            "traverse",
+            CallToolResult::success(vec![Content::text("a".repeat(N))]),
+            N * super::MEMORY_WORKING_SET_EXPANSION,
+        );
+        assert_ne!(ok.is_error, Some(true), "estimate == cap must not trip");
+        assert_eq!(server.limit_termination_counts().memory_bytes, 1);
+    }
+
+    /// Ordering + no-double-count invariant: when a single response would trip
+    /// BOTH the result-byte cap AND the memory budget, the byte cap runs first
+    /// (its error response short-circuits `enforce_memory_budget` via the
+    /// `is_error` guard), so the caller sees `dimension == "result_bytes"`, the
+    /// byte-cap counter increments, and the memory counter stays 0 — never
+    /// double-counted. Guards against a future reorder or guard-drop.
+    #[test]
+    fn byte_cap_precedes_memory_budget_no_double_count() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let root = seed_star(&db, 5);
+        let server = AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig {
+            default_timeout_ms: 0,              // inline path (no timeout race)
+            default_max_response_bytes: 64,     // byte cap trips (runs first)
+            max_response_bytes: 0,              // no ceiling to interfere
+            default_max_query_memory_bytes: 64, // memory budget would ALSO trip
+            max_query_memory_bytes: 0,          // no ceiling to interfere
+            ..super::QueryLimitsConfig::default()
+        });
+        assert_eq!(server.limit_termination_counts().result_bytes, 0);
+        assert_eq!(server.limit_termination_counts().memory_bytes, 0);
+
+        let result = server.dispatch_tool(
+            "traverse",
+            serde_json::json!({
+                "start_node_id": root,
+                "edge_label": "LINK",
+                "depth": 1,
+                "limit": 100,
+            }),
+        );
+        assert_eq!(result.is_error, Some(true), "both caps would trip");
+        let val = parse(result);
+        assert_eq!(
+            val["error"]["details"]["dimension"].as_str(),
+            Some("result_bytes"),
+            "byte cap runs first and wins: {val}"
+        );
+        // Exactly one termination recorded, on the byte-cap dimension only.
+        assert_eq!(server.limit_termination_counts().result_bytes, 1, "{val}");
+        assert_eq!(
+            server.limit_termination_counts().memory_bytes,
+            0,
+            "memory budget must not double-count after the byte cap fired: {val}"
+        );
+    }
+
+    /// Fast path: with limits disabled (unlimited timeout + no byte cap) the
+    /// wrapper runs the handler inline and returns a response byte-for-byte
+    /// identical to the unwrapped `dispatch_read_tool` — no behavior change.
+    #[test]
+    fn zero_timeout_fast_path_is_identical_to_unwrapped() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let root = seed_star(&db, 4);
+        let server =
+            AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig::disabled());
+        let args = serde_json::json!({
+            "start_node_id": root,
+            "edge_label": "LINK",
+            "depth": 1,
+            "limit": 100,
+        });
+
+        let wrapped =
+            AletheiaMcpServer::extract_text(server.dispatch_tool("traverse", args.clone()));
+        let bare = AletheiaMcpServer::extract_text(server.dispatch_read_tool("traverse", args));
+        assert_eq!(
+            wrapped, bare,
+            "the disabled-limits fast path must not alter the response"
+        );
+    }
+
+    // =====================================================================
+    // `query` tool: cooperative engine-lane enforcement (Issue #3368 residue)
+    //
+    // Unlike the wrapped read tools above (post-hoc, response-size-based
+    // `enforce_memory_budget`), the `query` tool threads its effective limits
+    // straight into the executor's `ResourceGuardIterator` via the `_limited`
+    // reconciled entry points, so a breach is caught mid-drain with real
+    // per-row accounting and surfaces through `map_query_error`'s
+    // `ResourceExhausted` arm (query-tool `kind`/`language` envelope, unlike
+    // the neutral read-tool envelope).
+    // =====================================================================
+
+    /// A tiny operator-configured `default_max_query_memory_bytes` trips the
+    /// engine-lane guard on the very first row of an otherwise-ordinary AQL
+    /// `query` tool call, surfacing as a non-retriable `RESOURCE_EXHAUSTED`
+    /// error whose `details.dimension == "memory_bytes"`. Uses the inline
+    /// (`timeout_ms: 0`) path so only the memory dimension is under test.
+    #[test]
+    fn query_tool_engine_memory_budget_fails_closed() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let _root = seed_star(&db, 5);
+        let server = AletheiaMcpServer::new(db).with_query_limits(super::QueryLimitsConfig {
+            default_timeout_ms: 0,             // inline path (no timeout race)
+            default_max_response_bytes: 0,     // no byte cap to interfere
+            max_response_bytes: 0,             // no ceiling to interfere
+            default_max_query_memory_bytes: 1, // tiny budget -> trips on row 1
+            max_query_memory_bytes: 0,         // no ceiling to interfere
+            ..super::QueryLimitsConfig::default()
+        });
+
+        let result = server.handle_query(serde_json::json!({
+            "language": "aql",
+            "query": "MATCH (n:Leaf) RETURN n",
+        }));
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "expected an engine-lane memory-budget error"
+        );
+        let val = parse(result);
+        let err = &val["error"];
+        assert_eq!(err["kind"].as_str(), Some("runtime_error"), "{val}");
+        assert_eq!(err["code"].as_str(), Some("RESOURCE_EXHAUSTED"), "{val}");
+        assert_eq!(err["retriable"].as_bool(), Some(false), "{val}");
+        assert_eq!(
+            err["details"]["dimension"].as_str(),
+            Some("memory_bytes"),
+            "{val}"
+        );
+        assert_eq!(err["details"]["limit"].as_u64(), Some(1), "{val}");
+        assert!(
+            err["details"]["consumed"].as_u64().unwrap_or(0) > 1,
+            "consumed must exceed the 1-byte cap: {val}"
+        );
+        assert_eq!(err["language"].as_str(), Some("aql"), "{val}");
+    }
+
+    /// Default config leaves the engine-lane memory budget off (`0` =
+    /// unlimited): an ordinary `query` tool call over the same seeded graph
+    /// succeeds and returns real rows, with zero behavior change from before
+    /// this feature landed.
+    #[test]
+    fn query_tool_default_config_memory_budget_off_returns_normal_results() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        let _root = seed_star(&db, 5);
+        let server = AletheiaMcpServer::new(db); // default config
+
+        let result = server.handle_query(serde_json::json!({
+            "language": "aql",
+            "query": "MATCH (n:Leaf) RETURN n",
+        }));
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "default config must not engage the engine memory budget"
+        );
+        let val = parse(result);
+        assert_eq!(val["row_count"].as_u64(), Some(5), "{val}");
+        assert_eq!(val["truncated"].as_bool(), Some(false), "{val}");
+    }
+
+    // =====================================================================
+    // In-query `USE / IN NAMESPACE` clause through the MCP/HTTP `query` tool
+    // (Issue #3349 follow-up). The tool reconciles the `namespace` request
+    // parameter (programmatic scope `P`) with an in-statement clause (`C`):
+    //   (None,   None)   -> Single("default")        (fail-closed default)
+    //   (None,   Some C) -> C                         (honor the clause)
+    //   (Some P, None)   -> P                         (unchanged)
+    //   (Some P, Some C) -> P iff semantically equal to C, else INVALID_ARGUMENT
+    // Never widen past `P`. Covered for BOTH Cypher and AQL, incl. EXPLAIN /
+    // PROFILE, with an explicit cross-namespace leak sweep.
+    // =====================================================================
+    mod namespace_query_reconcile_tests {
+        use super::*;
+
+        /// Seed one Person per namespace: `Legacy` (default), `Alice`
+        /// (agent:a), `Bob` (agent:b).
+        fn seed(server: &AletheiaMcpServer) {
+            use crate::core::property::PropertyMapBuilder;
+            let mk = |name: &str| PropertyMapBuilder::new().insert("name", name).build();
+            server.db.create_node("Person", mk("Legacy")).unwrap();
+            server
+                .db
+                .create_node_in_namespace("Person", mk("Alice"), "agent:a")
+                .unwrap();
+            server
+                .db
+                .create_node_in_namespace("Person", mk("Bob"), "agent:b")
+                .unwrap();
+        }
+
+        fn run(server: &AletheiaMcpServer, args: serde_json::Value) -> serde_json::Value {
+            let text = AletheiaMcpServer::extract_text(server.handle_query(args));
+            serde_json::from_str(&text).unwrap()
+        }
+
+        /// Sorted `name` properties across all returned entity rows.
+        fn names(val: &serde_json::Value) -> Vec<String> {
+            let mut out: Vec<String> = val["rows"]
+                .as_array()
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|r| {
+                            r["entity"]["properties"]["name"]
+                                .as_str()
+                                .map(str::to_string)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.sort();
+            out
+        }
+
+        fn assert_conflict(val: &serde_json::Value) {
+            assert_eq!(
+                val["error"]["code"].as_str(),
+                Some("INVALID_ARGUMENT"),
+                "a scope conflict is INVALID_ARGUMENT: {val}"
+            );
+            assert_eq!(
+                val["error"]["retriable"].as_bool(),
+                Some(false),
+                "a scope conflict is never retriable: {val}"
+            );
+            assert_eq!(
+                val["error"]["kind"].as_str(),
+                Some("invalid_request"),
+                "the clause IS supported now, so the kind is invalid_request, \
+                 not unsupported_construct: {val}"
+            );
+            assert!(
+                val.get("rows").is_none(),
+                "a refused query returns no rows: {val}"
+            );
+            // The error message must NOT leak namespace contents.
+            let msg = val["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                !msg.contains("agent:a") && !msg.contains("agent:b"),
+                "the conflict message must not disclose namespace names: {val}"
+            );
+        }
+
+        // ---- (1) no param + `USE NAMESPACE foo` -> only ns-foo data --------
+        #[test]
+        fn aql_omitted_param_honors_in_query_clause() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                }),
+            );
+            assert!(val.get("error").is_none(), "clause must be honored: {val}");
+            assert_eq!(names(&val), vec!["Alice".to_string()]);
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_omitted_param_honors_in_query_clause() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                }),
+            );
+            assert!(val.get("error").is_none(), "clause must be honored: {val}");
+            assert_eq!(names(&val), vec!["Alice".to_string()]);
+        }
+
+        // ---- (2) no param + no clause -> only default ----------------------
+        #[test]
+        fn aql_omitted_param_no_clause_is_default_only() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({ "language": "aql", "query": "MATCH (n:Person) RETURN n" }),
+            );
+            assert_eq!(names(&val), vec!["Legacy".to_string()]);
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_omitted_param_no_clause_is_default_only() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({ "language": "cypher", "query": "MATCH (n:Person) RETURN n" }),
+            );
+            assert_eq!(names(&val), vec!["Legacy".to_string()]);
+        }
+
+        // ---- (3) param=foo + no clause -> foo ------------------------------
+        #[test]
+        fn aql_param_only_scopes() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            assert_eq!(names(&val), vec!["Alice".to_string()]);
+        }
+
+        // ---- (4) param=foo + identical clause -> allow, foo ----------------
+        #[test]
+        fn aql_param_plus_identical_clause_allowed() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            assert!(
+                val.get("error").is_none(),
+                "identical scope is allowed: {val}"
+            );
+            assert_eq!(names(&val), vec!["Alice".to_string()]);
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_param_plus_identical_clause_allowed() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            assert!(
+                val.get("error").is_none(),
+                "identical scope is allowed: {val}"
+            );
+            assert_eq!(names(&val), vec!["Alice".to_string()]);
+        }
+
+        // ---- (5) param=foo + disjoint clause -> refuse ---------------------
+        #[test]
+        fn aql_param_plus_disjoint_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE NAMESPACE 'agent:b' MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_param_plus_disjoint_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "USE NAMESPACE 'agent:b' MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        // ---- (6) param=foo + wider `USE ALL NAMESPACES` -> refuse ----------
+        #[test]
+        fn aql_param_plus_wider_all_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE ALL NAMESPACES MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_param_plus_wider_all_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "USE ALL NAMESPACES MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        // ---- (7) param=ALL + narrower clause -> refuse (safest shape) ------
+        #[test]
+        fn aql_param_all_plus_narrower_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                    "namespace": "all",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_param_all_plus_narrower_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                    "namespace": "all",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        // ---- (8) no param + `USE ALL NAMESPACES` -> All, >= 2 namespaces ---
+        #[test]
+        fn aql_omitted_param_all_clause_spans_all_namespaces() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE ALL NAMESPACES MATCH (n:Person) RETURN n",
+                }),
+            );
+            assert!(val.get("error").is_none(), "ALL clause is allowed: {val}");
+            assert_eq!(
+                names(&val),
+                vec!["Alice".to_string(), "Bob".to_string(), "Legacy".to_string()],
+            );
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_omitted_param_all_clause_spans_all_namespaces() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "USE ALL NAMESPACES MATCH (n:Person) RETURN n",
+                }),
+            );
+            assert!(val.get("error").is_none(), "ALL clause is allowed: {val}");
+            assert_eq!(
+                names(&val),
+                vec!["Alice".to_string(), "Bob".to_string(), "Legacy".to_string()],
+            );
+        }
+
+        // ---- (9) List order-insensitive; strict-subset refused ------------
+        #[test]
+        fn aql_list_param_vs_clause_order_insensitive_allowed() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE NAMESPACE 'agent:b', 'agent:a' MATCH (n:Person) RETURN n",
+                    "namespace": ["agent:a", "agent:b"],
+                }),
+            );
+            assert!(
+                val.get("error").is_none(),
+                "same set, any order -> allow: {val}"
+            );
+            assert_eq!(names(&val), vec!["Alice".to_string(), "Bob".to_string()]);
+        }
+
+        #[test]
+        fn aql_list_param_strict_subset_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE NAMESPACE 'agent:a', 'agent:b' MATCH (n:Person) RETURN n",
+                    "namespace": ["agent:a"],
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        // ---- (10) normalization: case is NOT a bypass ---------------------
+        #[test]
+        fn aql_case_differing_names_are_not_equal_refused() {
+            let server = make_server();
+            seed(&server);
+            // `Agent:A` is a distinct (valid, case-sensitive) namespace name.
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE NAMESPACE 'Agent:A' MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        // ---- (11) EXPLAIN (cypher only) -----------------------------------
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_explain_omitted_param_honors_clause_no_leak() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "EXPLAIN USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                }),
+            );
+            assert!(
+                val.get("error").is_none(),
+                "scoped EXPLAIN must plan: {val}"
+            );
+            let rows = val["rows"].as_array().expect("plan rows");
+            assert_eq!(rows.len(), 1, "EXPLAIN yields one plan row: {val}");
+            let plan = rows[0]["plan"].as_str().unwrap_or_default();
+            // The plan text must not surface other namespaces' data.
+            assert!(
+                !plan.contains("Bob") && !plan.contains("Legacy"),
+                "EXPLAIN must not surface cross-namespace data: {plan}"
+            );
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_explain_param_plus_conflicting_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "EXPLAIN USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                    "namespace": "agent:b",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        // ---- (12) PROFILE (cypher only): scoped counters, no leak ---------
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_profile_omitted_param_honors_clause_scoped_counts() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "PROFILE USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                }),
+            );
+            assert!(val.get("error").is_none(), "scoped PROFILE must run: {val}");
+            let plan = val["rows"][0]["plan"].as_str().unwrap_or_default();
+            assert!(
+                plan.contains("actual rows: 1"),
+                "scoped PROFILE reports the scoped count (1): {plan}"
+            );
+            // The unscoped total across the 3 seeded namespaces is 3; a scoped
+            // PROFILE must never leak that cardinality side channel.
+            assert!(
+                !plan.contains("actual rows: 3"),
+                "scoped PROFILE must not leak the unscoped total: {plan}"
+            );
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_profile_param_plus_conflicting_clause_refused() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "PROFILE USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                    "namespace": "agent:b",
+                }),
+            );
+            assert_conflict(&val);
+        }
+
+        // ---- (13) multi-pattern omitted scope stays rejected --------------
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_multi_pattern_omitted_scope_still_rejected() {
+            let server = make_server();
+            seed(&server);
+            let val = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "MATCH (a:Person),(b:Person) RETURN a,b",
+                }),
+            );
+            // Default-only (fail-closed) is restricting; the multi-variable
+            // evaluator cannot thread it -> unsupported_construct.
+            assert_eq!(
+                val["error"]["code"].as_str(),
+                Some("INVALID_ARGUMENT"),
+                "{val}"
+            );
+            assert_eq!(
+                val["error"]["kind"].as_str(),
+                Some("unsupported_construct"),
+                "{val}"
+            );
+        }
+
+        // ---- (14) HTTP `/query` shares handle_query (dispatch parity) -----
+        #[test]
+        fn http_dispatch_shares_reconcile_outcome_aql() {
+            let server = make_server();
+            seed(&server);
+            let args = serde_json::json!({
+                "language": "aql",
+                "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+            });
+            let via_handle = AletheiaMcpServer::extract_text(server.handle_query(args.clone()));
+            let via_dispatch = server.dispatch_tool_json("query", args);
+            assert_eq!(
+                via_handle, via_dispatch,
+                "the autumn-server /query dispatch path must be byte-identical to handle_query"
+            );
+            let val: serde_json::Value = serde_json::from_str(&via_dispatch).unwrap();
+            assert_eq!(names(&val), vec!["Alice".to_string()]);
+        }
+
+        // ---- (15) cross-namespace leak sweep: scope A never returns B -----
+        #[test]
+        fn aql_scope_a_never_leaks_b_or_default() {
+            let server = make_server();
+            seed(&server);
+            // Every composition path that resolves to agent:a.
+            let via_clause = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                }),
+            );
+            let via_param = run(
+                &server,
+                serde_json::json!({
+                    "language": "aql",
+                    "query": "MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            for val in [&via_clause, &via_param] {
+                assert_eq!(names(val), vec!["Alice".to_string()], "{val}");
+                let all = serde_json::to_string(val).unwrap();
+                assert!(
+                    !all.contains("Bob") && !all.contains("Legacy"),
+                    "leak: {val}"
+                );
+            }
+        }
+
+        #[cfg(feature = "cypher")]
+        #[test]
+        fn cypher_scope_a_never_leaks_b_or_default() {
+            let server = make_server();
+            seed(&server);
+            let via_clause = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n",
+                }),
+            );
+            let via_param = run(
+                &server,
+                serde_json::json!({
+                    "language": "cypher",
+                    "query": "MATCH (n:Person) RETURN n",
+                    "namespace": "agent:a",
+                }),
+            );
+            for val in [&via_clause, &via_param] {
+                assert_eq!(names(val), vec!["Alice".to_string()], "{val}");
+                let all = serde_json::to_string(val).unwrap();
+                assert!(
+                    !all.contains("Bob") && !all.contains("Legacy"),
+                    "leak: {val}"
+                );
+            }
+            // EXPLAIN + PROFILE scoped to agent:a must not surface B/Legacy.
+            for directive in ["EXPLAIN", "PROFILE"] {
+                let val = run(
+                    &server,
+                    serde_json::json!({
+                        "language": "cypher",
+                        "query": format!(
+                            "{directive} USE NAMESPACE 'agent:a' MATCH (n:Person) RETURN n"
+                        ),
+                    }),
+                );
+                let plan = val["rows"][0]["plan"].as_str().unwrap_or_default();
+                assert!(
+                    !plan.contains("Bob") && !plan.contains("Legacy"),
+                    "{directive} leaked cross-namespace data: {plan}"
+                );
+            }
+        }
     }
 }

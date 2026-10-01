@@ -1,4 +1,5 @@
 use aletheiadb::core::property::PropertyMapBuilder;
+use aletheiadb::index::adjacency_maintenance::AdjacencyMaintenanceConfig;
 use aletheiadb::storage::current::CurrentStorage;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -21,7 +22,8 @@ fn bench_get_all_node_ids(c: &mut Criterion) {
     let mut group = c.benchmark_group("storage_current");
 
     // Setup storage with 10k nodes
-    let storage = CurrentStorage::new();
+    let storage =
+        CurrentStorage::with_adjacency_maintenance(AdjacencyMaintenanceConfig::disabled());
     create_large_graph(&storage, 10_000);
 
     group.bench_function("get_all_node_ids_10k", |b| {

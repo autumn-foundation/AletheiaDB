@@ -1,0 +1,10 @@
+# Baseline retrieval: vector-only k-NN with graph/temporal/provenance OFF.
+# This is the pgvector-equivalent reference the full config is compared against.
+# Diff against full.toml: the three feature toggles below flip off.
+k = 5
+hybrid = false
+temporal_anchoring = false
+provenance_filter = false
+max_hops = 2
+trusted_sources = ["curated"]
+seed = 42

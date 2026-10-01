@@ -147,6 +147,18 @@ pub struct GetNodeRequest {
                        {type, dim, elided:true} descriptor (default: false)"
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace scope. Omitted = the `default` namespace only \
+                       (isolated-by-default); for a pre-namespace database (all data is `default`) \
+                       that still returns all of it. Pass a single namespace name (string) to scope \
+                       to it, an array of names for a union (the read sees any of them), or the \
+                       string \"all\" for every namespace (no filter). An out-of-scope entity is \
+                       reported NOT_FOUND (indistinguishable from missing). An unknown namespace is \
+                       NOT_FOUND (details.namespace); an empty array is INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to create a new node.
@@ -188,6 +200,17 @@ pub struct CreateNodeRequest {
                        Omit for no lineage. Query it later via lineage_upstream/lineage_downstream."
     )]
     pub derived_from: Option<Vec<LineageRefRequest>>,
+
+    /// Optional namespace to create this node in (Issue #3349).
+    #[schemars(
+        description = "Optional namespace (agent/session scope) to create this node in, e.g. \
+                       'agent:planner'. Omit to use the default namespace ('default'), which is \
+                       byte-identical to pre-namespace behavior. An unknown namespace is \
+                       auto-registered. The namespace is fixed at creation and immutable \
+                       thereafter; it is surfaced back as the first-class `namespace` field on \
+                       reads and never as a user property. Charset [A-Za-z0-9._:/-], max 128 bytes."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to update an existing node's properties.
@@ -228,6 +251,16 @@ pub struct UpdateNodeRequest {
                        before any commit. Omit for no lineage."
     )]
     pub derived_from: Option<Vec<LineageRefRequest>>,
+
+    /// Optional namespace (Issue #3349). A namespace is immutable after
+    /// creation, so supplying one here is rejected.
+    #[schemars(
+        description = "A namespace is fixed at creation and immutable, so supplying one on an \
+                       update is rejected with INVALID_ARGUMENT rather than silently ignored. \
+                       Omit it; the node keeps its original namespace, echoed back as the \
+                       first-class `namespace` field."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to delete a node.
@@ -262,6 +295,15 @@ pub struct DeleteNodeRequest {
                        Transaction time is always system-assigned and cannot be set."
     )]
     pub valid_time: Option<String>,
+
+    /// Optional namespace (Issue #3349). A namespace is immutable, so supplying
+    /// one here is rejected.
+    #[schemars(
+        description = "A namespace is fixed at creation and immutable, so supplying one on a \
+                       delete is rejected with INVALID_ARGUMENT rather than silently ignored. \
+                       Omit it."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to retract a node: close its valid-time interval without
@@ -365,6 +407,16 @@ pub struct ListNodesRequest {
                        {type, dim, elided:true} descriptor (default: false)"
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       behavior. When set, only nodes whose namespace is in scope are listed. An \
+                       unknown namespace is NOT_FOUND (details.namespace); an empty array is \
+                       INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to count nodes.
@@ -393,6 +445,15 @@ pub struct GetEdgeRequest {
                        {type, dim, elided:true} descriptor (default: false)"
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       behavior. Out of scope, the edge is reported NOT_FOUND. An unknown namespace \
+                       is NOT_FOUND (details.namespace); an empty array is INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to create a new edge between nodes.
@@ -441,6 +502,17 @@ pub struct CreateEdgeRequest {
                        write with a structured error before any commit. Omit for no lineage."
     )]
     pub derived_from: Option<Vec<LineageRefRequest>>,
+
+    /// Optional namespace to create this edge in (Issue #3349).
+    #[schemars(
+        description = "Optional namespace (agent/session scope) to create this edge in, e.g. \
+                       'agent:planner'. Omit to use the default namespace ('default'). An unknown \
+                       namespace is auto-registered. A cross-namespace edge (endpoints in other \
+                       namespaces) is legal; the edge's own namespace governs whether a scoped \
+                       traversal crosses it. Immutable after creation; echoed back as the \
+                       first-class `namespace` field. Charset [A-Za-z0-9._:/-], max 128 bytes."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to update an existing edge's properties.
@@ -481,6 +553,16 @@ pub struct UpdateEdgeRequest {
                        write before any commit. Omit for no lineage."
     )]
     pub derived_from: Option<Vec<LineageRefRequest>>,
+
+    /// Optional namespace (Issue #3349). A namespace is immutable, so supplying
+    /// one here is rejected.
+    #[schemars(
+        description = "A namespace is fixed at creation and immutable, so supplying one on an \
+                       update is rejected with INVALID_ARGUMENT rather than silently ignored. \
+                       Omit it; the edge keeps its original namespace, echoed back as the \
+                       first-class `namespace` field."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to delete an edge.
@@ -499,6 +581,15 @@ pub struct DeleteEdgeRequest {
                        is always system-assigned and cannot be set."
     )]
     pub valid_time: Option<String>,
+
+    /// Optional namespace (Issue #3349). A namespace is immutable, so supplying
+    /// one here is rejected.
+    #[schemars(
+        description = "A namespace is fixed at creation and immutable, so supplying one on a \
+                       delete is rejected with INVALID_ARGUMENT rather than silently ignored. \
+                       Omit it."
+    )]
+    pub namespace: Option<String>,
 }
 
 /// Request to list edges with optional filtering.
@@ -523,6 +614,16 @@ pub struct ListEdgesRequest {
                        {type, dim, elided:true} descriptor (default: false)"
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). NOTE: list_edges does not enumerate \
+                       edges by namespace in v1; supplying a scope other than \"all\" returns a \
+                       structured INVALID_ARGUMENT rather than a silently-unscoped result. Use the \
+                       scoped adjacency/traversal reads instead."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to count edges.
@@ -651,6 +752,24 @@ pub struct TraverseRequest {
         description = "Optional transaction time (ISO 8601 or microseconds since epoch). Supplying this or as_of_valid_time switches to a bi-temporal, point-in-time traversal. If omitted while as_of_valid_time is set, defaults to the current time."
     )]
     pub as_of_transaction_time: Option<String>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       traversal. With an explicit NON-DEFAULT scope, an edge is crossed only if \
+                       BOTH the edge's own namespace AND the target node's namespace are in scope, \
+                       so a non-default scope is boundary-enforced and can never leak across the \
+                       boundary. CAVEAT: an omitted scope or an explicit 'default' scope only \
+                       filters non-default nodes out of the RESULT — the underlying traversal still \
+                       routes THROUGH non-default (hidden) nodes to reach default ones, so \
+                       reachability can be inferred through data that is never returned. Use an \
+                       explicit non-default scope when you need boundary-enforced traversal. An \
+                       unknown namespace is NOT_FOUND (details.namespace); an empty array is \
+                       INVALID_ARGUMENT. In v1 a scoped traverse does not compose with the #3360 \
+                       cursor / #3353 token-budget shaping (offset paging still applies)."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -697,6 +816,184 @@ pub struct FindSimilarRequest {
                        is always returned in full regardless of this flag."
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       search. When set, the k-NN search is filter-complete: it over-fetches until \
+                       it has k genuinely in-scope results (never k-then-drop), with scores and \
+                       ordering unchanged. An unknown namespace is NOT_FOUND (details.namespace); \
+                       an empty array is INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
+}
+
+// ============================================================================
+// Embedding Generation & Text Semantic Search (Issue #2906)
+// ============================================================================
+
+/// Request to embed a single text string into a dense vector (`embed_query`).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct EmbedQueryRequest {
+    /// The text to embed into a single dense vector.
+    #[schemars(description = "The text to embed into a single dense embedding vector.")]
+    pub text: String,
+
+    /// Optional model identifier (reserved; the server uses its configured model).
+    #[schemars(
+        description = "Optional model identifier. Reserved for forward compatibility: v1 always \
+                       uses the model the server was configured with, so this field is currently \
+                       advisory. Omit it."
+    )]
+    pub model: Option<String>,
+}
+
+/// Request to embed multiple texts (chunk-expanded) into dense vectors
+/// (`embed_text`).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct EmbedTextRequest {
+    /// The texts to embed. Each entry is chunk-expanded into one or more
+    /// per-chunk embeddings.
+    #[schemars(
+        description = "The texts to embed. Each entry is split into contiguous character-window \
+                       chunks and every chunk is embedded independently, so a long document yields \
+                       MULTIPLE per-chunk embeddings (never truncated to one). Each embedding is \
+                       aligned to its source chunk text and metadata via the model's own chunk \
+                       output (never positionally zipped); the metadata carries the originating \
+                       source_index and chunk_index."
+    )]
+    pub texts: Vec<String>,
+
+    /// Optional model identifier (reserved; the server uses its configured model).
+    #[schemars(
+        description = "Optional model identifier. Reserved for forward compatibility: v1 uses the \
+                       server-configured model (advisory). Omit it."
+    )]
+    pub model: Option<String>,
+
+    /// Optional cap on the number of returned chunk embeddings.
+    #[schemars(
+        description = "Optional hard cap on the number of returned per-chunk embeddings across all \
+                       inputs. Clamped to the server maximum. When the cap trims the chunk \
+                       expansion the response sets `truncated: true`. A value of 0 is rejected as \
+                       INVALID_ARGUMENT."
+    )]
+    pub max_chunks: Option<usize>,
+}
+
+/// Request to embed a natural-language query and run vector similarity search
+/// (`semantic_search`).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct SemanticSearchRequest {
+    /// The property name that holds the indexed vector embedding.
+    #[schemars(
+        description = "The property name that holds the indexed vector embedding to search \
+                       against (e.g., 'embedding'). A vector index must already be enabled for it."
+    )]
+    pub property_name: String,
+
+    /// The natural-language query text to embed and search with.
+    #[schemars(description = "The natural-language query text to embed and search with.")]
+    pub query_text: String,
+
+    /// Number of similar results to return (default 10).
+    #[schemars(description = "Number of similar results to return (default: 10).")]
+    pub k: Option<usize>,
+
+    /// Number of results to skip (offset pagination).
+    #[schemars(
+        description = "Number of results to skip (offset pagination). Pass the `next_offset` from \
+                       a prior response to fetch the next page."
+    )]
+    pub offset: Option<usize>,
+
+    /// Return full embedding arrays instead of the elided descriptor.
+    #[schemars(
+        description = "When true, return full embedding float arrays instead of the elided \
+                       {type, dim, elided:true} descriptor (default: false). Never affects the \
+                       similarity score."
+    )]
+    pub include_vectors: Option<bool>,
+
+    /// Optional model identifier (reserved; the server uses its configured model).
+    #[schemars(
+        description = "Optional model identifier. Reserved for forward compatibility: v1 uses the \
+                       server-configured model (advisory). Omit it."
+    )]
+    pub model: Option<String>,
+}
+
+/// Request to create a node whose embedding is generated from text
+/// (`create_node_with_embedding`).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct CreateNodeWithEmbeddingRequest {
+    /// The label/type of the node (e.g., "Document").
+    #[schemars(description = "The label/type of the node (e.g., 'Document').")]
+    pub label: String,
+
+    /// The text to embed and store as the node's embedding property.
+    #[schemars(description = "The text to embed and store as the node's embedding property.")]
+    pub text: String,
+
+    /// The property name under which to store the generated embedding vector.
+    #[schemars(
+        description = "The property name under which to store the generated embedding vector \
+                       (e.g., 'embedding'). Compatible with enable_vector_index / find_similar / \
+                       semantic_search."
+    )]
+    pub embedding_property: String,
+
+    /// Optional additional properties to set on the node.
+    #[schemars(
+        description = "Optional additional non-embedding properties to set on the node as \
+                       key-value pairs."
+    )]
+    pub properties: Option<HashMap<String, serde_json::Value>>,
+
+    /// Optional valid time: when this fact became true in the real world.
+    #[schemars(
+        description = "Optional valid time (ISO 8601 / RFC 3339 or microseconds since epoch). Omit \
+                       to default to the transaction time. Transaction time is always \
+                       system-assigned."
+    )]
+    pub valid_time: Option<String>,
+
+    /// Optional write-time provenance bundle.
+    #[schemars(
+        description = "Optional write-time provenance bundle (source, confidence, note, \
+                       correlation_id)."
+    )]
+    pub provenance: Option<ProvenanceRequest>,
+}
+
+/// Request to (re)generate a node's embedding property from text
+/// (`update_node_embedding`).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct UpdateNodeEmbeddingRequest {
+    /// The unique identifier of the node to update.
+    #[schemars(description = "The unique identifier of the node to update.")]
+    pub node_id: u64,
+
+    /// The text to embed and store as the node's embedding property.
+    #[schemars(description = "The text to embed and store as the node's embedding property.")]
+    pub text: String,
+
+    /// The property name under which to store the regenerated embedding vector.
+    #[schemars(
+        description = "The property name under which to store the regenerated embedding vector. \
+                       All OTHER existing properties of the node are preserved (update_node \
+                       otherwise replaces every property)."
+    )]
+    pub embedding_property: String,
+
+    /// Optional valid time: when this update became true in the real world.
+    #[schemars(
+        description = "Optional valid time (ISO 8601 / RFC 3339 or microseconds since epoch). Omit \
+                       to default to the transaction time. Transaction time is always \
+                       system-assigned."
+    )]
+    pub valid_time: Option<String>,
 }
 
 /// Request to enable vector indexing on a property.
@@ -766,6 +1063,17 @@ pub struct GetNodeAtTimeRequest {
         description = "Transaction time as ISO 8601 timestamp (when recorded). If not provided, uses current time."
     )]
     pub transaction_time: Option<String>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       behavior. The point-in-time reconstruction runs first, then the namespace \
+                       filter (immutable membership). Out of scope ⇒ NOT_FOUND. An unknown \
+                       namespace is NOT_FOUND (details.namespace); an empty array is \
+                       INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to get an edge at a specific point in time.
@@ -787,6 +1095,17 @@ pub struct GetEdgeAtTimeRequest {
         description = "Transaction time as ISO 8601 timestamp (when recorded). If not provided, uses current time."
     )]
     pub transaction_time: Option<String>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       behavior. The point-in-time reconstruction runs first, then the namespace \
+                       filter (immutable membership). Out of scope ⇒ NOT_FOUND. An unknown \
+                       namespace is NOT_FOUND (details.namespace); an empty array is \
+                       INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to find nodes by label (and optional exact property match) as of
@@ -844,6 +1163,16 @@ pub struct FindNodesAtTimeRequest {
                        {type, dim, elided:true} descriptor (default: false)"
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Omit for the current, unscoped \
+                       behavior. Each candidate is reconstructed at (valid_time, transaction_time) \
+                       first, then filtered by its immutable namespace. An unknown namespace is \
+                       NOT_FOUND (details.namespace); an empty array is INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 /// Request to list graph-wide changes (node & edge versions) committed within a
@@ -889,6 +1218,74 @@ pub struct ListChangesRequest {
     pub cursor: Option<String>,
 }
 
+/// Request to long-poll for committed changes (the push changefeed's blocking
+/// surface, Issue #3375). Read-only; the streaming counterpart to `list_changes`.
+///
+/// A single call subscribes to the push feed, optionally catches up from a prior
+/// `from_token` via `list_changes`, and otherwise blocks up to `timeout_ms` for
+/// the next matching commit. It is **stateless** across calls: resume by passing
+/// the previous response's `resume_token` back as `from_token`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct AwaitChangesRequest {
+    /// Restrict to node changes whose label is one of these (exact match).
+    #[schemars(
+        description = "Optional list of node labels to match (exact). If set, only matching node \
+                       changes are delivered; combine with edge_types to receive both kinds."
+    )]
+    pub node_labels: Option<Vec<String>>,
+
+    /// Restrict to edge changes whose type is one of these (exact match).
+    #[schemars(
+        description = "Optional list of edge types to match (exact). If set, only matching edge \
+                       changes are delivered; combine with node_labels to receive both kinds."
+    )]
+    pub edge_types: Option<Vec<String>>,
+
+    /// Restrict to these change types: "created" / "modified" / "deleted".
+    #[schemars(
+        description = "Optional list of change types to match: \"created\", \"modified\", \
+                       \"deleted\". Independent AND with the label/type filters."
+    )]
+    pub change_types: Option<Vec<String>>,
+
+    /// Opaque resume token from a prior response's `resume_token`. When set, the
+    /// call first catches up via `list_changes` and returns immediately if any
+    /// changes are already available.
+    #[schemars(
+        description = "Opaque resume token from a prior response's resume_token; catch up from \
+                       exactly after it. Omit to block for the next new change."
+    )]
+    pub from_token: Option<String>,
+
+    /// Maximum time to block for a change, in milliseconds (default 25000, hard
+    /// cap 60000).
+    #[schemars(
+        description = "Maximum time to block for a change, in milliseconds (default 25000, capped \
+                       at 60000). A call that times out returns an empty changes array with \
+                       timed_out:true and a resume_token to poll again."
+    )]
+    pub timeout_ms: Option<u64>,
+
+    /// Maximum number of changes to return in the catch-up path (default 100,
+    /// max 10000).
+    #[schemars(
+        description = "Maximum number of changes to return in the catch-up path (default 100, max \
+                       10000)."
+    )]
+    pub limit: Option<usize>,
+
+    /// Optional namespace scope (Issue #3349): a single namespace name, an array
+    /// of names (union), or "all". Omit to receive changes from the default
+    /// namespace only (isolated-by-default); use "all" for every namespace.
+    #[schemars(
+        description = "Optional namespace scope: a single namespace name, an array of names \
+                       (union), or \"all\". Omit for the default namespace only; \"all\" for every \
+                       namespace. A subscription scoped to a namespace never receives another \
+                       namespace's changes."
+    )]
+    pub namespace: Option<serde_json::Value>,
+}
+
 /// Request to get a node at a specific valid time (independent dimension query).
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct GetNodeAtValidTimeRequest {
@@ -923,6 +1320,47 @@ pub struct GetNodeHistoryRequest {
     /// The unique identifier of the node.
     #[schemars(description = "The unique identifier of the node")]
     pub node_id: u64,
+}
+
+/// Request for a belief-revision audit of an entity (Issue #3362).
+///
+/// Reader-class. Scopes an entity's stored bi-temporal history into a
+/// classified revision sequence (correction / world-change / retraction /
+/// reaffirmation) plus its confidence trajectory.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct GetBeliefRevisionsRequest {
+    /// The entity kind to audit: `node` or `edge`.
+    #[schemars(description = "Entity kind to audit: 'node' or 'edge'")]
+    pub entity_kind: String,
+
+    /// The unique identifier of the node or edge to audit.
+    #[schemars(description = "The unique identifier of the node or edge to audit")]
+    pub id: u64,
+
+    /// Optionally scope the audit to a single property key. Only revisions that
+    /// touched this key are emitted; an unknown key is an `INVALID_ARGUMENT`.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional property key to scope the audit to; only revisions touching \
+                       this key are returned. A key the entity never had is an INVALID_ARGUMENT."
+    )]
+    pub property_key: Option<String>,
+
+    /// Optionally time-travel the audit itself: revisions recorded after this
+    /// transaction time are excluded (ISO 8601 / RFC 3339 or microseconds since
+    /// epoch).
+    #[serde(default)]
+    #[schemars(
+        description = "Optional transaction-time coordinate (ISO 8601 / RFC 3339 or microseconds \
+                       since epoch); revisions recorded after it are excluded"
+    )]
+    pub as_of_transaction_time: Option<String>,
+
+    /// Maximum number of revisions to return (default 100, max 1000). A `limit`
+    /// of 0 is an `INVALID_ARGUMENT`.
+    #[serde(default)]
+    #[schemars(description = "Maximum revisions to return (default 100, max 1000); 0 is rejected")]
+    pub limit: Option<usize>,
 }
 
 /// Request to produce a signed audit export of an entity's history (Issue #3358).
@@ -1074,6 +1512,18 @@ pub struct HybridQueryRequest {
                        is always returned in full regardless of this flag."
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). Results are filtered to the scope \
+                       and vector ranking is filter-complete (over-fetched so the returned top-k \
+                       are genuinely in-scope; scores/order preserved, results never dropped or \
+                       reordered to meet the scope). Omitted ⇒ the \"default\" namespace only \
+                       (isolated-by-default); unknown ns ⇒ NOT_FOUND; empty array ⇒ \
+                       INVALID_ARGUMENT."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -1121,6 +1571,19 @@ pub struct QueryRequest {
                        an unbounded ceiling)."
     )]
     pub limits: Option<super::limits::QueryLimitsOverride>,
+
+    /// Optional namespace read scope (Issue #3349).
+    #[schemars(
+        description = "Optional namespace read scope: a single namespace name (string), an array \
+                       of names (union), or \"all\" (no filter). The query executes scoped — \
+                       produced entities are filtered to the scope and traversal never crosses an \
+                       out-of-scope edge/node. Omitted ⇒ the \"default\" namespace only \
+                       (isolated-by-default). Unknown namespace ⇒ NOT_FOUND; empty array ⇒ \
+                       INVALID_ARGUMENT. A restricting scope on a multi-variable-binding or \
+                       mutating statement returns a structured unsupported_construct error \
+                       (never silently unscoped)."
+    )]
+    pub namespace: Option<serde_json::Value>,
 }
 
 // ============================================================================
@@ -1201,6 +1664,98 @@ pub struct TemporalExtentRequest {
 /// single call.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct DatabaseStatsRequest {}
+
+// ============================================================================
+// Namespace management (Issue #3349, PR3b)
+// ============================================================================
+
+/// Request to create (register) an agent-scoped namespace.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct CreateNamespaceRequest {
+    /// The namespace name to register (e.g. "agent:planner").
+    #[schemars(
+        description = "The namespace name to register, e.g. 'agent:planner'. Charset \
+                       [A-Za-z0-9._:/-], max 128 bytes. The implicit 'default' namespace and the \
+                       reserved 'all' selector cannot be created (CONFLICT / INVALID_ARGUMENT). \
+                       Registering a namespace up front makes an empty one listable/describable; \
+                       writing to an unknown namespace also auto-registers it."
+    )]
+    pub name: String,
+
+    /// Optional human-readable description.
+    #[schemars(description = "Optional human-readable description of the namespace's purpose")]
+    pub description: Option<String>,
+}
+
+/// Request to list all registered namespaces. Takes no arguments.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct ListNamespacesRequest {}
+
+/// Request to describe a single namespace by name.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct DescribeNamespaceRequest {
+    /// The namespace name to describe.
+    #[schemars(
+        description = "The namespace name to describe. The implicit 'default' namespace always \
+                       resolves; an unregistered name is NOT_FOUND (details.namespace)."
+    )]
+    pub name: String,
+}
+
+// ============================================================================
+// GDPR crypto-shred (Issue #3359, Slice 4b) — ADMIN-class tools
+// ============================================================================
+
+/// One designation target for `designate_subject`: a whole entity, or a
+/// specific set of property keys on that entity.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct DesignationTargetInput {
+    /// Entity kind: `"node"` or `"edge"`.
+    #[schemars(description = "Entity kind: \"node\" or \"edge\"")]
+    pub entity_kind: String,
+
+    /// The entity id to designate.
+    #[schemars(description = "The id of the node or edge to designate under the subject")]
+    pub id: u64,
+
+    /// Optional property keys to seal. Omit (or empty) to seal the whole entity.
+    #[schemars(
+        description = "Optional property keys to seal under the subject. Omit or leave empty to \
+                       seal the WHOLE entity; provide keys to seal only those specific properties."
+    )]
+    pub keys: Option<Vec<String>>,
+}
+
+/// Arguments for the admin-gated `designate_subject` tool.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct DesignateSubjectRequest {
+    /// The erasure-subject id to designate targets under.
+    #[schemars(
+        description = "The erasure-subject id (non-empty, <=256 bytes, no control characters). \
+                       Designating an already-active subject merges the new targets into it."
+    )]
+    pub subject_id: String,
+
+    /// One or more designation targets (whole entities and/or property keys).
+    #[schemars(
+        description = "One or more designation targets (whole nodes/edges and/or specific \
+                       property keys) to seal under the subject. Must be non-empty."
+    )]
+    pub targets: Vec<DesignationTargetInput>,
+}
+
+/// Arguments for the admin-gated `erase_subject` tool.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct EraseSubjectRequest {
+    /// The erasure-subject id to irreversibly erase.
+    #[schemars(
+        description = "The erasure-subject id to irreversibly erase. Destroys the subject's key \
+                       material so its sealed payload becomes permanently undecryptable and \
+                       returns a signed erasure attestation. Re-erasing is an idempotent no-op \
+                       returning the recorded attestation."
+    )]
+    pub subject_id: String,
+}
 
 // ============================================================================
 // Provenance hash chain (Issue #3351)
@@ -1372,6 +1927,13 @@ pub struct NodeResponse {
     pub id: u64,
     pub label: String,
     pub properties: HashMap<String, serde_json::Value>,
+    /// The node's immutable namespace (Issue #3349), surfaced as a first-class
+    /// field (the ride-along property is elided). Omitted for `default`-namespace
+    /// entities so a single-agent (`default`-only) response stays byte-identical
+    /// to pre-namespace behavior (design AC1); present whenever the namespace is
+    /// non-default.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub namespace: Option<String>,
     /// The current version's write-time provenance bundle, if any. Omitted
     /// (never a fabricated `null`) when the version has none (Issue #3224).
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -1391,6 +1953,13 @@ pub struct EdgeResponse {
     pub target_id: u64,
     pub label: String,
     pub properties: HashMap<String, serde_json::Value>,
+    /// The edge's immutable namespace (Issue #3349), surfaced as a first-class
+    /// field (the ride-along property is elided). Omitted for `default`-namespace
+    /// entities so a single-agent (`default`-only) response stays byte-identical
+    /// to pre-namespace behavior (design AC1); present whenever the namespace is
+    /// non-default.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub namespace: Option<String>,
     /// The current version's write-time provenance bundle, if any. Omitted
     /// (never a fabricated `null`) when the version has none (Issue #3224).
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -1407,6 +1976,11 @@ pub struct EdgeResponse {
 pub struct SimilarityResult {
     pub node: NodeResponse,
     pub score: f32,
+    /// Provenance-weighted fusion breakdown (Issue #3372), present only when a
+    /// `fusion_policy` was supplied on the request. Omitted (never a fabricated
+    /// `null`) otherwise, so omitting `fusion_policy` reproduces prior bytes.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub score_breakdown: Option<serde_json::Value>,
 }
 
 /// Traversal result with path information.
@@ -1424,6 +1998,11 @@ pub struct HybridQueryResult {
     pub similarity_score: Option<f32>,
     pub traversal_path: Option<Vec<u64>>,
     pub timestamp: Option<String>,
+    /// Provenance-weighted fusion breakdown (Issue #3372), present only when a
+    /// `fusion_policy` was supplied on the request. Omitted otherwise so prior
+    /// behavior is byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub score_breakdown: Option<serde_json::Value>,
 }
 
 /// Information about a specific version in an entity's history.
@@ -1466,3 +2045,572 @@ pub struct PropertyChangeResponse {
     pub old_value: serde_json::Value,
     pub new_value: serde_json::Value,
 }
+
+// ============================================================================
+// Semantic-search analysis tools (Issue #2907)
+//
+// Six read-only tools exposing the stable `semantic-search` cohort's analysis
+// primitives over MCP. They are advertised unconditionally (Design A); when the
+// `semantic-search` feature is not compiled in, the handler bodies return a
+// structured `FAILED_PRECONDITION` (`required_feature: "semantic-search"`)
+// rather than being absent from the catalog.
+// ============================================================================
+
+/// Request for `semantic_path` — vector-similarity-guided A* pathfinding.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct SemanticPathRequest {
+    /// Starting node id.
+    #[schemars(description = "Starting node id for the path search.")]
+    pub start: u64,
+
+    /// Target node id.
+    #[schemars(description = "Target node id for the path search.")]
+    pub end: u64,
+
+    /// The property holding the vector embedding used to guide the search.
+    #[schemars(
+        description = "The property name holding the vector embedding used to guide the A* search \
+                       (e.g. 'embedding'). A vector index must be enabled for this property."
+    )]
+    pub property_name: String,
+
+    /// Optional maximum traversal depth (clamped to the server maximum).
+    #[schemars(
+        description = "Optional maximum traversal depth. Clamped to the server maximum (20). Used \
+                       to derive a bounded node-expansion budget so the search cannot run \
+                       unbounded on large graphs."
+    )]
+    pub max_depth: Option<usize>,
+}
+
+/// Request for `concept_analogy` — vector analogy `a : b :: c : ?`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ConceptAnalogyRequest {
+    /// First node of the analogy pair (`a`).
+    #[schemars(description = "Node id 'a' in the analogy a : b :: c : ?")]
+    pub a: u64,
+
+    /// Second node of the analogy pair (`b`).
+    #[schemars(description = "Node id 'b' in the analogy a : b :: c : ?")]
+    pub b: u64,
+
+    /// Third node — the base of the completion (`c`).
+    #[schemars(description = "Node id 'c' in the analogy a : b :: c : ? (the completion base)")]
+    pub c: u64,
+
+    /// The property holding the vector embedding.
+    #[schemars(
+        description = "The property name holding the vector embedding (e.g. 'embedding'). A vector \
+                       index must be enabled for this property."
+    )]
+    pub property_name: String,
+
+    /// Number of results to return (clamped to the server maximum).
+    #[schemars(description = "Number of results to return (default 10, clamped to 1000).")]
+    pub k: Option<usize>,
+}
+
+/// Request for `concept_mean` — nearest neighbours to the centroid of a set.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ConceptMeanRequest {
+    /// The node ids whose embeddings are averaged.
+    #[schemars(
+        description = "Node ids whose embeddings are averaged; the result ranks nodes nearest the \
+                       centroid. Capped at 10000 ids."
+    )]
+    pub nodes: Vec<u64>,
+
+    /// The property holding the vector embedding.
+    #[schemars(
+        description = "The property name holding the vector embedding (e.g. 'embedding'). A vector \
+                       index must be enabled for this property."
+    )]
+    pub property_name: String,
+
+    /// Number of results to return (clamped to the server maximum).
+    #[schemars(description = "Number of results to return (default 10, clamped to 1000).")]
+    pub k: Option<usize>,
+}
+
+/// Request for `find_duplicate_candidates` — near-duplicate entity detection.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct FindDuplicateCandidatesRequest {
+    /// The node whose near-duplicates are sought.
+    #[schemars(description = "The node id whose near-duplicate candidates are sought.")]
+    pub node_id: u64,
+
+    /// The property whose vector index is used.
+    ///
+    /// v1 note: the underlying similarity query resolves against the node's own
+    /// indexed embedding; `property_name` selects the index whose existence is
+    /// validated. A per-property selector is a documented follow-up.
+    #[schemars(
+        description = "The property name whose vector index is validated (e.g. 'embedding'). v1 \
+                       note: the search uses the node's indexed embedding; property_name selects \
+                       the index to validate rather than an arbitrary property vector."
+    )]
+    pub property_name: String,
+
+    /// Minimum cosine similarity for a candidate to be reported.
+    #[schemars(
+        description = "Minimum cosine similarity in [0, 1] for a candidate to be reported \
+                       (default 0.9)."
+    )]
+    pub threshold: Option<f32>,
+
+    /// Maximum number of candidates to return (clamped to the server maximum).
+    #[schemars(
+        description = "Maximum number of candidates to return (default 10, clamped to 1000)."
+    )]
+    pub limit: Option<usize>,
+}
+
+/// Request for `semantic_horizon` — semantic event-horizon mapping.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct SemanticHorizonRequest {
+    /// The seed node the horizon is mapped from.
+    #[schemars(description = "The seed node id the semantic event horizon is mapped from.")]
+    pub seed: u64,
+
+    /// The property holding the vector embedding.
+    #[schemars(
+        description = "The property name holding the vector embedding (e.g. 'embedding'). A vector \
+                       index must be enabled for this property."
+    )]
+    pub property_name: String,
+
+    /// Similarity threshold in [0, 1]; neighbours below it form the horizon.
+    #[schemars(
+        description = "Similarity threshold in [0, 1]. Neighbours at or above it are interior; \
+                       the first neighbours to fall below form the horizon (boundary)."
+    )]
+    pub threshold: f32,
+
+    /// Optional maximum traversal depth (clamped to the server maximum).
+    #[schemars(
+        description = "Optional maximum traversal depth from the seed (default 20, clamped to 20)."
+    )]
+    pub max_depth: Option<usize>,
+}
+
+/// Request for `context_aspects` — disentangled neighbourhood aspects.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ContextAspectsRequest {
+    /// The node whose neighbourhood is decomposed.
+    #[schemars(description = "The node id whose local context (neighbourhood) is decomposed.")]
+    pub node_id: u64,
+
+    /// The property holding the vector embedding.
+    #[schemars(
+        description = "The property name holding the vector embedding (e.g. 'embedding'). A vector \
+                       index must be enabled for this property."
+    )]
+    pub property_name: String,
+
+    /// Number of aspects (clusters) to extract (clamped to the server maximum).
+    #[schemars(
+        description = "Number of semantic aspects (clusters) to extract (default 10, clamped to 1000)."
+    )]
+    pub k: Option<usize>,
+
+    /// When true, return each aspect's full centroid vector instead of the
+    /// elided descriptor.
+    #[schemars(
+        description = "When true, return each aspect's full centroid float array instead of the \
+                       elided {type, dim, elided:true} descriptor (default false)."
+    )]
+    pub include_vectors: Option<bool>,
+}
+
+// ============================================================================
+// Temporal drift-alarm management (Issue #3367, `semantic-temporal`)
+// ============================================================================
+
+/// Request to declare a drift monitor (`create_drift_monitor`, Write).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct CreateDriftMonitorRequest {
+    /// The vector property key to watch (e.g. `"embedding"`).
+    #[schemars(
+        description = "The vector property key to watch (e.g. 'embedding'). A vector \
+                             index must be enabled for this property."
+    )]
+    pub property_key: String,
+
+    /// Optional node-label restriction. Required when `target` is
+    /// `label_centroid`.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional node-label restriction. Required when target is \
+                             'label_centroid'."
+    )]
+    pub label: Option<String>,
+
+    /// Optional explicit set of node ids to watch.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional explicit set of node ids to watch. An empty array is \
+                             an INVALID_ARGUMENT."
+    )]
+    pub entities: Option<Vec<u64>>,
+
+    /// Distance metric: `cosine`, `euclidean`, or `angular`. Must match the
+    /// property's vector-index metric.
+    #[schemars(
+        description = "Distance metric: 'cosine', 'euclidean', or 'angular'. Must be \
+                             consistent with the property's vector-index metric."
+    )]
+    pub metric: String,
+
+    /// Firing threshold (strict `>`); must be positive and finite.
+    #[schemars(description = "Firing threshold (strict >). Must be positive and finite.")]
+    pub threshold: f32,
+
+    /// Comparison window in microseconds: current embedding vs the embedding as
+    /// of `now - window`.
+    #[schemars(
+        description = "Comparison window in microseconds: the current embedding is \
+                             compared against the embedding as of (now - window). Must be \
+                             non-zero."
+    )]
+    pub window_micros: u64,
+
+    /// Firing target: `per_entity` or `label_centroid`.
+    #[serde(default = "default_drift_target")]
+    #[schemars(
+        description = "Firing target: 'per_entity' (default) fires per drifted entity; \
+                             'label_centroid' fires once for the label's population centroid \
+                             (requires label)."
+    )]
+    pub target: String,
+
+    /// Evaluation mode: `on_write` or `scheduled`.
+    #[serde(default = "default_drift_mode")]
+    #[schemars(
+        description = "Evaluation mode: 'on_write' (default, reactive) or 'scheduled' \
+                             (fixed cadence; provide scheduled_interval_micros)."
+    )]
+    pub mode: String,
+
+    /// Evaluation interval in microseconds when `mode` is `scheduled`.
+    #[serde(default)]
+    #[schemars(
+        description = "Evaluation interval in microseconds; required when mode is \
+                             'scheduled', ignored otherwise."
+    )]
+    pub scheduled_interval_micros: Option<u64>,
+}
+
+fn default_drift_target() -> String {
+    "per_entity".to_string()
+}
+fn default_drift_mode() -> String {
+    "on_write".to_string()
+}
+
+/// Request to list all declared drift monitors (`list_drift_monitors`, Read).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ListDriftMonitorsRequest {}
+
+/// Request to delete a drift monitor (`delete_drift_monitor`, Write).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct DeleteDriftMonitorRequest {
+    /// The id of the monitor to delete.
+    #[schemars(
+        description = "The id of the drift monitor to delete (from create/list). \
+                             An unknown id is a NOT_FOUND."
+    )]
+    pub id: u64,
+}
+
+/// Request to query fired drift alarms (`query_drift_alarms`, Read).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct QueryDriftAlarmsRequest {
+    /// Restrict to a single monitor id.
+    #[serde(default)]
+    #[schemars(description = "Optional: restrict to alarms fired by this monitor id.")]
+    pub monitor_id: Option<u64>,
+
+    /// Restrict to a single label.
+    #[serde(default)]
+    #[schemars(description = "Optional: restrict to alarms carrying this label.")]
+    pub label: Option<String>,
+
+    /// Restrict by resolved state (omit for both).
+    #[serde(default)]
+    #[schemars(description = "Optional: restrict by resolved state (true/false). Omit for both.")]
+    pub resolved: Option<bool>,
+
+    /// Inclusive lower bound (transaction time) on fire time.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional inclusive lower bound (ISO 8601 / RFC 3339 or integer \
+                             microseconds since epoch) on the alarm fire (transaction) time. \
+                             Both time-range bounds must be supplied together."
+    )]
+    pub time_range_start: Option<String>,
+
+    /// Exclusive upper bound (transaction time) on fire time.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional exclusive upper bound (ISO 8601 / RFC 3339 or integer \
+                             microseconds since epoch) on the alarm fire (transaction) time."
+    )]
+    pub time_range_end: Option<String>,
+
+    /// Maximum alarms to return (clamped to 1000).
+    #[serde(default)]
+    #[schemars(description = "Maximum alarms to return (default 100, clamped to 1000).")]
+    pub limit: Option<usize>,
+}
+
+/// Request to resolve a drift alarm (`resolve_drift_alarm`, Write).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ResolveDriftAlarmRequest {
+    /// The graph node id of the alarm to resolve.
+    #[schemars(
+        description = "The node id of the drift alarm to resolve (a recorded, AS OF-stable \
+                             update; the alarm is never deleted)."
+    )]
+    pub alarm_id: u64,
+}
+
+// ============================================================================
+// Contradiction genealogy (Issue #3352, `semantic-temporal`)
+// ============================================================================
+
+/// A version-pinned competing-claim reference for `contradiction_genealogy`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ClaimRefRequest {
+    /// Whether the claim belongs to a node or an edge.
+    #[schemars(description = "The claim's entity kind: 'node' or 'edge'.")]
+    pub entity_kind: String,
+    /// The entity id the claim belongs to.
+    #[schemars(description = "The entity id the claim belongs to (node id or edge id).")]
+    pub id: u64,
+    /// The version id that asserted the claim.
+    #[schemars(description = "The version id that asserted the claim.")]
+    pub version: u64,
+}
+
+/// Request to reconstruct a contradiction genealogy (`contradiction_genealogy`,
+/// Read). Provide EITHER `entity_kind` + `id` + `property` (a single entity's
+/// property) OR an explicit `claims` set.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ContradictionGenealogyRequest {
+    /// The entity kind when targeting one entity's property: 'node' or 'edge'.
+    #[serde(default)]
+    #[schemars(
+        description = "Entity kind ('node' or 'edge') when targeting a single entity's \
+                             property. Provide with id and property, or use claims instead."
+    )]
+    pub entity_kind: Option<String>,
+
+    /// The entity id when targeting one entity's property.
+    #[serde(default)]
+    #[schemars(description = "Entity id when targeting a single entity's property.")]
+    pub id: Option<u64>,
+
+    /// The property key when targeting one entity's property.
+    #[serde(default)]
+    #[schemars(description = "Property key when targeting a single entity's property.")]
+    pub property: Option<String>,
+
+    /// An explicit competing-claim set (may span entities); alternative to
+    /// `entity_kind`/`id`/`property`.
+    #[serde(default)]
+    #[schemars(
+        description = "Explicit competing-claim set (may span entities). Alternative to \
+                             entity_kind/id/property; an empty array is an INVALID_ARGUMENT."
+    )]
+    pub claims: Option<Vec<ClaimRefRequest>>,
+
+    /// Time-travel: only claims recorded at or before this transaction time.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional AS OF transaction-time coordinate (ISO 8601 / RFC 3339 or \
+                             integer microseconds since epoch): only claims recorded at or before \
+                             it are considered."
+    )]
+    pub as_of_transaction_time: Option<String>,
+
+    /// Bound the number of competing claims returned.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional cap on the number of competing claims returned (sets \
+                             truncated)."
+    )]
+    pub max_claims: Option<usize>,
+
+    /// Bound the number of source summaries returned.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional cap on the number of per-source summaries returned (sets \
+                             truncated)."
+    )]
+    pub max_sources: Option<usize>,
+}
+
+/// Request to scan for contradictions (`find_contradictions`, Read).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct FindContradictionsRequest {
+    /// Which entity kinds to scan: `nodes`, `edges`, or `both`.
+    #[serde(default = "default_entity_kind_scope")]
+    #[schemars(description = "Entity kinds to scan: 'nodes', 'edges', or 'both' (default).")]
+    pub entity_kind: String,
+
+    /// Optional node-label / edge-type filter.
+    #[serde(default)]
+    #[schemars(description = "Optional node-label / edge-type filter.")]
+    pub label: Option<String>,
+
+    /// Optional single property to analyze.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional single property to analyze (otherwise every property that \
+                             ever appeared is analyzed)."
+    )]
+    pub property: Option<String>,
+
+    /// Keep only contradictions whose divergence valid-time is in this window.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional valid-time window lower bound (ISO 8601 / RFC 3339 or \
+                             microseconds); both window bounds must be supplied together."
+    )]
+    pub valid_time_start: Option<String>,
+    /// Valid-time window upper bound.
+    #[serde(default)]
+    #[schemars(description = "Optional valid-time window upper bound.")]
+    pub valid_time_end: Option<String>,
+
+    /// Keep only contradictions whose divergence transaction-time is in this
+    /// window.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional transaction-time window lower bound; both bounds together."
+    )]
+    pub transaction_time_start: Option<String>,
+    /// Transaction-time window upper bound.
+    #[serde(default)]
+    #[schemars(description = "Optional transaction-time window upper bound.")]
+    pub transaction_time_end: Option<String>,
+
+    /// Page size (default 100, clamped to 1000).
+    #[serde(default)]
+    #[schemars(description = "Page size (default 100, clamped to 1000).")]
+    pub limit: Option<usize>,
+
+    /// Page offset.
+    #[serde(default)]
+    #[schemars(description = "Page offset for pagination (default 0).")]
+    pub offset: Option<usize>,
+}
+
+fn default_entity_kind_scope() -> String {
+    "both".to_string()
+}
+
+// ============================================================================
+// Counterfactual replay (Issue #3357, `semantic-temporal`)
+// ============================================================================
+
+/// Request to replay history excluding a source (`counterfactual_replay`,
+/// Read). The real database is never mutated; the response reports the
+/// blast-radius divergence and carries a `counterfactual: true` marker.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct CounterfactualReplayRequest {
+    /// A human-readable name for the counterfactual view.
+    #[schemars(description = "A human-readable name for the counterfactual view.")]
+    pub name: String,
+
+    /// Exclude all writes attributed to this single source.
+    #[serde(default)]
+    #[schemars(
+        description = "Exclude all writes attributed to this single source. Provide \
+                             exactly one of exclude_source or exclude_sources."
+    )]
+    pub exclude_source: Option<String>,
+
+    /// Exclude all writes attributed to any source in this set (any-of).
+    #[serde(default)]
+    #[schemars(
+        description = "Exclude all writes attributed to any source in this set (any-of). \
+                             Provide exactly one of exclude_source or exclude_sources."
+    )]
+    pub exclude_sources: Option<Vec<String>>,
+
+    /// Bound exclusion to writes recorded at or after this transaction time.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional inclusive lower bound (ISO 8601 / RFC 3339 or microseconds) \
+                             on a write's transaction time for it to be excluded."
+    )]
+    pub within_transaction_from: Option<String>,
+
+    /// Bound exclusion to writes recorded before this transaction time.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional exclusive upper bound (ISO 8601 / RFC 3339 or microseconds) \
+                             on a write's transaction time for it to be excluded."
+    )]
+    pub within_transaction_to: Option<String>,
+
+    /// Maximum recorded versions to materialize before failing fast.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional cap on recorded versions to materialize; exceeding it is a \
+                             FAILED_PRECONDITION (history too large)."
+    )]
+    pub max_replay_versions: Option<usize>,
+}
+
+// ============================================================================
+// Trust propagation (Issue #3382, `semantic-reasoning`)
+// ============================================================================
+
+/// Request for a computed-trust breakdown (`trust_breakdown`, Read).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct TrustBreakdownRequest {
+    /// The root fact's entity kind: 'node' or 'edge'.
+    #[schemars(description = "The root fact's entity kind: 'node' or 'edge'.")]
+    pub entity_kind: String,
+
+    /// The root entity's id.
+    #[schemars(description = "The root entity's id (node id or edge id per entity_kind).")]
+    pub id: u64,
+
+    /// The root fact's version id (trust is version-pinned).
+    #[schemars(
+        description = "The root fact's version id. Trust is version-pinned; use the \
+                             version whose computed-confidence breakdown you want."
+    )]
+    pub version: u64,
+
+    /// Maximum transitive depth to expand before truncating.
+    #[serde(default)]
+    #[schemars(
+        description = "Maximum transitive depth to expand before marking a subtree \
+                             truncated (defaults to the store's depth cap)."
+    )]
+    pub max_depth: Option<usize>,
+
+    /// Maximum descendant nodes to serialize before truncating.
+    #[serde(default)]
+    #[schemars(
+        description = "Maximum descendant breakdown nodes to serialize (the root is always \
+                             emitted and does not count); defaults to the store's node cap."
+    )]
+    pub limit: Option<usize>,
+
+    /// Optional AS OF transaction-time coordinate.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional AS OF transaction-time coordinate (ISO 8601 / RFC 3339 or \
+                             microseconds): evaluate lineage and confidences as recorded by then."
+    )]
+    pub as_of_transaction_time: Option<String>,
+}
+
+/// Request to list active trust policies (`list_trust_policies`, Read).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ListTrustPoliciesRequest {}

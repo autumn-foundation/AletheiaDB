@@ -1,9 +1,21 @@
 # Security Quickstart: Authentication & RBAC
 
 How to go from an open development database to an authenticated,
-multi-role AletheiaDB deployment (Issue #3350). Covers both serving
-surfaces: the HTTP server (`aletheia-server`) and the MCP server
-(`aletheia-mcp`).
+multi-role AletheiaDB deployment (Issue #3350). Covers the serving
+surfaces: the HTTP server (`aletheia-server`), the MCP server
+(`aletheia-mcp`), and the daemon (`aletheia-daemon`, Issue #2905), which
+serves HTTP **and** MCP from one process.
+
+Everything below applies to the daemon unchanged: it reads the same
+`ALETHEIADB_AUTH_MODE` / `ALETHEIADB_BOOTSTRAP_ADMIN_KEY`, persists keys to
+the same `{data_dir}/auth/keys.json`, serves the same `/admin/keys*`
+endpoints, and applies the same role matrix to its `/mcp` endpoint. Two
+daemon-specific rules: it binds **loopback** by default, and it **refuses**
+to serve anonymously on a non-loopback address unless
+`ALETHEIADB_ALLOW_ANONYMOUS_NETWORK=1` is set. An `aletheia-mcp` relay in
+daemon-client mode makes no access-control decisions of its own — it
+forwards `ALETHEIADB_MCP_API_KEY` as a bearer token and the daemon decides.
+See [daemon-mode.md](daemon-mode.md).
 
 The per-operation authorization matrix (which role may call which
 endpoint/tool) lives in
@@ -157,6 +169,16 @@ can act on — see the
 [error-code contract](mcp-query-tool.md#structured-error-codes-and-the-retriable-contract)
 (`UNAUTHENTICATED` / `PERMISSION_DENIED`, both `retriable: false`).
 
+> **Breaking change (Issue #3234):** the **HTTP** error body now uses the same
+> nested envelope as the MCP surface —
+> `{"error":{"code","message","retriable","details"?}}`, with `trace_id` (when
+> present) a top-level sibling of `error`. The legacy flat HTTP body
+> (`{"success":false,"error":"<msg>","code":…}`) has been removed; read
+> `error.code` / `error.message` / `error.retriable` / `error.details`. A
+> `403 PERMISSION_DENIED` now also carries
+> `error.details:{required_class, principal_role}` on the HTTP surface, matching
+> MCP exactly. Success responses are unchanged (`{"success":true,"data":…}`).
+
 ## Step 4 — Audit and revoke
 
 Listing is **masked by construction** — the response can only carry the
@@ -248,6 +270,23 @@ non-leaking auth errors.
 - **Per-label / per-property grants** (row- or field-level
   authorization); roles are database-wide.
 - Rate limiting on authentication attempts.
+
+## Crypto-shred is an admin-only operation
+
+GDPR crypto-shred (designating an erasure subject and irreversibly erasing it —
+Issue #3359) is a **privileged, admin-only** capability:
+
+- On the **CLI** it runs in the local-admin context (the same trust level as
+  `backup` / `keys rotate`): `aletheia designate-subject <id> --target …` and
+  `aletheia erase-subject <id>`. It does **not** go through API-key RBAC — a
+  local operator holds full privilege — but it does require encryption
+  configured (`ALETHEIADB_CONFIG`).
+- On the **MCP / HTTP server surfaces**, the `designate_subject` / `erase_subject`
+  tools are gated to the **admin** role (a follow-up to the CLI slice); a
+  reader/writer/metrics key is denied.
+
+See [crypto-shred.md](crypto-shred.md) for the full guide, the signed erasure
+attestation, and the honest limits of what crypto-shred does and does not erase.
 
 ## Operational notes
 

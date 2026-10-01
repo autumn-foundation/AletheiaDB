@@ -240,8 +240,8 @@ VectorRerank {
 
 ## References
 
-- [GitHub Issue #389](https://github.com/madmax983/AletheiaDB/issues/389) - Original feature request
-- [PR #404](https://github.com/madmax983/AletheiaDB/pull/404) - Implementation PR
+- [GitHub Issue #389](https://github.com/autumn-foundation/AletheiaDB/issues/389) - Original feature request
+- [PR #404](https://github.com/autumn-foundation/AletheiaDB/pull/404) - Implementation PR
 - [ADR-0010](0010-dashmap-current-indexes.md) - DashMap for concurrent indexes
 - [ADR-0011](0011-vector-search-integration.md) - Original vector search design
 - [ADR-0017](0017-temporal-vector-strategy.md) - Temporal vector strategy

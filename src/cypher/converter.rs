@@ -33,7 +33,7 @@
 //! # }
 //! ```
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use super::ast::*;
@@ -47,8 +47,8 @@ use crate::query::converter::{
 };
 use crate::query::ir::{
     AggregateArg, AggregateFunc, AggregateGroupKey, AggregateSpec, Predicate, PredicateValue,
-    ProvenanceCmp, ProvenanceField, ProvenanceOperand, ProvenancePredicate, QueryOp,
-    ScoreComparison, ScoreThreshold, SortKey, TraversalDepth,
+    ProvenanceCmp, ProvenanceField, ProvenanceOperand, ProvenancePredicate, ProvenanceProjection,
+    ProvenanceProjectionItem, QueryOp, ScoreComparison, ScoreThreshold, SortKey, TraversalDepth,
 };
 use crate::query::plan::{QueryHints, TemporalContext};
 
@@ -74,11 +74,13 @@ fn cypher_comp_to_provenance_cmp(op: CypherCompOp) -> ProvenanceCmp {
     }
 }
 
-/// Flip a Cypher comparison operator when its operands are swapped, so an
-/// accessor on the right-hand side (`0.9 <= confidence(x)`) lowers identically
-/// to the accessor-on-left form (`confidence(x) >= 0.9`). Equality/inequality
-/// are symmetric (Issue #3354b).
-fn flip_cypher_comp_op(op: CypherCompOp) -> CypherCompOp {
+/// Flip a Cypher comparison operator when its operands are swapped, so
+/// `value <op> x` evaluates identically to `x <flipped> value` (an accessor on
+/// the right-hand side lowers like the accessor-on-left form). Equality/
+/// inequality are symmetric (Issue #3354b). Shared by every Cypher operand-swap
+/// site (provenance lowering, vector-score comparison, and the edge-property
+/// evaluator, Issue #3622).
+pub(crate) fn flip_cypher_comp_op(op: CypherCompOp) -> CypherCompOp {
     match op {
         CypherCompOp::Eq => CypherCompOp::Eq,
         CypherCompOp::Ne => CypherCompOp::Ne,
@@ -251,6 +253,7 @@ impl CypherConverter {
                 where_clause,
                 return_clause,
                 temporal,
+                namespace,
                 with_clauses,
                 optional_matches,
             } => {
@@ -425,7 +428,9 @@ impl CypherConverter {
                 //    yields (computed column rows), so RETURN DISTINCT and the
                 //    ORDER BY / vector-rank projection are only applied on the
                 //    non-aggregate path.
-                if let Some(aggregate_op) = self.build_aggregate(&return_clause)? {
+                let aggregate_op = self.build_aggregate(&return_clause)?;
+                let aggregated = aggregate_op.is_some();
+                if let Some(aggregate_op) = aggregate_op {
                     ops.push(aggregate_op);
                     // ORDER BY over aggregate output: sort by the output column
                     // name / aggregate alias (RETURN DISTINCT is subsumed by
@@ -471,10 +476,33 @@ impl CypherConverter {
                     ops.push(QueryOp::Limit(limit));
                 }
 
+                // Provenance accessor projection (Issue #3354) runs LAST so it
+                // never perturbs ordering/pagination. `build_provenance_projection`
+                // is always consulted (even when aggregated) so an accessor mixed
+                // with aggregation is REJECTED rather than silently dropped; a
+                // normal aggregate query with no accessor still yields `None`.
+                if let Some(op) =
+                    self.build_provenance_projection(&return_clause, &pattern, aggregated)?
+                {
+                    ops.push(op);
+                }
+
+                // Lower the namespace read-scope clause (Issue #3349) onto the
+                // query IR. An omitted clause stays `None` (namespace-agnostic,
+                // byte-for-byte prior behavior); it is NEVER defaulted to `All`,
+                // so the fail-closed `default`-namespace resolution the MCP layer
+                // applies to an omitted scope is preserved.
+                let scope = Self::convert_namespace_clause(namespace.as_ref())?;
+
                 Ok(Query {
                     ops,
                     temporal_context,
                     hints: QueryHints::default(),
+                    scope,
+                    // Cypher-parsed queries carry no per-call resource-limit
+                    // override (Issue #3368 is a Rust `QueryBuilder`-only API
+                    // in v1).
+                    limits: None,
                 })
             }
             // A standalone `UNWIND` produces scalar rows, not stored entities,
@@ -501,18 +529,77 @@ impl CypherConverter {
                         .to_string(),
                 ))
             }
-            // Write statements (Issue #560) are executed directly against the
-            // native write APIs by `crate::cypher::mutation`, not lowered into
-            // the read-only `Query` IR. Reject conversion explicitly rather than
-            // fabricate a read plan for a mutation.
+            // Write statements (Issues #560, #3548) are executed directly
+            // against the native write APIs by `crate::cypher::mutation`, not
+            // lowered into the read-only `Query` IR. Reject conversion
+            // explicitly rather than fabricate a read plan for a mutation.
             CypherStatement::Write(_) => Err(CypherError::UnsupportedFeature(
-                "write statements (CREATE / SET / DELETE) do not lower into the \
+                "write statements (CREATE / MERGE / SET / DELETE) do not lower into the \
                  read-only query pipeline; execute them via \
                  AletheiaDB::execute_cypher, which applies the mutation through \
                  the native write APIs"
                     .to_string(),
             )),
         }
+    }
+
+    /// Lower a parsed namespace read-scope clause (`USE / IN NAMESPACE ...`,
+    /// Issue #3349) into an optional
+    /// [`NamespaceScope`](crate::core::namespace::NamespaceScope) on the query
+    /// IR. Mirrors the AQL `convert_namespace_clause` exactly, so both surfaces
+    /// share identical semantics:
+    ///
+    /// - Omitted clause ⇒ `None` (namespace-agnostic; prior behavior). Never
+    ///   `Some(All)`.
+    /// - `USE ALL NAMESPACES`, or a lone bare selector name `all`, ⇒ `All`.
+    /// - One name ⇒ `Single`; several ⇒ a `List` union.
+    ///
+    /// Name validation is delegated to
+    /// [`Namespace::new`](crate::core::namespace::Namespace::new); a malformed
+    /// name (or an empty union, already prevented by the parser but guarded
+    /// again by [`NamespaceScope::list`](crate::core::namespace::NamespaceScope::list))
+    /// surfaces as a [`CypherError::ParameterError`], which maps to the same
+    /// `INVALID_ARGUMENT` MCP code as the AQL side and the MCP `namespace`
+    /// parameter. An unknown-but-well-formed namespace is NOT rejected here; it
+    /// is caught at execution by `validate_scope` as `NOT_FOUND`.
+    ///
+    /// # Errors
+    ///
+    /// [`CypherError::ParameterError`] for a malformed name or an empty union.
+    pub(crate) fn convert_namespace_clause(
+        clause: Option<&CypherNamespaceClause>,
+    ) -> Result<Option<crate::core::namespace::NamespaceScope>, CypherError> {
+        use crate::core::namespace::{Namespace, NamespaceScope};
+
+        let Some(clause) = clause else {
+            return Ok(None);
+        };
+        let scope = match clause {
+            CypherNamespaceClause::All => NamespaceScope::All,
+            // A lone `all` name is the no-filter selector, mirroring the MCP
+            // `namespace: "all"` string and the AQL converter (exact match).
+            CypherNamespaceClause::Names(names) if names.len() == 1 && names[0] == "all" => {
+                NamespaceScope::All
+            }
+            CypherNamespaceClause::Names(names) => {
+                let mut namespaces = Vec::with_capacity(names.len());
+                for name in names {
+                    namespaces.push(
+                        Namespace::new(name.as_str())
+                            .map_err(|e| CypherError::ParameterError(e.to_string()))?,
+                    );
+                }
+                if namespaces.len() == 1 {
+                    NamespaceScope::Single(namespaces.into_iter().next().expect("len == 1"))
+                } else {
+                    // Empty is unreachable (the parser requires >= 1 name), but
+                    // `list` still guards it as an `INVALID_ARGUMENT`.
+                    NamespaceScope::list(namespaces)
+                        .map_err(|e| CypherError::ParameterError(e.to_string()))?
+                }
+            }
+        };
+        Ok(Some(scope))
     }
 
     // =======================================================================
@@ -1651,11 +1738,17 @@ impl CypherConverter {
     /// # Errors
     ///
     /// Returns [`CypherError::UnsupportedFeature`] if the expression is not a
-    /// property access or variable reference.
+    /// property access, variable reference, or provenance accessor.
     fn convert_order_item_to_sort_key(
         &self,
         item: &CypherOrderItem,
     ) -> Result<SortKey, CypherError> {
+        // ORDER BY a provenance accessor (Issue #3354): resolved per row from
+        // the row entity's write-time provenance. `as_provenance_accessor`
+        // returns `Err` for a malformed accessor argument (never silent).
+        if let Some(field) = self.as_provenance_accessor(&item.expr)? {
+            return Ok(SortKey::Provenance(field));
+        }
         match &item.expr {
             CypherExpr::Property { property, .. } => Ok(SortKey::Property(property.clone())),
             CypherExpr::Variable(name) => Ok(SortKey::Property(name.clone())),
@@ -1664,6 +1757,142 @@ impl CypherConverter {
                 item.expr
             ))),
         }
+    }
+
+    /// Detect provenance accessors in a `RETURN` clause and build a
+    /// [`QueryOp::ProjectProvenance`] op (Issue #3354), or `None` when the
+    /// clause projects none. A provenance-named accessor with a malformed
+    /// argument is a structured error (never silently dropped), reusing the same
+    /// [`as_provenance_accessor`](Self::as_provenance_accessor) recognition the
+    /// `WHERE` half uses.
+    ///
+    /// v1 supports only the clean single-entity forms
+    /// (`RETURN <entity>, <accessor(s)>` and `RETURN <accessor(s)>` over the
+    /// single bound node). Building general property-projection-into-columns is
+    /// out of scope, so an accessor mixed with a property projection
+    /// (`RETURN n.name, source(n)`), an aggregate
+    /// (`RETURN n.dept, count(*), source(n)`), or a variable other than the
+    /// single bound entity (`RETURN a, source(b)`) is **rejected** with a
+    /// structured [`CypherError::UnsupportedFeature`] rather than silently
+    /// dropping a column or resolving the wrong entity. (Edge/traversal-variable
+    /// accessors never reach this path: a multi-variable MATCH routes to the
+    /// multi-pattern evaluator, so provenance projection is node-entity-scoped in
+    /// v1.)
+    fn build_provenance_projection(
+        &self,
+        return_clause: &CypherReturn,
+        patterns: &[CypherPattern],
+        aggregated: bool,
+    ) -> Result<Option<QueryOp>, CypherError> {
+        let mut items = Vec::new();
+        let mut entity_binding: Option<String> = None;
+        // Distinct entity variables referenced across the bare entity and every
+        // accessor argument; the supported form references exactly one.
+        let mut referenced_vars: BTreeSet<String> = BTreeSet::new();
+        let mut has_property_projection = false;
+        for item in &return_clause.items {
+            let (expr, alias) = match item {
+                CypherReturnItem::Expression { expr, alias } => (expr, alias.clone()),
+                // A bare `RETURN n` variable item -- preserve it as the entity
+                // binding so it stays observable alongside projected columns.
+                CypherReturnItem::Variable(name) => {
+                    if entity_binding.is_none() {
+                        entity_binding = Some(name.clone());
+                    }
+                    referenced_vars.insert(name.clone());
+                    continue;
+                }
+                CypherReturnItem::Star => continue,
+            };
+            match expr {
+                // The parser emits a bare variable as an `Expression` item.
+                CypherExpr::Variable(name) => {
+                    if entity_binding.is_none() {
+                        entity_binding = Some(name.clone());
+                    }
+                    referenced_vars.insert(name.clone());
+                }
+                // A property projection (`n.name`) alongside an accessor is the
+                // unsupported mix (rejected below once an accessor is present).
+                CypherExpr::Property { .. } => {
+                    has_property_projection = true;
+                }
+                CypherExpr::FunctionCall { args, .. } => {
+                    if let Some(field) = self.as_provenance_accessor(expr)? {
+                        // `as_provenance_accessor` guarantees exactly one bound
+                        // variable argument.
+                        let var = match args.as_slice() {
+                            [CypherExpr::Variable(v)] => v.clone(),
+                            _ => String::new(),
+                        };
+                        referenced_vars.insert(var.clone());
+                        let output_name =
+                            alias.unwrap_or_else(|| format!("{}({})", field.accessor_name(), var));
+                        items.push(ProvenanceProjectionItem { output_name, field });
+                    }
+                }
+                _ => {}
+            }
+        }
+        if items.is_empty() {
+            return Ok(None);
+        }
+
+        // An accessor is projected: enforce the v1 single-entity contract.
+        if aggregated {
+            return Err(CypherError::UnsupportedFeature(
+                "combining a provenance accessor with an aggregate in RETURN is not supported \
+                 (v1); an aggregating RETURN produces its own computed columns"
+                    .to_string(),
+            ));
+        }
+        if has_property_projection {
+            return Err(CypherError::UnsupportedFeature(
+                "combining a property projection with a provenance accessor in RETURN is not \
+                 supported (v1); return the entity itself (RETURN n, source(n)) or the accessors \
+                 alone (RETURN source(n))"
+                    .to_string(),
+            ));
+        }
+        // The supported form binds exactly one entity: a single MATCH node with a
+        // variable. Every referenced variable (bare entity + accessor args) must
+        // be that node. This rejects the multi-variable mismatch
+        // (`RETURN a, source(b)`, including an accessor over an unbound variable),
+        // which the single-entity positional pipeline would otherwise resolve
+        // against the wrong (or a nonexistent) entity.
+        let sole_entity = Self::sole_pattern_node_var(patterns);
+        let matches_sole = match &sole_entity {
+            Some(v) => referenced_vars.len() == 1 && referenced_vars.contains(v),
+            None => false,
+        };
+        if !matches_sole {
+            return Err(CypherError::UnsupportedFeature(
+                "provenance projection in RETURN is supported only for a single bound entity \
+                 whose accessor variable matches the returned node (RETURN n, source(n)); \
+                 projecting an accessor over a different variable or a multi-entity match is not \
+                 supported (v1)"
+                    .to_string(),
+            ));
+        }
+
+        Ok(Some(QueryOp::ProjectProvenance(ProvenanceProjection {
+            entity_binding,
+            items,
+        })))
+    }
+
+    /// The variable of the single bound node when the MATCH is exactly one
+    /// pattern consisting of one node element with a variable and no
+    /// relationships; `None` otherwise. This is the one entity the single-entity
+    /// positional pipeline can correctly attribute a provenance accessor to.
+    fn sole_pattern_node_var(patterns: &[CypherPattern]) -> Option<String> {
+        let [pattern] = patterns else {
+            return None;
+        };
+        let [CypherPatternElement::Node(node)] = pattern.elements.as_slice() else {
+            return None;
+        };
+        node.variable.clone()
     }
 
     // =======================================================================
@@ -2037,7 +2266,7 @@ impl CypherConverter {
             }
             (_, CypherExpr::FunctionCall { name, args, .. }) if is_vector_function(name) => {
                 // `value <cmp> score` == `score <flipped-cmp> value`.
-                (name, args, flip_comparison(*op))
+                (name, args, flip_cypher_comp_op(*op))
             }
             _ => return Ok(None),
         };
@@ -2188,18 +2417,6 @@ fn score_comparison_for(op: CypherCompOp) -> Option<ScoreComparison> {
         CypherCompOp::Lt => Some(ScoreComparison::Lt),
         CypherCompOp::Le => Some(ScoreComparison::Le),
         CypherCompOp::Eq | CypherCompOp::Ne => None,
-    }
-}
-
-/// Flip a comparison operator so `value <op> score` becomes `score <flipped> value`.
-fn flip_comparison(op: CypherCompOp) -> CypherCompOp {
-    match op {
-        CypherCompOp::Gt => CypherCompOp::Lt,
-        CypherCompOp::Ge => CypherCompOp::Le,
-        CypherCompOp::Lt => CypherCompOp::Gt,
-        CypherCompOp::Le => CypherCompOp::Ge,
-        CypherCompOp::Eq => CypherCompOp::Eq,
-        CypherCompOp::Ne => CypherCompOp::Ne,
     }
 }
 

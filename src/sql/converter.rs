@@ -133,7 +133,13 @@ impl SqlConverter {
         // Convert FROM clause
         self.convert_from(&select.from, &mut ops)?;
 
-        // Convert WHERE clause
+        // Convert WHERE clause. Edge-property `WHERE` over a `FROM edges` scan is
+        // evaluated for real (Issue #3622): the executor detects an
+        // `EdgeScan`-rooted stream and runs the shared `FilterIterator` in
+        // edge-property mode, matching each property leaf against the edge's own
+        // properties. (SQL only ever sources edges via a bare `FROM edges`, a
+        // pure edge stream, so every bare property leaf unambiguously refers to
+        // the edge.)
         if let Some(ref selection) = select.selection {
             let predicate = self.convert_expr_to_predicate(selection)?;
             ops.push(QueryOp::Filter(predicate));
@@ -142,7 +148,9 @@ impl SqlConverter {
         // Convert SELECT projection
         self.convert_projection(&select.projection, &mut ops)?;
 
-        // Convert ORDER BY
+        // Convert ORDER BY. A property-key `ORDER BY` over `FROM edges` is
+        // likewise evaluated for real (Issue #3622): the `SortIterator` reads the
+        // edge's own properties when its input is `EdgeScan`-rooted.
         for order_by in &query.order_by {
             self.convert_order_by(order_by, &mut ops)?;
         }
@@ -165,6 +173,11 @@ impl SqlConverter {
             // Temporal context is set by convert_sql() after extraction
             temporal_context: None,
             hints: QueryHints::default(),
+            // SQL namespace scoping is a follow-up (PR2b); no scope today.
+            scope: None,
+            // SQL-parsed queries carry no per-call resource-limit override
+            // (Issue #3368 is a Rust `QueryBuilder`-only API in v1).
+            limits: None,
         })
     }
 
@@ -196,7 +209,7 @@ impl SqlConverter {
         }
 
         match &table.relation {
-            TableFactor::Table { name, alias: _, .. } => {
+            TableFactor::Table { name, .. } => {
                 let table_name = name.to_string().to_lowercase();
                 match table_name.as_str() {
                     "nodes" => {
@@ -263,6 +276,11 @@ impl SqlConverter {
     }
 
     /// Convert ORDER BY clause.
+    ///
+    /// A property-key `ORDER BY` over a `FROM edges` scan is honored: the
+    /// executor runs the `SortIterator` in edge-property mode for an
+    /// `EdgeScan`-rooted stream, so edge rows are sorted by their own properties
+    /// (Issue #3622). `ORDER BY score`/`timestamp` are unaffected.
     fn convert_order_by(
         &self,
         order_by: &OrderByExpr,

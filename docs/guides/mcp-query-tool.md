@@ -95,6 +95,17 @@ extend them. Advertised, supported constructs:
 Mutating clauses (`CREATE`, `MERGE`, `SET`, `DELETE`, `REMOVE`, `DETACH`,
 `DROP`, `CALL`, `FOREACH`, `LOAD`) are rejected **before execution**.
 
+### Multi-variable-pattern MATCH under a namespace scope (v1)
+
+A multi-variable-pattern `MATCH` — comma-separated patterns binding more than
+one variable, e.g. `MATCH (a:Person),(b:Company) RETURN a,b` (a cartesian
+product) — is **not** supported under a *restricting* namespace scope in v1.
+Because an omitted `namespace` argument defaults to `default`-only (fail-closed
+/ isolated-by-default, #3349 / PR3d #3731), such a query must pass
+`"namespace": "all"` to run unscoped (or be rewritten as a single-variable
+`MATCH`); otherwise the server returns a structured `unsupported_construct` /
+`INVALID_ARGUMENT` error rather than silently running it unscoped.
+
 ## Querying provenance (Issue #3354a)
 
 Write-time provenance (source / confidence / reason, Issue #3224 — the same
@@ -562,10 +573,14 @@ operations the batch carries.
 ```
 
 Supported `op` values: `create_node`, `create_edge`, `update_node`,
-`update_edge`, `delete_node`, `delete_edge`. Each mirrors its single-op
-tool's fields, including the optional #3221 `valid_time` (ISO 8601 or
-microseconds since epoch) and the optional #3224 `provenance` bundle on
-creates/updates.
+`update_edge`, `delete_node`, `delete_edge`, and `compare_and_set_node`. Each
+mirrors its single-op tool's fields, including the optional #3221 `valid_time`
+(ISO 8601 or microseconds since epoch) and the optional #3224 `provenance`
+bundle on creates/updates. `compare_and_set_node` is a version-precondition
+CAS on a committed node (full-replace property map + `expected_version`): if the
+node's committed head has moved off `expected_version`, the CAS fails at the
+commit guard and — like any batch failure — aborts the **whole** batch → zero
+writes, so a fenced step-record batch never lands a partial write.
 
 **Local refs.** A `create_node` may carry a `ref` alias (unique within the
 batch, must not start with `$`, must not be purely numeric). Later
@@ -729,11 +744,11 @@ object of this shape (Issue #3234):
 | `CONSTRAINT_VIOLATION` | A declared uniqueness constraint rejected the write (`details` carries `label`, `property`, `value`, `existing_node_id`) | `false` | Use the existing entity or change the value |
 | `FAILED_PRECONDITION` | Valid request, wrong system state: vector index not enabled, node still has connected edges without `detach: true`, referenced edge endpoint missing, enabling a unique constraint over already-existing duplicate values, feature not compiled in | `false` | Change the state (enable the index, pass `detach`, create the endpoint, dedupe the data), then re-issue |
 | `CONFLICT` | Concurrency conflict: serialization failure, write-write conflict, aborted transaction | usually `true` | Retry the operation (a duplicate-ID conflict is the exception: `retriable: false`) |
-| `UNAVAILABLE` | Transient condition: engine-internal query timeout, clock skew, and other clock-related hiccups (non-monotonic transaction time, logical counter overflow), or the `query` tool at its in-flight-worker cap (Issue #3368, `details.max_in_flight_queries`) | `true` | Retry, ideally with backoff |
+| `UNAVAILABLE` | Transient condition: engine-internal query timeout, clock skew, and other clock-related hiccups (non-monotonic transaction time, logical counter overflow), or a resource-limited tool at its in-flight-worker cap (Issue #3368, `details.max_in_flight_queries`) | `true` | Retry, ideally with backoff |
 | `INTERNAL` | Unexpected internal failure: I/O, corruption, poisoned lock | `false` | Report; do not blind-retry |
 | `UNAUTHENTICATED` | No valid session credential in `required` auth mode (Issue #3350) — missing, unknown, or revoked; deliberately indistinguishable, and returned for *every* tool including unknown tool names (no inventory leak). Never carries `details`, never echoes the credential | `false` | Supply a valid `ALETHEIADB_MCP_API_KEY` (or bootstrap key) and restart the session; retrying with the same credential cannot succeed |
 | `PERMISSION_DENIED` | Authenticated, but the principal's role does not allow the tool's access class (Issue #3350). `details` carries `required_class` and `principal_role` | `false` | Use a credential whose role allows the class (see [docs/guides/access-control-matrix.md](access-control-matrix.md)); do not retry with the same key |
-| `RESOURCE_EXHAUSTED` | A per-query resource limit was exceeded on the `query` tool (Issue #3368): the wall-clock timeout elapsed, or the result exceeded the response-byte cap. `details` carries `dimension` (`wall_clock_timeout`/`result_bytes`), `limit`, and (for byte caps) `consumed` | timeout: `true` (read-only, so a tightened retry is sound); byte cap: `false` | Narrow the query (smaller depth/`LIMIT`/time window, fewer returned properties) or raise the matching `limits.*` override (up to the operator ceiling) |
+| `RESOURCE_EXHAUSTED` | A per-query resource limit was exceeded on the `query` tool or a wrapped read tool (`traverse`, `hybrid_query`, `find_similar`, `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time`) (Issue #3368): the wall-clock timeout elapsed, the result exceeded the response-byte cap, or (when an operator opts into the default-off memory budget) the estimated working-memory proxy exceeded it. `details` carries `dimension` (`wall_clock_timeout`/`result_bytes`/`memory_bytes`), `limit`, and (for byte/memory caps) `consumed` | timeout: `true` (read-only, so a tightened retry is sound); byte/memory cap: `false` | Narrow the request (smaller depth/`LIMIT`/`top_k`/time window, fewer returned properties) or, on the `query` tool, raise the matching `limits.*` override (up to the operator ceiling) |
 
 Codes may be **added** over time; existing codes never change. Treat an
 unrecognized code as non-retriable. `UNAUTHENTICATED` and
@@ -878,25 +893,213 @@ limit. A response *within* the byte cap is then shaped by the caller's token
 budget along the #3353 disclosed ladder as usual. Cursor paging on the `query`
 tool remains an `unsupported_construct` (#3360).
 
+### Extended to the read tools (Issue #3368 residue)
+
+The same wall-clock-timeout and result-byte-cap enforcement now also governs six
+non-`query` read tools: **`traverse`**, **`hybrid_query`**, **`find_similar`**,
+**`get_node_at_time`**, **`get_edge_at_time`**, and **`find_nodes_at_time`**. A
+covered tool is wrapped at the dispatch seam and reuses the `query`-tool
+machinery — the timeout thread-race, the bounded in-flight-worker DoS guard, and
+the shared termination counters — so a runaway multi-hop traversal or a huge
+similarity page fails predictably rather than starving neighbors. The two breach
+`code`s (`RESOURCE_EXHAUSTED`), `retriable` flags (`wall_clock_timeout` → `true`,
+`result_bytes` → `false`), and `details.dimension` match the `query` tool's.
+
+**The error envelope is tool-agnostic, however.** These six tools are not a
+query language, so — unlike the `query` tool's builders — the wrapped emitters
+produce the plain #3234 envelope
+(`{"error":{"code","message","retriable","details"}}`) with **no** `kind` field
+and **no** `language` field, and their remediation is tool-neutral: it never
+tells the caller to raise `limits.timeout_ms` / `limits.max_response_bytes`
+(these tools have no per-call `limits` override in v1), only to narrow the
+request (smaller depth/limit/`top_k`/time window) and retry. The `query` tool
+keeps its own `kind:"runtime_error"` / `language` envelope, which is correct for
+a query language.
+
+Ordering is `cursor (#3360) → resource cap (#3368) → token budget (#3353)`: the
+handler resolves its cursor page, the response-byte cap is applied, and a
+*within-cap* response is then optionally shaped by the caller's `max_response_*`
+budget along the #3353 disclosed ladder. Row-cap overflow on these tools is the
+tool's own `limit` / `top_k` and stays a **disclosed truncation**
+(`has_more`/`truncated`/`next_offset`), never a resource-limit termination —
+there is deliberately no row-termination counter.
+
+**v1 scope for these six tools (deliberate, honest):**
+
+- **No per-call `limits` override.** They honor only the server defaults +
+  ceilings; unlike the `query` tool there is no per-request `limits` object yet.
+- **Post-hoc byte cap.** The cap is checked on the fully serialized response
+  *after* the handler returns (the `query` tool's incremental row-by-row guard is
+  not reused), so peak allocation for these tools is the full response, then
+  rejected if over cap. Incremental enforcement here is a follow-up.
+- **Non-cancellable timeout.** As with the `query` tool, the timed computation
+  runs to completion on a detached worker and is discarded on timeout; true
+  engine-level cooperative cancellation is out of scope (Lane-2).
+- **Zero-overhead only when limits are disabled — not under the default
+  config.** The inline fast path (no thread, no clone, no guard) runs **only when
+  the effective timeout is `0`**, i.e. the `disabled()` config. Under the
+  *default* config the effective timeout is 30_000 ms (not `0`), so each covered
+  call takes the timeout-race worker path (thread-spawn + mpsc + in-flight-CAS,
+  exactly like the `query` tool). The **response/output is unchanged** under the
+  default config, but it is **not** zero-overhead — there is a per-call worker
+  spawn on every covered read, including cheap `get_node_at_time` /
+  `get_edge_at_time`. A micro-benchmark quantifying that hot-path overhead is a
+  deferred (Lane-2) follow-up.
+- **Shared in-flight pool.** The `max_in_flight_queries` cap (default 64) is a
+  **single shared pool** across the `query` tool and these six wrapped read
+  tools. A flood of slow calls to any one of them can push the others to their
+  shared cap and make them return the retriable, bounded `UNAVAILABLE`
+  (`details.max_in_flight_queries`); a per-class sub-budget is a Lane-2
+  follow-up.
+
 ### Coverage matrix
 
 | Surface | Wall-clock timeout | Result-row cap | Result-byte cap | Override + operator ceiling |
 |---------|--------------------|----------------|------------------|-----------------------------|
-| MCP `query` tool | ✅ (thread-race, read-only) | ✅ truncate + disclose | ✅ fail-closed | ✅ `limits` |
+| MCP `query` tool | ✅ (thread-race, read-only) | ✅ truncate + disclose | ✅ fail-closed, incremental | ✅ `limits` |
 | HTTP `/query` | ✅ (Issue #3446) | ✅ truncate/reject | ✅ | ✅ `limits` |
-| MCP `traverse` / `hybrid_query` / `find_similar` | ⚠️ row `limit`/`top_k` caps only; timeout + byte cap are a documented follow-up | ✅ via `limit`/`top_k` | via #3353 budget | — |
-| Rust query builder | ⚠️ builder-level limit options are a documented follow-up (embedders hold the `Arc<AletheiaDB>` and can bound work directly) | — | — | — |
+| MCP `traverse` / `hybrid_query` / `find_similar` / `get_node_at_time` / `get_edge_at_time` / `find_nodes_at_time` | ✅ (thread-race, read-only) | ✅ via `limit`/`top_k` (disclosed) | ✅ fail-closed, **post-hoc** (v1) | ⚠️ server defaults only — no per-call override yet (Lane-2) |
+| Rust query builder | ✅ cooperative (engine guard) | ✅ `with_max_rows` | ✅ `with_memory_budget` | ✅ `with_timeout`/`with_max_rows`/`with_memory_budget` + `AletheiaDBConfig::query_limits` |
+
+A **default-off memory-budget dimension** now also governs these read tools —
+see [Memory-budget dimension](#memory-budget-dimension-issue-3368) below.
+
+**Landed since this residue was written (engine lane, see
+[query-resource-limits.md](query-resource-limits.md)):** true engine-level
+cooperative cancellation (row-granular guard in the executor; the `query`-tool
+worker now self-cancels near its deadline rather than only being raced), the
+**Rust builder API** (`with_timeout`/`with_max_rows`/`with_memory_budget` +
+`AletheiaDBConfig::query_limits`), a memory-budget dimension on the `query` tool
+(default-off) with a benchmark-gated fast-path proof
+(`benches/query_resource_limits.rs`) and a concurrency soak
+(`tests/query_resource_limits_soak.rs`).
+
+**Still deferred to Lane-2:** true engine-level
+memory accounting (spill / per-operator budgets — the landed memory dimension is
+a documented *proxy*, not true allocation accounting), a per-call
+`max_query_memory_bytes` override on the read tools, HTTP
+in-flight parity (#3446), and incremental (vs post-hoc) byte-cap enforcement for
+these read tools. The **post-hoc** read-tool memory dimension described in this
+residue covers only the wrapped read tools; the `query` tool instead gained a
+**cooperative** engine memory budget (default-off) through the landed engine
+lane, alongside its existing `timeout_ms`/`max_response_bytes` controls.
 
 Over-limit terminations are counted per dimension in-process
-(`AletheiaMcpServer::limit_termination_counts()`); surfacing them through
-`database_stats` needs a storage-layer counter and is a cross-lane follow-up.
-The response-byte cap is enforced **incrementally**: rows are serialized and
+(`AletheiaMcpServer::limit_termination_counts()`) **and surfaced through
+`database_stats`** under a `resource_limits` block (see below). For the `query`
+tool the response-byte cap is enforced **incrementally**: rows are serialized and
 measured as they are appended, and the response fails closed as soon as the
 running size provably exceeds the cap — so peak working memory stays ≈ the cap
 rather than materializing the full (up to the row-count ceiling) result before
 rejecting it. The row-count ceiling remains the independent bound on how many
 rows are ever built. True engine-level **memory** accounting (spill, per-operator
 budgets) is a separate query-executor follow-up.
+
+### Memory-budget dimension (Issue #3368)
+
+The third #3368 dimension — a per-query **memory budget** — is now enforced on
+the wrapped read tools (`traverse`, `hybrid_query`, `find_similar`,
+`get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time`, and the enrolled
+#2907 semantic-search analysis tools) as an additive, **default-off** control.
+It is engaged only when an operator sets a non-zero
+`QueryLimitsConfig::default_max_query_memory_bytes` (optionally bounded by the
+`max_query_memory_bytes` ceiling) on the
+`AletheiaMcpServer::with_query_limits(...)` path. Omitting it — including under
+the default config — leaves the dimension unlimited, so **behavior is unchanged
+unless you opt in**. There is no per-call `limits.max_query_memory_bytes`
+override in v1 (server defaults only, mirroring the residue read tools), so no
+tool input schema changes.
+
+**What "working memory" means here — a documented proxy, not true accounting.**
+Rust has no free per-task allocation accounting, so — exactly like the `result_bytes`
+cap is honestly *post-hoc* — the memory dimension is a **documented proxy**:
+
+```
+estimated_working_bytes = serialized_response_len × MEMORY_WORKING_SET_EXPANSION
+```
+
+where `MEMORY_WORKING_SET_EXPANSION = 4`. The in-RAM materialized representation
+that produced the response (parsed graph entities, `PropertyMap` hashmaps,
+`Vec<f32>` embeddings, `String` keys, plus capacity slack and hashmap/enum
+overhead) is empirically a small multiple of the compact serialized JSON that
+leaves the dispatch seam; `4×` is the v1 estimate of that multiple. It is
+**distinct from `result_bytes`**: that cap governs *wire/output* size (a
+transport/context concern), while this dimension models *RAM working set* (a
+resource-exhaustion concern); the two carry different `dimension` tokens and
+different retriable semantics.
+
+**The two caps are NOT independent — the memory control is often a dead no-op.**
+Both `result_bytes` and this memory estimate are deterministic functions of the
+*same* `serialized_response_len`, so they do not "breach independently": the
+memory dimension can only ever bind when
+
+```
+max_query_memory_bytes  <  4 × max_response_bytes
+```
+
+If you leave a memory budget above `4×` the effective byte cap (and the default
+byte cap is 8 MiB when engaged), the memory control **can never fire** — the
+byte cap always trips first (it runs first in the pipeline; see the ordering
+below). Set `max_query_memory_bytes` *below* `4 ×` your byte cap for it to be an
+effective, distinct guard; otherwise you have set a memory guard that is
+silently inert.
+
+**Honest limitations** (mirroring how `result_bytes` is itself post-hoc):
+
+- **A proxy, not measured allocation** — no per-task allocation accounting.
+- **Post-hoc** on the fully serialized response (no early abort mid-evaluation —
+  the computation runs to completion, then the estimate is rejected if over
+  budget).
+- **Fixed constant**, not response-shape adaptive.
+- **It bounds output materialization, not scan/frontier working set — and so
+  materially *under*-counts small-output/large-frontier tools.** Because the
+  estimate is `4×` the *output* size, it does not see peak working set that
+  never reaches the response: `find_similar` (k over ~1M vectors),
+  `hybrid_query`, and the semantic scans can hold large HNSW candidate heaps and
+  distance buffers while returning a tiny serialized result, so the proxy is
+  **not** a conservative upper bound for those tools. It is a coarse guard on
+  output materialization only; a scan/frontier-aware budget is a Lane-2
+  follow-up.
+
+**What a breach returns.** When `estimated_working_bytes` exceeds the configured
+budget the response fails closed with the tool-agnostic #3234 envelope (no
+`kind`, no `language`):
+
+```jsonc
+{ "error": {
+    "code": "RESOURCE_EXHAUSTED",
+    "message": "Tool 'traverse' estimated working memory of 40960 bytes exceeded the 8192-byte memory budget; narrow the request (smaller depth/limit/k) and retry.",
+    "retriable": false,
+    "details": { "dimension": "memory_bytes", "limit": 8192, "consumed": 40960 }
+} }
+```
+
+It is `retriable: false` (caller-fault: the same request materializes the same
+estimate, so the caller must narrow it — unlike a timeout). The ordering is
+`cursor (#3360) → result-byte cap → memory budget → token budget (#3353)`; an
+error from an earlier stage passes through untouched.
+
+### Resource-limit counters in `database_stats`
+
+`database_stats` (no arguments) additively carries a `resource_limits` block so
+an operator or LLM can spot chronic offenders in one call:
+
+```jsonc
+{
+  // ...current / historical / cold_storage / wal / chain...
+  "resource_limits": {
+    "timeout_terminations": 3,   // responses terminated by the wall-clock timeout
+    "byte_cap_terminations": 1,  // responses rejected by the result-byte cap
+    "memory_terminations": 0,    // responses rejected by the (default-off) memory budget
+    "override_rejections": 0     // per-call `query` overrides rejected over a ceiling
+  }
+}
+```
+
+These are process-lifetime, cached atomic counters (O(1) reads; the underlying
+`DatabaseStats` struct and storage layer are untouched). They cover both the
+`query` tool and the six wrapped read tools. Row-cap breaches are **not** counted
+(they self-disclose via `truncated`/`has_more`).
 
 ## Discovering the queryable temporal extent (`temporal_extent`)
 
@@ -1037,10 +1240,21 @@ serializes that snapshot.
     "durability_mode": "group_commit", // synchronous | async | group_commit | async_batched
     "current_lsn": 62501,         // NEXT LSN to be allocated
     "total_appends": 62500,
-    "healthy": true               // false = outstanding WAL flush errors
+    "healthy": true               // false = outstanding WAL flush errors OR a
+                                  // stale flusher heartbeat (Issue #3798)
   }
 }
 ```
+
+`wal.healthy` covers two independent failure classes. Outstanding flush errors
+are the historical meaning. Since Issue #3798 it *also* reports `false` when
+the background flush thread's heartbeat has gone **stale** — a flusher that
+died or wedged raises no error at all, it just stops draining, so error
+counters alone can never see it. Staleness is judged against
+`max(10 × flush_interval, 5s)` on a monotonic clock. This dimension applies
+only to the flusher-backed durability modes; `Synchronous` flushes inline on
+the write path, has no heartbeat that *could* advance, and is therefore never
+judged stale. See [../WAL.md](../WAL.md#stall-diagnosability-issue-3798).
 
 The cold-tier version counts are seeded from the persisted tables when the
 database is opened (an O(1) metadata read), so a restarted process reports its

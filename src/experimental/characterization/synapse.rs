@@ -39,7 +39,12 @@
 
 use crate::AletheiaDB;
 use crate::core::error::{Error, Result};
-use crate::core::hasher::IdentityHasher;
+// `IdHashBuilder` for the DashMap below (its shard selector reads the high bits
+// of the hash, so an identity hash collapses every entry into shard 0);
+// `IdentityHasher` for the plain `HashMap`s in the pathfinding code, which have
+// no shards to spread across and where sequential ids mapping to sequential
+// buckets is good locality.
+use crate::core::hasher::{IdHashBuilder, IdentityHasher};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::vector::cosine_similarity;
 use dashmap::DashMap;
@@ -54,7 +59,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 pub struct SynapseContext {
     /// Maps EdgeId -> Usage Count.
     /// Usage count is monotonic increasing (until manual reset/decay handling).
-    weights: DashMap<EdgeId, AtomicU64, BuildHasherDefault<IdentityHasher>>,
+    weights: DashMap<EdgeId, AtomicU64, IdHashBuilder>,
 }
 
 impl Default for SynapseContext {

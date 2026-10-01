@@ -13,6 +13,12 @@ use crate::index::vector::DistanceMetric;
 pub struct QueryAst {
     /// Optional temporal clause (AS OF or BETWEEN)
     pub temporal: Option<TemporalClause>,
+    /// Optional namespace scope clause (`USE / IN NAMESPACE ...`, Issue #3349,
+    /// PR2b). When present, the converter lowers it to a
+    /// [`NamespaceScope`](crate::core::namespace::NamespaceScope) on the produced
+    /// query IR; when absent, the query stays namespace-agnostic exactly as
+    /// before.
+    pub namespace: Option<NamespaceClause>,
     /// Main query source (MATCH or vector search)
     pub source: SourceClause,
     /// Optional ranking clause (RANK BY SIMILARITY)
@@ -27,6 +33,16 @@ pub struct QueryAst {
     pub skip: Option<usize>,
     /// LIMIT clause
     pub limit: Option<usize>,
+    /// Temporal aggregation window clause (Issue #3363). When present, the query
+    /// buckets the matched entity's valid-time history into tumbling windows and
+    /// computes per-window aggregates; the window clause carries its own
+    /// aggregate `RETURN` list, so `return_clause` is unused.
+    pub window: Option<WindowClause>,
+    /// Temporal join / align clause (Issue #3379). When present, the query
+    /// aligns the matched entities at matching valid-time coordinates over a
+    /// range; the align clause carries its own `RETURN` list, so
+    /// `return_clause` is unused.
+    pub align: Option<AlignClause>,
 }
 
 impl QueryAst {
@@ -34,6 +50,7 @@ impl QueryAst {
     pub fn new(source: SourceClause) -> Self {
         QueryAst {
             temporal: None,
+            namespace: None,
             source,
             rank: None,
             where_clause: None,
@@ -41,6 +58,8 @@ impl QueryAst {
             order: None,
             skip: None,
             limit: None,
+            window: None,
+            align: None,
         }
     }
 
@@ -48,6 +67,13 @@ impl QueryAst {
     #[must_use]
     pub fn with_temporal(mut self, temporal: TemporalClause) -> Self {
         self.temporal = Some(temporal);
+        self
+    }
+
+    /// Add a namespace scope clause to the query.
+    #[must_use]
+    pub fn with_namespace(mut self, namespace: NamespaceClause) -> Self {
+        self.namespace = Some(namespace);
         self
     }
 
@@ -93,6 +119,20 @@ impl QueryAst {
         self
     }
 
+    /// Add a temporal aggregation window clause to the query.
+    #[must_use]
+    pub fn with_window(mut self, window: WindowClause) -> Self {
+        self.window = Some(window);
+        self
+    }
+
+    /// Add a temporal join / align clause to the query.
+    #[must_use]
+    pub fn with_align(mut self, align: AlignClause) -> Self {
+        self.align = Some(align);
+        self
+    }
+
     /// Check if this query has temporal context.
     pub fn is_temporal(&self) -> bool {
         self.temporal.is_some()
@@ -105,6 +145,25 @@ impl QueryAst {
             SourceClause::VectorSearch { .. } | SourceClause::FindSimilar { .. }
         ) || self.rank.is_some()
     }
+}
+
+/// A namespace scope clause (`USE / IN NAMESPACE ...`, Issue #3349, PR2b).
+///
+/// The canonical surface is `USE NAMESPACE <name>` (single),
+/// `USE NAMESPACE <a>, <b>` (union), and `USE ALL NAMESPACES` (no filter);
+/// `IN` is an accepted synonym for `USE`. Namespace **names** are carried as
+/// raw strings and validated in the converter (charset / length / reserved
+/// rules via [`Namespace::new`](crate::core::namespace::Namespace::new)), so a
+/// malformed *name* surfaces as a structured `INVALID_ARGUMENT`, exactly as the
+/// MCP `namespace` param does — while a malformed *clause structure* is a parse
+/// error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NamespaceClause {
+    /// `USE ALL NAMESPACES` (or the single selector name `all`) — no filter.
+    All,
+    /// `USE NAMESPACE <name> [, <name>]*` — a non-empty list of raw namespace
+    /// names (one ⇒ single scope, more ⇒ union).
+    Names(Vec<String>),
 }
 
 /// Temporal clause for time-travel queries.
@@ -124,6 +183,123 @@ pub enum TemporalClause {
         /// End time
         end: TimestampLiteral,
     },
+}
+
+/// A temporal aggregation window clause (Issue #3363).
+///
+/// Syntax:
+/// ```text
+/// WINDOW <count> <unit> OVER VALID_TIME FROM <ts> TO <ts>
+/// [ AS OF SYSTEM_TIME <ts> ]
+/// RETURN <agg>(<arg>) [AS alias] [, ...]
+/// ```
+///
+/// The unit word and aggregate function names are kept as raw strings and
+/// validated in the converter, where a bad unit/function maps to a structured
+/// [`crate::core::error::QueryError`] the MCP `query` tool surfaces as
+/// `invalid_params` / `unsupported_construct`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowClause {
+    /// The positive window-size multiplier (`3` in `3 months`).
+    pub count: i64,
+    /// The raw unit word (e.g. `"month"`, `"days"`), validated in the converter.
+    pub unit: String,
+    /// Inclusive start of the valid-time range.
+    pub range_start: TimestampLiteral,
+    /// Exclusive end of the valid-time range.
+    pub range_end: TimestampLiteral,
+    /// Optional `AS OF SYSTEM_TIME` transaction-time coordinate (default: now).
+    pub as_of_system_time: Option<TimestampLiteral>,
+    /// The per-window aggregate return items.
+    pub aggregates: Vec<WindowReturnItem>,
+}
+
+/// One aggregate item in a window `RETURN` list (Issue #3363).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowReturnItem {
+    /// The raw aggregate function name (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`/`CHANGES`),
+    /// validated in the converter.
+    pub func: String,
+    /// The aggregate argument.
+    pub arg: WindowAggArg,
+    /// Optional output-column alias (`AS foo`).
+    pub alias: Option<String>,
+}
+
+/// The argument of a window aggregate (Issue #3363).
+#[derive(Debug, Clone, PartialEq)]
+pub enum WindowAggArg {
+    /// `*` (valid for `COUNT(*)` and `CHANGES(*)`).
+    Star,
+    /// A bare variable `v` (valid for `CHANGES(v)`; counts entity versions).
+    Entity {
+        /// The matched variable name.
+        var: String,
+    },
+    /// A property access `v.key`.
+    Property {
+        /// The matched variable name.
+        var: String,
+        /// The property key.
+        key: String,
+    },
+}
+
+/// A temporal join / align clause (Issue #3379).
+///
+/// Syntax:
+/// ```text
+/// ALIGN EVENTS DRIVER <var>                 -- event-aligned (ASOF analog)
+///   OVER VALID_TIME FROM <ts> TO <ts>
+///   [ AS OF SYSTEM_TIME <ts> ]
+///   RETURN <item> [AS alias] [, ...]
+///
+/// ALIGN OVERLAP                             -- interval-overlap
+///   OVER VALID_TIME FROM <ts> TO <ts> [ AS OF SYSTEM_TIME <ts> ]
+///   RETURN <item> [, ...]
+/// ```
+///
+/// The mode and return-item variables are validated in the converter, where a
+/// bad reference or unsupported pattern maps to a structured
+/// [`crate::core::error::QueryError`] the MCP `query` tool surfaces.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlignClause {
+    /// The alignment mode.
+    pub mode: AlignMode,
+    /// The driving-entity variable (event-aligned mode only; `None` for
+    /// interval-overlap).
+    pub driver: Option<String>,
+    /// Inclusive start of the valid-time range.
+    pub range_start: TimestampLiteral,
+    /// Exclusive end of the valid-time range.
+    pub range_end: TimestampLiteral,
+    /// Optional `AS OF SYSTEM_TIME` transaction-time coordinate (default: now).
+    pub as_of_system_time: Option<TimestampLiteral>,
+    /// The aligned `RETURN` items.
+    pub items: Vec<AlignReturnItem>,
+}
+
+/// The temporal-join alignment mode (Issue #3379).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignMode {
+    /// `EVENTS` — event-aligned (ASOF): sample participants at each driver
+    /// change-point.
+    Events,
+    /// `OVERLAP` — interval-overlap: piecewise sub-intervals where states
+    /// co-held.
+    Overlap,
+}
+
+/// One item in an align `RETURN` list (Issue #3379): a bound variable, or one
+/// of its properties, with an optional output alias.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlignReturnItem {
+    /// The matched variable name.
+    pub var: String,
+    /// The property key, or `None` to return the entity id.
+    pub key: Option<String>,
+    /// Optional output-column alias (`AS foo`).
+    pub alias: Option<String>,
 }
 
 /// A timestamp literal (string or integer).

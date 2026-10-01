@@ -20,7 +20,7 @@ all of its call sites do not exist.
 
 ```toml
 # Cargo.toml
-aletheiadb = { version = "0.3", features = ["http-server", "otel"] }
+aletheiadb = { version = "0.2", features = ["http-server", "otel"] }
 ```
 
 Even compiled in, tracing stays **off** until initialized. The HTTP server
@@ -133,9 +133,15 @@ middleware.
 
 Failures expose the active trace id for direct lookup in your backend: error
 responses carry a `trace_id` body field **and** an `x-trace-id` response header.
+Since the #3234 HTTP error-envelope unification the error is the nested
+`{"error":{…}}` shape, and `trace_id` remains a **top-level** sibling of `error`
+(the SDK reads it top-level):
 
 ```json
-{ "success": false, "error": "Node 999 not found", "trace_id": "0af7651916cd43dd8448eb211c80319c" }
+{
+  "error": { "code": "NOT_FOUND", "message": "Node 999 not found", "retriable": false },
+  "trace_id": "0af7651916cd43dd8448eb211c80319c"
+}
 ```
 
 ## Overhead

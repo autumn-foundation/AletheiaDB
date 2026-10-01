@@ -249,13 +249,17 @@ pub struct Neo4jFidelityReport {
 
 impl Neo4jFidelityReport {
     /// Recompute [`zero_loss`](Self::zero_loss) from the accumulated notes.
-    fn finalize(&mut self) {
+    ///
+    /// `pub(super)` so the sibling Cypher-dump importer
+    /// ([`super::neo4j_cypher`], Issue #3356) can reuse the same fidelity
+    /// bookkeeping and finalization contract.
+    pub(super) fn finalize(&mut self) {
         self.zero_loss = self.skipped.is_empty()
             && self.unresolved_endpoints.is_empty()
             && self.unsupported.is_empty();
     }
 
-    fn note_label(&mut self, neo4j_labels: &str, aletheia_label: &str) {
+    pub(super) fn note_label(&mut self, neo4j_labels: &str, aletheia_label: &str) {
         if let Some(entry) = self
             .label_mapping
             .iter_mut()
@@ -271,7 +275,7 @@ impl Neo4jFidelityReport {
         }
     }
 
-    fn note_type(&mut self, neo4j_type: &str) {
+    pub(super) fn note_type(&mut self, neo4j_type: &str) {
         if let Some(entry) = self
             .type_mapping
             .iter_mut()
@@ -287,7 +291,7 @@ impl Neo4jFidelityReport {
         }
     }
 
-    fn note_coercion(&mut self, column: &str, kind: &str, detail: &str) {
+    pub(super) fn note_coercion(&mut self, column: &str, kind: &str, detail: &str) {
         if let Some(entry) = self
             .coerced
             .iter_mut()
@@ -304,7 +308,7 @@ impl Neo4jFidelityReport {
         }
     }
 
-    fn note_unsupported(&mut self, column: &str, neo4j_type: &str) {
+    pub(super) fn note_unsupported(&mut self, column: &str, neo4j_type: &str) {
         if let Some(entry) = self.unsupported.iter_mut().find(|e| e.column == column) {
             entry.count += 1;
         } else {
@@ -1098,13 +1102,16 @@ fn prepare_edge(
 
 /// The source-file label (basename) used to attribute row/endpoint errors in a
 /// multi-file import (Issue #3356), mirroring the provenance basename.
-fn file_label_for(path: &Path) -> String {
+///
+/// `pub(super)` so the sibling Cypher-dump importer reuses identical
+/// error-attribution basenames.
+pub(super) fn file_label_for(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string())
 }
 
-fn coercion_detail(kind: &str) -> &'static str {
+pub(super) fn coercion_detail(kind: &str) -> &'static str {
     match kind {
         "char_to_string" => "char coerced to a 1-char string",
         "byte_to_int" => "byte widened to a 64-bit integer",
@@ -1112,12 +1119,17 @@ fn coercion_detail(kind: &str) -> &'static str {
         "temporal_to_micros" => "date/datetime coerced to epoch microseconds",
         "time_to_string" => "time-of-day stored as a string (no epoch anchor)",
         "multi_label_flattened" => "multi-label node flattened; full set kept in _labels",
+        "map_to_json" => "nested map value serialized to a JSON string",
+        "default_label" => "label-less node assigned the configured default label",
         _ => "value coerced",
     }
 }
 
 /// Derive the `neo4j-import::<basename>` provenance source for a file.
-fn provenance_for(path: &Path) -> Result<Provenance> {
+///
+/// `pub(super)` so the sibling Cypher-dump importer stamps identical
+/// `neo4j-import::<file>` provenance (Issue #3356 AC5).
+pub(super) fn provenance_for(path: &Path) -> Result<Provenance> {
     let basename = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())

@@ -8,11 +8,34 @@
 //!
 //! Write transactions buffer all changes in memory until commit.
 //! On commit, changes are validated and applied atomically.
+//!
+//! # The commit clock amplifies WAL back-pressure (Issue #3804)
+//!
+//! `commit()` holds the commit-timestamp lock across the WAL append, so
+//! anything that makes the append slow does not merely slow *this*
+//! transaction — it serializes every other committer behind it. The WAL's
+//! append bound is deliberately a **stall** detector rather than a cap on
+//! total call time (see `docs/WAL.md`), so a batch that keeps inching forward
+//! against a degraded-but-alive drainer can legitimately run for many
+//! multiples of that bound, and the commit clock is held for all of it. The
+//! WAL narrates such a call once per elapsed stall window; it does not
+//! shorten it. Narrowing the commit-clock scope so a blocking append no longer
+//! holds it is the actual cure and is tracked as **Issue #3804**.
+//!
+//! # Frames are appended before the epoch is registered
+//!
+//! `log_operations_to_wal` runs before `ConcurrentWalSystem::commit`, so a
+//! GroupCommit flush cycle can drain this transaction's frames into an epoch
+//! it never registers into. On the success path that is harmless; a *failing*
+//! flush inside that window is currently misattributed. The full statement of
+//! the gap, and why the flush coordinator's LSN watermark cannot be used to
+//! detect it, lives on `ConcurrentWalSystem::commit`.
 
 use super::{
     ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager, WriteBuffer,
     WriteOps, WriteRequestOptions,
 };
+use crate::core::commit_clock::CommitClock;
 use crate::core::error::{Result, ResultExt, StorageError, TransactionError};
 use crate::core::graph::{Edge, Node};
 use crate::core::hlc::{
@@ -21,7 +44,8 @@ use crate::core::hlc::{
 };
 use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
-use crate::core::property::{PropertyMap, PropertyMapBuilder};
+use crate::core::namespace;
+use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
 use crate::core::provenance::Provenance;
 use crate::core::temporal::{Timestamp, time};
 use crate::core::version::VersionMetadata;
@@ -31,10 +55,12 @@ use crate::storage::historical::HistoricalStorage;
 use crate::storage::wal::DurabilityMode;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
 use parking_lot::RwLock;
+use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 mod apply;
+pub(crate) mod cas;
 mod conflict;
 pub(crate) mod constraint;
 mod in_flight;
@@ -91,7 +117,7 @@ pub struct WriteTransaction {
     pub(crate) historical: Arc<RwLock<HistoricalStorage>>,
     pub(crate) temporal_indexes: Arc<TemporalIndexes>,
     pub(crate) wal: Arc<ConcurrentWalSystem>,
-    pub(crate) current_timestamp: Arc<Mutex<Timestamp>>,
+    pub(crate) current_timestamp: Arc<CommitClock>,
     pub(crate) commit_clock_observed_at: Arc<Mutex<Instant>>,
     pub(crate) visibility_manager: Arc<TxVisibilityManager>,
 
@@ -113,6 +139,42 @@ pub struct WriteTransaction {
     /// created without a tracker (legacy / tests): such commits skip watermark
     /// registration and behave exactly as before.
     pub(crate) in_flight: Option<Arc<InFlightLsns>>,
+
+    /// The parent database's node-role cell (Issue #3355, Slice A), shared
+    /// (not owned) so a demotion racing this transaction's commit is caught.
+    /// `None` for transactions created without it (legacy / low-level
+    /// tests): such commits skip the recheck, matching pre-#3355 behavior.
+    /// The construction-time seam
+    /// (`AletheiaDB::write_transaction`/`write_transaction_with_options`)
+    /// already rejected before this transaction was built; this is the
+    /// defensive recheck at commit time, closing the gap where
+    /// `enter_replica_mode` runs after construction but before commit.
+    pub(crate) role: Option<Arc<AtomicU8>>,
+
+    /// Compare-and-set preconditions buffered by `compare_and_set_*` /
+    /// `claim_with_lease` (Issue #3577). Each carries the condition (expected
+    /// version, optional lease OR-branch) for its buffered full-replace
+    /// `UpdateNode`/`UpdateEdge`; they are re-checked at commit under the
+    /// `historical.write()` guard by [`cas::detect_cas_precondition_violations`]
+    /// and excluded from the pre-lock snapshot-isolation conflict check. Empty
+    /// for transactions that use no conditional writes (zero overhead).
+    pub(crate) cas_preconditions: Vec<cas::CasPrecondition>,
+
+    /// Push-changefeed broadcaster (Issue #3375). `None` for transactions created
+    /// without the DB-layer wiring (legacy / low-level tests): such commits emit no
+    /// changefeed events. When present, the committed change set is broadcast to
+    /// matching subscribers AFTER the commit is durable, applied, and visible — outside
+    /// every write-path lock (the broadcaster's lock is a leaf).
+    pub(crate) changefeed: Option<Arc<crate::core::changefeed_subscription::ChangefeedBroadcaster>>,
+
+    /// GDPR crypto-shred sealing context (Issue #3359, PR-1b). `None` unless the
+    /// parent database has at least one **active** erasure designation, so a
+    /// database that never used crypto-shred pays nothing. When present, the
+    /// apply hook (`apply_node_write`/`apply_edge_write`) replaces designated
+    /// property values with sealed `SUBJ` envelopes before they reach either the
+    /// current or the historical tier.
+    #[cfg(feature = "audit-export")]
+    pub(crate) sealing: Option<crate::db::crypto_shred::SealingContext>,
 }
 
 impl WriteTransaction {
@@ -126,7 +188,7 @@ impl WriteTransaction {
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
-        current_timestamp: Arc<Mutex<Timestamp>>,
+        current_timestamp: Arc<CommitClock>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<IdGenerator>,
         edge_id_gen: Arc<IdGenerator>,
@@ -157,7 +219,7 @@ impl WriteTransaction {
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
-        current_timestamp: Arc<Mutex<Timestamp>>,
+        current_timestamp: Arc<CommitClock>,
         commit_clock_observed_at: Arc<Mutex<Instant>>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<IdGenerator>,
@@ -191,7 +253,7 @@ impl WriteTransaction {
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
-        current_timestamp: Arc<Mutex<Timestamp>>,
+        current_timestamp: Arc<CommitClock>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<IdGenerator>,
         edge_id_gen: Arc<IdGenerator>,
@@ -224,7 +286,7 @@ impl WriteTransaction {
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<ConcurrentWalSystem>,
-        current_timestamp: Arc<Mutex<Timestamp>>,
+        current_timestamp: Arc<CommitClock>,
         commit_clock_observed_at: Arc<Mutex<Instant>>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<IdGenerator>,
@@ -251,6 +313,11 @@ impl WriteTransaction {
             durability_mode,
             constraint_registry: None,
             in_flight: None,
+            role: None,
+            cas_preconditions: Vec::new(),
+            changefeed: None,
+            #[cfg(feature = "audit-export")]
+            sealing: None,
         }
     }
 
@@ -269,6 +336,77 @@ impl WriteTransaction {
     pub(crate) fn with_in_flight_tracker(mut self, tracker: Arc<InFlightLsns>) -> Self {
         self.in_flight = Some(tracker);
         self
+    }
+
+    /// Attach the parent database's node-role cell (Issue #3355, Slice A,
+    /// called by the DB layer). Enables the commit-time promotion-race
+    /// recheck in `commit_with_timestamp_inner`.
+    pub(crate) fn with_role_cell(mut self, role: Arc<AtomicU8>) -> Self {
+        self.role = Some(role);
+        self
+    }
+
+    /// Attach the parent database's push-changefeed broadcaster (Issue #3375, called by
+    /// the DB layer). When set, a successful commit broadcasts its committed change set to
+    /// matching subscribers after the write is durable, applied, and visible.
+    pub(crate) fn with_changefeed(
+        mut self,
+        broadcaster: Arc<crate::core::changefeed_subscription::ChangefeedBroadcaster>,
+    ) -> Self {
+        self.changefeed = Some(broadcaster);
+        self
+    }
+
+    /// Attach the GDPR crypto-shred sealing context (Issue #3359, PR-1b, called
+    /// by the DB layer when the database has active designations). When set, the
+    /// apply hook seals designated property values before persisting them.
+    #[cfg(feature = "audit-export")]
+    pub(crate) fn with_sealing_context(
+        mut self,
+        sealing: crate::db::crypto_shred::SealingContext,
+    ) -> Self {
+        self.sealing = Some(sealing);
+        self
+    }
+
+    /// Seal designated property values in the write buffer (Issue #3359, PR-1b).
+    ///
+    /// Called from `commit_with_timestamp_inner` AFTER validation + constraint
+    /// checks (which must see plaintext values) but BEFORE WAL logging and apply,
+    /// so the WAL segment, the current tier, and the historical tier all receive
+    /// **byte-identical** sealed ciphertext (each envelope is sealed exactly once;
+    /// its random per-encryption nonce is shared across every tier). No-op when no
+    /// sealing context is attached (no active designation) or when no buffered
+    /// entity carries a designated key.
+    ///
+    /// # Errors
+    /// Propagates the seal error (fail-closed: a seal failure aborts the commit
+    /// rather than persisting plaintext of erasable data).
+    #[cfg(feature = "audit-export")]
+    pub(crate) fn seal_buffer(&mut self) -> Result<()> {
+        use super::BufferedWrite as BW;
+        // Cheap clone (two Arc + a Copy enum) so we can borrow the buffer mutably.
+        let Some(ctx) = self.sealing.clone() else {
+            return Ok(());
+        };
+        for op in self.buffer.operations_mut() {
+            let (is_node, entity_id) = match op {
+                BW::CreateNode { node_id, .. } | BW::UpdateNode { node_id, .. } => {
+                    (true, node_id.as_u64())
+                }
+                BW::CreateEdge { edge_id, .. } | BW::UpdateEdge { edge_id, .. } => {
+                    (false, edge_id.as_u64())
+                }
+                // Deletes/retracts re-persist already-sealed bytes read back from
+                // storage — no re-seal needed.
+                _ => continue,
+            };
+            if let Some(props_ref) = op.properties_mut() {
+                let props = std::mem::take(props_ref);
+                *props_ref = ctx.seal_map(is_node, entity_id, props)?;
+            }
+        }
+        Ok(())
     }
 
     /// Get transaction metadata.
@@ -397,6 +535,17 @@ impl WriteTransaction {
             .into());
         }
 
+        // Read-only replica promotion/demotion-race guard (Issue #3355, Slice
+        // A). `write_transaction`/`write_transaction_with_options` already
+        // rejected before this transaction was constructed; this closes the
+        // gap where `enter_replica_mode` runs after construction but before
+        // commit. `None` (a transaction built without the role cell attached
+        // -- legacy/low-level construction) skips the recheck, matching
+        // pre-#3355 behavior.
+        if let Some(role) = &self.role {
+            crate::db::replication_role::reject_if_replica(role)?;
+        }
+
         // Transition to preparing state
         self.state = TxState::Preparing;
 
@@ -420,6 +569,16 @@ impl WriteTransaction {
             None
         };
 
+        // GDPR crypto-shred (Issue #3359, PR-1b): seal designated property values
+        // in the buffer AFTER validation + constraint checks (which must see
+        // plaintext) but BEFORE WAL logging + apply, so every tier (WAL segment,
+        // current, historical) records byte-identical sealed ciphertext. Runs
+        // outside the `current_timestamp` critical section, keeping the keyring
+        // lock off the timestamp-held path. Fail-closed. No-op without an active
+        // designation.
+        #[cfg(feature = "audit-export")]
+        self.seal_buffer()?;
+
         // Issue #3406: pre-generate the closing (delete tombstone / retraction)
         // version ids BEFORE WAL logging, so the SAME ids are both (a) recorded
         // in the WAL delete/retract payloads and (b) applied to historical
@@ -439,6 +598,17 @@ impl WriteTransaction {
         // or on any early-return / panic path), so a *deregistered* LSN is
         // guaranteed present in any current+historical snapshot.
         let mut in_flight_guard: Option<in_flight::InFlightGuard> = None;
+
+        // Issue #3375 (ordered emit, HIGH review fix): the push-changefeed emit ticket.
+        // Reserved UNDER the `current_timestamp` lock below (right after the commit timestamp
+        // is assigned) so its sequence totally orders commits by commit timestamp; consumed on
+        // the success path by `EmitTicket::submit`. Declared in the OUTER scope so that if the
+        // commit aborts/`?`-returns after reservation but before submit (a WAL failure, or the
+        // Issue #3416/#3577 commit-time precondition guards — now run before the WAL append,
+        // Issue #3413 — or a storage error during apply), dropping this `Option` releases an
+        // empty slot for the reserved seq — the sequencer never stalls on a
+        // reserved-but-never-submitted sequence.
+        let mut emit_ticket: Option<crate::core::changefeed_subscription::EmitTicket> = None;
 
         // Acquire commit timestamp and perform mode-aware WAL flush.
         //
@@ -460,177 +630,241 @@ impl WriteTransaction {
         // - Synchronous: Appends drain and flush immediately with fsync
         // - Async: Appends go to ring buffers, background thread syncs
         // - GroupCommit: Appends go to ring buffers, wait for epoch completion
+        // Issue #3413 (WAL abort framing): hold `current_timestamp` across the
+        // ENTIRE commit — the precondition guards (below, BEFORE the WAL append),
+        // the WAL append + durability, apply, and finalize — released explicitly
+        // after finalize. The guards read only current storage, so this single
+        // held lock serializes commits end-to-end: a transaction the guards reject
+        // returns with NO WAL frame, so crash recovery can never reapply a rejected
+        // write. The documented lock order (`current_timestamp` → `wal` →
+        // `historical`) is preserved — `wal` and `historical` are each acquired
+        // only while holding `current_timestamp`, and `wal` is never appended under
+        // `historical`.
+        //
+        // Test-only interleaving seam (Issue #3416 / #3413): fires here — after
+        // `validate`/`detect_conflicts`/`check_constraints`, BEFORE the
+        // `current_timestamp` lock — so a test can commit a concurrent
+        // delete/create in this window (the victim holds no commit-clock lock yet)
+        // and then observe the victim abort at its own commit-time write-skew
+        // re-check under the lock. Production builds compile this away.
+        #[cfg(test)]
+        commit_test_hooks::run_pre_commit_clock_hook();
+
+        #[cfg(feature = "observability")]
+        let ts_lock_start = std::time::Instant::now();
+
+        let mut ts = self
+            .current_timestamp
+            .lock()
+            .map_err(|_| TransactionError::LockPoisoned {
+                resource: "current_timestamp".to_string(),
+            })?;
+
+        #[cfg(feature = "observability")]
+        let ts_lock_acquired = std::time::Instant::now();
+
         let commit_timestamp = {
-            #[cfg(feature = "observability")]
-            let ts_lock_start = std::time::Instant::now();
-
-            let mut ts =
-                self.current_timestamp
-                    .lock()
-                    .map_err(|_| TransactionError::LockPoisoned {
-                        resource: "current_timestamp".to_string(),
-                    })?;
-
-            #[cfg(feature = "observability")]
-            let ts_lock_acquired = std::time::Instant::now();
-
-            // Phase 2: Use HLC for distributed temporal consistency
-            // Get current physical wallclock
-            let current_wallclock = crate::core::temporal::time::now();
             let observed_at = Instant::now();
             let (mut previous_observed_at, adaptive_forward_limit_us) =
                 self.lock_adaptive_forward_jump_limit(observed_at)?;
 
             let self_heal_clock_skew = is_clock_skew_self_heal_enabled();
-            let skew_decision = evaluate_clock_skew(
-                current_wallclock.wallclock(),
-                ts.wallclock(),
-                Some(adaptive_forward_limit_us),
-                self_heal_clock_skew,
-            )
-            .map_err(|violation| TransactionError::ClockSkew {
-                wallclock: current_wallclock.wallclock(),
-                previous: ts.wallclock(),
-                drift_us: violation.drift_us,
-                max_allowed: violation.max_allowed,
-            })?;
 
-            if self_heal_clock_skew && let Some(_direction) = skew_decision.healed_direction {
-                #[cfg(feature = "observability")]
-                tracing::warn!(
-                    wallclock_ts = %current_wallclock,
-                    prev_ts = %ts,
-                    drift_us = skew_decision.drift_us,
-                    reason = _direction.as_str(),
-                    "Self-healing clock skew by clamping to local HLC frontier"
-                );
-            }
+            // Assign the commit stamp and publish it to the allocation frontier
+            // as one atomic step, marking the clock in-flight so lock-free
+            // readers park on this stamp instead of reserving past it (see
+            // `core::commit_clock`). The closure derives the stamp from
+            // whatever frontier it is handed rather than from a value captured
+            // earlier: a reader can reserve between this guard being taken and
+            // the exchange landing, and the retry has to build on that
+            // reservation instead of clobbering it.
+            let commit = ts.advance_with(|frontier| {
+                // Phase 2: Use HLC for distributed temporal consistency
+                // Get current physical wallclock
+                let current_wallclock = crate::core::temporal::time::now();
 
-            // Phase 2: Use HLC .send() method for monotonic timestamp generation
-            // This ensures: if wallclock advances, reset logical; otherwise increment logical
-            let commit = send_with_overflow_self_heal(
-                &ts,
-                skew_decision.effective_wallclock,
-                self_heal_clock_skew,
-                |error| match error {
-                    SendWithSelfHealError::InitialSend(error) => TransactionError::CommitFailed {
-                        reason: format!("HLC timestamp generation failed: {}", error),
-                    },
-                    SendWithSelfHealError::FallbackWallclockOverflow {
-                        wallclock,
-                        current_logical,
-                    } => TransactionError::CommitFailed {
-                        reason: format!(
-                            "HLC logical counter overflow at wallclock={}: {}",
-                            wallclock, current_logical
-                        ),
-                    },
-                    SendWithSelfHealError::FallbackSend(fallback_error) => {
-                        TransactionError::CommitFailed {
-                            reason: format!(
-                                "HLC timestamp generation failed while self-healing: {}",
-                                fallback_error
-                            ),
-                        }
-                    }
-                },
-            )?;
+                let skew_decision = evaluate_clock_skew(
+                    current_wallclock.wallclock(),
+                    frontier.wallclock(),
+                    Some(adaptive_forward_limit_us),
+                    self_heal_clock_skew,
+                )
+                .map_err(|violation| TransactionError::ClockSkew {
+                    wallclock: current_wallclock.wallclock(),
+                    previous: frontier.wallclock(),
+                    drift_us: violation.drift_us,
+                    max_allowed: violation.max_allowed,
+                })?;
 
-            // Observability: Warn about clock skew issues
-            #[cfg(feature = "observability")]
-            {
-                // Clock went backwards: wallclock < previous wallclock
-                if current_wallclock.wallclock() < ts.wallclock() {
+                if self_heal_clock_skew && let Some(_direction) = skew_decision.healed_direction {
+                    #[cfg(feature = "observability")]
                     tracing::warn!(
                         wallclock_ts = %current_wallclock,
-                        prev_ts = %ts,
-                        skew_us = ts.wallclock() - current_wallclock.wallclock(),
-                        logical_counter = commit.logical(),
-                        "Clock skew detected: wallclock went backwards (NTP adjustment?)"
-                    );
-                } else if commit.wallclock() > ts.wallclock() + 60_000_000 {
-                    // Large forward jump (>60 seconds)
-                    tracing::warn!(
-                        wallclock_ts = %current_wallclock,
-                        prev_ts = %ts,
-                        jump_us = commit.wallclock() - ts.wallclock(),
-                        "Large clock jump detected: timestamps will be lumpy"
+                        prev_ts = %frontier,
+                        drift_us = skew_decision.drift_us,
+                        reason = _direction.as_str(),
+                        "Self-healing clock skew by clamping to local HLC frontier"
                     );
                 }
-            }
 
-            // Update current_timestamp for next transaction's snapshot
-            *ts = commit;
+                // Phase 2: Use HLC .send() method for monotonic timestamp generation
+                // This ensures: if wallclock advances, reset logical; otherwise increment logical
+                let commit = send_with_overflow_self_heal(
+                    &frontier,
+                    skew_decision.effective_wallclock,
+                    self_heal_clock_skew,
+                    |error| match error {
+                        SendWithSelfHealError::InitialSend(error) => {
+                            TransactionError::CommitFailed {
+                                reason: format!("HLC timestamp generation failed: {}", error),
+                            }
+                        }
+                        SendWithSelfHealError::FallbackWallclockOverflow {
+                            wallclock,
+                            current_logical,
+                        } => TransactionError::CommitFailed {
+                            reason: format!(
+                                "HLC logical counter overflow at wallclock={}: {}",
+                                wallclock, current_logical
+                            ),
+                        },
+                        SendWithSelfHealError::FallbackSend(fallback_error) => {
+                            TransactionError::CommitFailed {
+                                reason: format!(
+                                    "HLC timestamp generation failed while self-healing: {}",
+                                    fallback_error
+                                ),
+                            }
+                        }
+                    },
+                )?;
+
+                // Observability: Warn about clock skew issues
+                #[cfg(feature = "observability")]
+                {
+                    // Clock went backwards: wallclock < previous wallclock
+                    if current_wallclock.wallclock() < frontier.wallclock() {
+                        tracing::warn!(
+                            wallclock_ts = %current_wallclock,
+                            prev_ts = %frontier,
+                            skew_us = frontier.wallclock() - current_wallclock.wallclock(),
+                            logical_counter = commit.logical(),
+                            "Clock skew detected: wallclock went backwards (NTP adjustment?)"
+                        );
+                    } else if commit.wallclock() > frontier.wallclock() + 60_000_000 {
+                        // Large forward jump (>60 seconds)
+                        tracing::warn!(
+                            wallclock_ts = %current_wallclock,
+                            prev_ts = %frontier,
+                            jump_us = commit.wallclock() - frontier.wallclock(),
+                            "Large clock jump detected: timestamps will be lumpy"
+                        );
+                    }
+                }
+
+                Ok(commit)
+            })?;
+
             // Persist observation only after we successfully advanced the frontier.
             *previous_observed_at = observed_at;
             drop(previous_observed_at);
 
-            #[cfg(feature = "observability")]
-            let wal_start = std::time::Instant::now();
-
-            // Log operations to WAL (lock-free striped append!)
-            // This must happen BEFORE applying changes for durability.
-            // Returns the base (lowest) LSN allocated for this commit, if any.
-            let base_lsn = wal::log_operations_to_wal(self, commit, &closing_version_ids)?;
-
-            // Register the commit's base LSN as in-flight BEFORE the durability
-            // fsync below, so a write that becomes durable is always registered.
-            // The guard survives to end-of-function (see its declaration above).
-            if let (Some(tracker), Some(base_lsn)) = (self.in_flight.as_ref(), base_lsn) {
-                in_flight_guard = Some(tracker.register(base_lsn.0));
-            }
-
-            #[cfg(feature = "observability")]
-            let wal_logged = std::time::Instant::now();
-
-            // Commit with configured durability mode
-            // For Sync: drains and flushes immediately
-            // For Async: returns immediately
-            // For GroupCommit: registers and returns epoch
-            let wait_epoch = self.wal.commit()?;
-
-            #[cfg(feature = "observability")]
-            let wal_commit_completed = std::time::Instant::now();
-
-            // For GroupCommit mode, wait for the epoch to be flushed.
-            // AsyncBatched mode returns an epoch but does NOT wait.
-            if let Some(epoch) = wait_epoch
-                && let Some(gc) = self.wal.group_commit_coordinator()
-                && self.durability_mode.waits_for_durability()
+            // Issue #3375 (ordered emit): reserve the push-changefeed emit ticket HERE, while
+            // the `current_timestamp` lock is still held and monotonic ordering is guaranteed,
+            // so the ticket's sequence == this commit's timestamp order == ChangeCursor order.
+            // Gated on `has_subscribers()` so the zero-subscriber fast path stays a single
+            // atomic load with no sequencer work (no reservation, no ticket). The reservation
+            // itself is a lock-free `fetch_add`, so taking it under `current_timestamp` does
+            // not violate the write-path lock order.
+            if let Some(broadcaster) = &self.changefeed
+                && broadcaster.has_subscribers()
             {
-                gc.wait_for_flush(epoch)?;
-            }
-
-            #[cfg(feature = "observability")]
-            {
-                // Record detailed breakdown for tracing and metrics.
-                let ts_lock_wait_us =
-                    ts_lock_acquired.duration_since(ts_lock_start).as_micros() as u64;
-                let wal_log_us = wal_logged.duration_since(wal_start).as_micros() as u64;
-                let wal_commit_us =
-                    wal_commit_completed.duration_since(wal_logged).as_micros() as u64;
-                let total_us = wal_commit_completed
-                    .duration_since(ts_lock_start)
-                    .as_micros() as u64;
-
-                let total_commit_us = commit_start.elapsed().as_micros() as u64;
-                tracing::info!(
-                    ts_lock_wait_us,
-                    wal_log_us,
-                    wal_commit_us,
-                    total_us,
-                    total_commit_us,
-                    operations_count,
-                    commit_ts = %commit,
-                    durability_mode = ?self.durability_mode,
-                    "Transaction commit breakdown (concurrent WAL)"
-                );
+                emit_ticket = Some(broadcaster.reserve_emit_ticket());
             }
 
             commit
         };
 
-        // Apply all changes atomically.
+        // Issue #3413 (WAL abort framing): run the commit-time precondition guards
+        // HERE — under `current_timestamp`, BEFORE the WAL append — instead of
+        // inside `apply_changes` after the frame is already durable. Each guard
+        // reads only current storage (never `historical`), and `current_timestamp`
+        // is held across `apply_changes` below, so a guard that passes now stays
+        // valid through apply: no other committer can apply in between. A rejection
+        // returns here with NO WAL frame appended, so a transaction refused at
+        // runtime can never be reapplied by crash recovery. These are the three
+        // previously-post-WAL rejection paths: the #3416 delete-orphan /
+        // dangling-endpoint write-skew re-checks and the #3577/#3755
+        // CAS/lease/fence precondition re-check.
+        apply::detect_delete_orphan_write_skew(self)?;
+        apply::detect_create_edge_dangling_endpoint(self)?;
+        cas::detect_cas_precondition_violations(self, commit_timestamp)?;
+
+        #[cfg(feature = "observability")]
+        let wal_start = std::time::Instant::now();
+
+        // Log operations to WAL (lock-free striped append!). Runs AFTER the guards
+        // above (so a rejected transaction leaves no durable frame) and BEFORE
+        // applying changes (for durability). Returns the base (lowest) LSN
+        // allocated for this commit, if any.
+        let base_lsn = wal::log_operations_to_wal(self, commit_timestamp, &closing_version_ids)?;
+
+        // Register the commit's base LSN as in-flight BEFORE the durability fsync,
+        // so a write that becomes durable is always registered. The guard survives
+        // to end-of-function (see its declaration above).
+        if let (Some(tracker), Some(base_lsn)) = (self.in_flight.as_ref(), base_lsn) {
+            in_flight_guard = Some(tracker.register(base_lsn.0));
+        }
+
+        #[cfg(feature = "observability")]
+        let wal_logged = std::time::Instant::now();
+
+        // Commit with configured durability mode.
+        // For Sync: drains and flushes immediately.
+        // For Async: returns immediately.
+        // For GroupCommit: registers and returns epoch.
+        let wait_epoch = self.wal.commit()?;
+
+        #[cfg(feature = "observability")]
+        let wal_commit_completed = std::time::Instant::now();
+
+        // NOTE: the GroupCommit flush wait used to happen HERE, inside the held
+        // `current_timestamp` lock. That is what made group commit unable to
+        // group: the first committer parked on its own fsync while still holding
+        // the lock every other committer needs to reach the WAL at all, so no two
+        // transactions could ever be registered-and-unflushed at the same time
+        // and the batch size was structurally pinned at one. Measured, throughput
+        // tracked `1 / max_delay_ms` exactly (92/s at 10ms, 176/s at 5ms, 664/s at
+        // 1ms) and plain `Synchronous` beat it 45x. The wait now happens after
+        // apply and outside the lock -- see below.
+
+        #[cfg(feature = "observability")]
+        {
+            // Record detailed breakdown for tracing and metrics.
+            let ts_lock_wait_us = ts_lock_acquired.duration_since(ts_lock_start).as_micros() as u64;
+            let wal_log_us = wal_logged.duration_since(wal_start).as_micros() as u64;
+            let wal_commit_us = wal_commit_completed.duration_since(wal_logged).as_micros() as u64;
+            let total_us = wal_commit_completed
+                .duration_since(ts_lock_start)
+                .as_micros() as u64;
+
+            let total_commit_us = commit_start.elapsed().as_micros() as u64;
+            tracing::info!(
+                ts_lock_wait_us,
+                wal_log_us,
+                wal_commit_us,
+                total_us,
+                total_commit_us,
+                operations_count,
+                commit_ts = %commit_timestamp,
+                durability_mode = ?self.durability_mode,
+                "Transaction commit breakdown (concurrent WAL)"
+            );
+        }
+
+        // Apply all changes atomically, still holding `current_timestamp` (Issue
+        // #3413): the guards above ran under this same held lock, so no other
+        // committer can have applied in between and their results remain valid.
         // Nodes/edges are written with commit_timestamp: None during this phase.
         //
         // Issue #3425: `apply_changes` returns the `historical.write()` guard
@@ -647,22 +881,23 @@ impl WriteTransaction {
         //
         // The pre-generated closing version ids (Issue #3406) are consumed here
         // in the same buffer order they were logged to the WAL.
-        //
-        // Test-only interleaving hook (Issue #3416 Pt1): fires AFTER
-        // validate/detect_conflicts/WAL but BEFORE `apply_changes` acquires the
-        // `historical.write()` guard, so a test can commit a concurrent
-        // delete/create in this window and exercise the commit-time write-skew
-        // re-checks. Production builds compile this away.
-        #[cfg(test)]
-        commit_test_hooks::run_pre_apply_hook();
 
         // Always-compiled one-shot interleaving seam for the lost-write persist
-        // race regression tests (which live in `tests/` and therefore cannot see
-        // the `#[cfg(test)]` hooks above). This fires at the SAME point — durable
-        // + acknowledged (WAL fsynced), in-flight LSN registered, but NOT yet
-        // applied — so an integration test can park exactly one commit here while
-        // it drives a racing `persist_indexes()`. In production the seam is a
-        // single relaxed atomic load (unarmed), so it is effectively zero-cost.
+        // race regression tests (which live in `tests/`). This fires at the
+        // logged-but-not-yet-applied point — WAL appended and the in-flight LSN
+        // registered, `current_timestamp` STILL held (Issue #3413). (Before the
+        // flush wait moved out of this lock, this was also post-fsync; the
+        // invariant the tests pin is about persist_indexes not observing a
+        // logged-but-unapplied write, which is unchanged, and the window it
+        // guards is now strictly narrower.) A racing
+        // `persist_indexes()` briefly needs `current_timestamp` too (`db/admin.rs`,
+        // to read the frontier + in-flight set consistently), so it SERIALIZES
+        // behind a commit parked here rather than observing a durable-but-unapplied
+        // write — the invariant the reworked tests pin. The tests therefore park
+        // the commit on a SEPARATE thread and release it via a channel, so persist
+        // blocks then proceeds (no self-deadlock); a persist driven on the SAME
+        // thread as a parked commit WOULD hang, by design. In production the seam is
+        // a single relaxed atomic load (unarmed), so it is effectively zero-cost.
         race_seam::run_pre_apply_once();
 
         let historical_guard = apply::apply_changes(self, commit_timestamp, &closing_version_ids)?;
@@ -678,12 +913,13 @@ impl WriteTransaction {
         // written nodes/edges, making them visible to future snapshot readers.
         apply::finalize_current_commit_timestamps(self, commit_timestamp);
 
-        // Apply + finalization are complete: this write is now present in both
-        // current and historical storage. Deregister the in-flight LSN so index
-        // persistence no longer needs to hold the manifest watermark below it.
-        // Deregistering strictly AFTER finalize is the invariant that lets the
-        // watermark guarantee "every deregistered LSN is in the snapshot".
-        drop(in_flight_guard.take());
+        // The write is now present in current AND historical storage, so it is
+        // safe for a lock-free reader to be handed a snapshot strictly after it.
+        // Publishing any earlier would let a reader consider this commit visible
+        // (MVCC is `commit_ts < snapshot_ts`) and then fail to find it. Until
+        // this call, readers park on `commit_timestamp` itself and treat it as
+        // unseen -- see `core::commit_clock`.
+        ts.publish_applied(commit_timestamp);
 
         // Finalization complete: release the historical write guard. Snapshots
         // blocked on `historical.read()` now proceed and observe resolved timestamps.
@@ -696,6 +932,56 @@ impl WriteTransaction {
         // build under the global historical write lock would only add latency
         // without any correctness benefit.
         drop(historical_guard);
+
+        // Issue #3413 (WAL abort framing): release `current_timestamp` now that the
+        // precondition guards, WAL append + durability, apply, and finalize are all
+        // complete. Holding it across the whole commit is what makes a guard that
+        // passed pre-WAL still valid at apply time, so a rejected transaction never
+        // leaves a durable frame for crash recovery to reapply. Everything below
+        // (vector-index notify, changefeed broadcast, visibility registration) is
+        // independent of commit serialization and runs off the held lock.
+        drop(ts);
+
+        // Durability, now that the commit lock is released (GroupCommit only --
+        // `Synchronous` already fsynced inside `self.wal.commit()` above, and
+        // `AsyncBatched` returns an epoch it deliberately does not wait on).
+        //
+        // Waiting here rather than under the lock is what lets group commit
+        // actually group: N committers reach this point concurrently and collapse
+        // into one fsync, instead of each parking on its own flush while holding
+        // the lock the next one needs.
+        //
+        // Ordering this after apply is safe, and is what Postgres and friends do
+        // (log the record, apply to memory, flush the log, only then acknowledge):
+        //
+        // - `commit()` still does not return until the write is durable, so the
+        //   caller's ACID promise is unchanged.
+        // - A crash between apply and flush loses the in-memory state too, and
+        //   recovery correctly omits a frame that never reached disk. No caller
+        //   was ever told the commit succeeded.
+        // - A transaction that reads this write and commits durably cannot
+        //   "overtake" it: the WAL is flushed in LSN order, so flushing through
+        //   the reader's frame necessarily flushes this one first.
+        //
+        // What DOES change is the failure path. If the flush errors, this
+        // transaction returns `Err` with its writes already applied and visible,
+        // where previously the error arrived before apply and the writes stayed
+        // invisible. That is the standard consequence of applying before flushing
+        // (a WAL flush failure means the in-memory state is ahead of the log and
+        // the database can no longer honour its own durability contract). It
+        // affects GroupCommit only.
+        if let Some(epoch) = wait_epoch
+            && let Some(gc) = self.wal.group_commit_coordinator()
+            && self.durability_mode.waits_for_durability()
+        {
+            gc.wait_for_flush(epoch)?;
+        }
+
+        // Durable AND applied: deregister the in-flight LSN so index persistence
+        // no longer needs to hold the manifest watermark below it. Deregistering
+        // strictly after BOTH finalize and the flush is what lets the watermark
+        // guarantee "every deregistered LSN is durable and in the snapshot".
+        drop(in_flight_guard.take());
 
         // Notify temporal vector index of transaction completion (for snapshot creation).
         // Only call this if the transaction modified vector properties to avoid unnecessary overhead.
@@ -719,6 +1005,40 @@ impl WriteTransaction {
 
         // Mark as committed
         self.state = TxState::Committed;
+
+        // Issue #3375: broadcast this transaction's committed change set to push-changefeed
+        // subscribers. This runs on the committed path only (never for an aborted/rolled-back
+        // transaction, which returns early before reaching here), and strictly AFTER the write
+        // is durable (WAL fsynced), applied (current + historical), and visible
+        // (`register_commit`). No write-path lock is held: the records are built via a fresh,
+        // short `historical.read()` (a leaf acquisition — nothing later in the lock order is
+        // held) whose guard is dropped before submitting.
+        //
+        // HIGH review fix (ordered emit): we consume the ticket reserved under the
+        // `current_timestamp` lock. `submit` releases records to subscriber buffers in strict
+        // reserved-sequence (== commit-timestamp == ChangeCursor) order, so per-subscriber
+        // delivery is cursor-ascending even when concurrent commits finish their record-build
+        // out of order — the precondition that makes `last_delivered` a zero-loss resume
+        // high-water-mark. A slow subscriber cannot back-pressure this writer. We submit even
+        // an empty record set so the reserved sequence is released and never stalls the
+        // sequencer.
+        if let Some(ticket) = emit_ticket.take() {
+            let (node_vids, edge_vids) =
+                self.committed_changefeed_version_ids(&closing_version_ids);
+            let mut records: Vec<crate::core::changefeed::ChangeRecord> =
+                if node_vids.is_empty() && edge_vids.is_empty() {
+                    Vec::new()
+                } else {
+                    let hist = self.historical.read();
+                    hist.collect_committed_changes(&node_vids, &edge_vids)
+                        .into_iter()
+                        .map(|raw| raw.into_record())
+                        .collect()
+                };
+            // Deterministic #3216 total order (tx-time, kind, entity, version).
+            records.sort_by_key(|r| r.cursor());
+            ticket.submit(records);
+        }
 
         #[cfg(feature = "observability")]
         {
@@ -773,6 +1093,51 @@ impl WriteTransaction {
             ids.push(VersionId::new_unchecked(self.version_id_gen.next()?));
         }
         Ok(ids)
+    }
+
+    /// Collect the node and edge version ids this transaction just committed, split by
+    /// kind, for the push-changefeed broadcast (Issue #3375).
+    ///
+    /// Create/update ops carry their own `version_id`; delete/retract ops draw their
+    /// closing (tombstone) `version_id` from `closing_version_ids` in buffer order — the
+    /// exact order [`pregenerate_closing_version_ids`](Self::pregenerate_closing_version_ids)
+    /// generated them and [`apply::apply_changes`] consumed them. Iterating the buffer in
+    /// order and advancing a cursor into `closing_version_ids` for each delete/retract keeps
+    /// the pairing correct.
+    fn committed_changefeed_version_ids(
+        &self,
+        closing_version_ids: &[VersionId],
+    ) -> (Vec<VersionId>, Vec<VersionId>) {
+        use super::BufferedWrite as BW;
+        let mut node_vids = Vec::new();
+        let mut edge_vids = Vec::new();
+        let mut closing_cursor = 0usize;
+        let mut next_closing = || {
+            let id = closing_version_ids.get(closing_cursor).copied();
+            closing_cursor += 1;
+            id
+        };
+        for op in self.buffer.operations() {
+            match op {
+                BW::CreateNode { version_id, .. } | BW::UpdateNode { version_id, .. } => {
+                    node_vids.push(*version_id);
+                }
+                BW::CreateEdge { version_id, .. } | BW::UpdateEdge { version_id, .. } => {
+                    edge_vids.push(*version_id);
+                }
+                BW::DeleteNode { .. } | BW::RetractNode { .. } => {
+                    if let Some(id) = next_closing() {
+                        node_vids.push(id);
+                    }
+                }
+                BW::DeleteEdge { .. } | BW::RetractEdge { .. } => {
+                    if let Some(id) = next_closing() {
+                        edge_vids.push(id);
+                    }
+                }
+            }
+        }
+        (node_vids, edge_vids)
     }
 
     /// Rollback the transaction.
@@ -979,6 +1344,174 @@ impl WriteTransaction {
             return buffered;
         }
         self.current.get_edge(id)
+    }
+
+    /// Shared body for node replace (Issue #3549): buffer a full-overwrite
+    /// `UpdateNode` carrying `label_interned` + the *exact* `properties` map
+    /// (no PATCH merge). Callers pass an already-interned label so
+    /// [`remove_node_property`](WriteOps::remove_node_property) can reuse the
+    /// node's existing label without a (deprecated) interner `resolve`.
+    ///
+    /// Does not record the error metric — the public `WriteOps` entry points
+    /// wrap the call and do so.
+    fn buffer_node_replace(
+        &mut self,
+        node_id: NodeId,
+        label_interned: crate::core::interning::InternedString,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<()> {
+        // Check transaction state
+        if self.state != TxState::Active {
+            return Err(TransactionError::InvalidState {
+                current: format!("{:?}", self.state),
+                expected: "Active".to_string(),
+            }
+            .into());
+        }
+
+        // Verify the node exists (read-your-own-writes, Issue #3417) — a
+        // replace targets an existing entity, never conjures one. Unlike PATCH
+        // `update_node`, the existing map is NOT seeded into the new version:
+        // `properties` becomes the node's map *exactly*, so any prior key it
+        // omits is removed from current state (removal is encoded natively by
+        // the anchor/delta diff and survives WAL replay). The label is
+        // overwritten too.
+        let existing = self.read_own_node(node_id)?;
+        let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
+
+        // Re-stamp the immutable namespace from the existing node (Issue #3349)
+        // so a full overwrite (replace / remove-property) can never drop it.
+        let properties = namespace::restamp_namespace(properties, &existing.properties);
+
+        // A replace may add, change, OR remove vector properties; mark the
+        // buffer so the temporal vector index is notified on commit if either
+        // the old or the new state carries a vector.
+        if !self.buffer.has_vector_operations()
+            && (existing.properties.contains_vector() || properties.contains_vector())
+        {
+            self.buffer.mark_has_vector_operations();
+        }
+
+        // Get timestamp: use provided valid_from or default to transaction start time
+        let timestamp = self.start_timestamp;
+        let valid_from = options.valid_from.unwrap_or(timestamp);
+
+        // Validate valid_from is not too far in future
+        validation::validate_valid_from_future(valid_from)?;
+
+        // Validate valid_from is not before entity creation.
+        let creation_time = {
+            let historical = self.historical.read();
+            historical.node_creation_time(node_id)
+        };
+        if let Some(creation_time) = creation_time {
+            validation::validate_valid_from_not_before_creation(
+                &format!("node:{}", node_id.as_u64()),
+                creation_time,
+                valid_from,
+            )?;
+        }
+
+        // Normalize an all-absent provenance bundle to `None` (Issue #3224).
+        let provenance = options
+            .provenance
+            .filter(|p| !p.is_empty())
+            .map(std::sync::Arc::new);
+
+        // Buffer the FULL overwrite. Reuses the UpdateNode op (no new WAL
+        // variant / format bump, Issue #3549): the exact target map plus a
+        // possibly-new label is the payload.
+        self.buffer.add(super::BufferedWrite::UpdateNode {
+            node_id,
+            version_id,
+            label: label_interned,
+            properties,
+            valid_from,
+            provenance,
+        })?;
+
+        Ok(())
+    }
+
+    /// Shared body for edge replace (Issue #3549): buffer a full-overwrite
+    /// `UpdateEdge` carrying the *exact* `properties` map (no PATCH merge),
+    /// preserving the already-read `edge`'s immutable source/target/type.
+    /// Callers pass an already-read `edge` so
+    /// [`remove_edge_property`](WriteOps::remove_edge_property) need not read it
+    /// a second time (mirrors [`buffer_node_replace`](Self::buffer_node_replace)).
+    ///
+    /// Does not record the error metric — the public `WriteOps` entry points
+    /// wrap the call and do so.
+    fn buffer_edge_replace(
+        &mut self,
+        edge: Edge,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<()> {
+        // Check transaction state
+        if self.state != TxState::Active {
+            return Err(TransactionError::InvalidState {
+                current: format!("{:?}", self.state),
+                expected: "Active".to_string(),
+            }
+            .into());
+        }
+
+        let edge_id = edge.id;
+        let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
+
+        // Re-stamp the immutable namespace from the existing edge (Issue #3349)
+        // so a full overwrite (replace / remove-property) can never drop it.
+        let properties = namespace::restamp_namespace(properties, &edge.properties);
+
+        // A replace may add/change/remove vector properties.
+        if !self.buffer.has_vector_operations()
+            && (edge.properties.contains_vector() || properties.contains_vector())
+        {
+            self.buffer.mark_has_vector_operations();
+        }
+
+        // Get timestamp: use provided valid_from or default to transaction start time
+        let timestamp = self.start_timestamp;
+        let valid_from = options.valid_from.unwrap_or(timestamp);
+
+        // Validate valid_from is not too far in future
+        validation::validate_valid_from_future(valid_from)?;
+
+        // Validate valid_from is not before the edge's own creation time
+        let creation_time = {
+            let historical = self.historical.read();
+            historical.edge_creation_time(edge_id)
+        };
+        if let Some(creation_time) = creation_time {
+            validation::validate_valid_from_not_before_creation(
+                &format!("edge:{}", edge_id.as_u64()),
+                creation_time,
+                valid_from,
+            )?;
+        }
+
+        // Normalize an all-absent provenance bundle to `None` (Issue #3224).
+        let provenance = options
+            .provenance
+            .filter(|p| !p.is_empty())
+            .map(std::sync::Arc::new);
+
+        // Buffer the FULL overwrite via the existing UpdateEdge op (no WAL
+        // format change, Issue #3549), preserving endpoints and type.
+        self.buffer.add(super::BufferedWrite::UpdateEdge {
+            edge_id,
+            version_id,
+            source: edge.source,
+            target: edge.target,
+            label: edge.label,
+            properties,
+            valid_from,
+            provenance,
+        })?;
+
+        Ok(())
     }
 
     /// Enumerate edges CREATED earlier in THIS transaction that reference
@@ -1219,10 +1752,20 @@ impl WriteOps for WriteTransaction {
                 .into());
             }
 
+            // Reject any engine-reserved property key on the user-supplied map
+            // BEFORE stamping the namespace (Issue #3349): a caller may not
+            // forge/overwrite a `__aletheia_*` / `__shred_*` ride-along key.
+            namespace::reject_reserved_keys(&properties)?;
+
             // Generate IDs
             let node_id = NodeId::new_unchecked(self.node_id_gen.next()?);
             let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
             let label_interned = GLOBAL_INTERNER.intern(label)?;
+
+            // Stamp the namespace ride-along (Issue #3349). `None` ⇒ default,
+            // which is deliberately NOT stamped (byte-identical to legacy data).
+            let ns = options.namespace.clone().unwrap_or_default();
+            let properties = namespace::stamp_namespace(properties, &ns);
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
@@ -1272,10 +1815,17 @@ impl WriteOps for WriteTransaction {
                 .into());
             }
 
+            // Reject engine-reserved keys before stamping the namespace (#3349).
+            namespace::reject_reserved_keys(&properties)?;
+
             // Generate IDs
             let edge_id = EdgeId::new_unchecked(self.edge_id_gen.next()?);
             let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
             let label_interned = GLOBAL_INTERNER.intern(label)?;
+
+            // Stamp the namespace ride-along (Issue #3349); default not stamped.
+            let ns = options.namespace.clone().unwrap_or_default();
+            let properties = namespace::stamp_namespace(properties, &ns);
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
@@ -1309,6 +1859,82 @@ impl WriteOps for WriteTransaction {
         result.record_error_metric()
     }
 
+    fn compare_and_set_node_with_options(
+        &mut self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<VersionId> {
+        self.cas_node_impl(node_id, expected_version, properties, None, None, options)
+            .record_error_metric()
+    }
+
+    fn compare_and_set_edge_with_options(
+        &mut self,
+        edge_id: EdgeId,
+        expected_version: VersionId,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<VersionId> {
+        self.cas_edge_impl(edge_id, expected_version, properties, options)
+            .record_error_metric()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn claim_with_lease_with_options(
+        &mut self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        owner: PropertyValue,
+        lease_until: Timestamp,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<VersionId> {
+        self.claim_with_lease_impl(
+            node_id,
+            expected_version,
+            lease_owner_key,
+            lease_until_key,
+            owner,
+            lease_until,
+            properties,
+            options,
+        )
+        .record_error_metric()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn claim_with_lease_fenced_with_options(
+        &mut self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        fence_key: &str,
+        owner: PropertyValue,
+        lease_ttl: std::time::Duration,
+        new_fence: i64,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<VersionId> {
+        self.claim_with_lease_fenced_impl(
+            node_id,
+            expected_version,
+            lease_owner_key,
+            lease_until_key,
+            fence_key,
+            owner,
+            lease_ttl,
+            new_fence,
+            properties,
+            options,
+        )
+        .record_error_metric()
+    }
+
     fn update_node_with_options(
         &mut self,
         node_id: NodeId,
@@ -1324,6 +1950,14 @@ impl WriteOps for WriteTransaction {
                 }
                 .into());
             }
+
+            // A namespace is immutable after creation: reject an explicit
+            // namespace on this update rather than silently ignoring it (#3349).
+            namespace::reject_namespace_on_update(options.namespace.as_ref())?;
+
+            // Reject engine-reserved keys on the incoming PATCH (Issue #3349):
+            // a user may not set/overwrite a namespace/shred ride-along key.
+            namespace::reject_reserved_keys(&properties)?;
 
             // Get current node to preserve label and existing properties.
             // Buffer-aware read (Issue #3417): read-your-own-writes so an
@@ -1342,8 +1976,25 @@ impl WriteOps for WriteTransaction {
                 builder = builder.insert_by_key(*key, value.clone());
             }
 
-            // Build the final merged property map
-            let merged_properties = builder.build();
+            // Build the final merged property map, then re-stamp the immutable
+            // namespace from the existing node (Issue #3349). A PATCH inherently
+            // preserves the ride-along key; re-stamping makes that a hard
+            // guarantee that no update path can ever drop or change it.
+            let merged_properties = namespace::restamp_namespace(builder.build(), &node.properties);
+
+            // A PATCH may drop or downgrade a vector (e.g. overwrite the
+            // embedding key with a scalar, or remove it): mark the buffer so
+            // the temporal vector index snapshots on commit if EITHER the
+            // existing node or the merged map carries a vector. `WriteBuffer::add`
+            // only inspects the merged map, so without this a vector-removing
+            // PATCH leaves `has_vector_operations` false and no snapshot fires,
+            // leaking the phantom as-of-now (Issue #3621). Mirrors
+            // `buffer_node_replace`.
+            if !self.buffer.has_vector_operations()
+                && (node.properties.contains_vector() || merged_properties.contains_vector())
+            {
+                self.buffer.mark_has_vector_operations();
+            }
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
@@ -1409,6 +2060,13 @@ impl WriteOps for WriteTransaction {
                 .into());
             }
 
+            // A namespace is immutable after creation: reject an explicit
+            // namespace on this update rather than silently ignoring it (#3349).
+            namespace::reject_namespace_on_update(options.namespace.as_ref())?;
+
+            // Reject engine-reserved keys on the incoming PATCH (Issue #3349).
+            namespace::reject_reserved_keys(&properties)?;
+
             // Get current edge to preserve source, target, label and existing
             // properties. Buffer-aware read (Issue #3417): read-your-own-writes
             // so an update of a same-tx-created/updated edge merges onto the
@@ -1425,8 +2083,9 @@ impl WriteOps for WriteTransaction {
                 builder = builder.insert_by_key(*key, value.clone());
             }
 
-            // Build the final merged property map
-            let merged_properties = builder.build();
+            // Build the merged map, then re-stamp the immutable namespace from
+            // the existing edge (Issue #3349).
+            let merged_properties = namespace::restamp_namespace(builder.build(), &edge.properties);
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
@@ -1472,6 +2131,163 @@ impl WriteOps for WriteTransaction {
         })();
 
         result.record_error_metric()
+    }
+
+    fn replace_node_with_options(
+        &mut self,
+        node_id: NodeId,
+        label: &str,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<()> {
+        let result = (|| {
+            // Check transaction state BEFORE interning so a replace on an
+            // inactive tx never interns the label (mirrors
+            // `update_node_with_options`; `buffer_node_replace` re-checks state
+            // for the `remove_node_property` caller).
+            if self.state != TxState::Active {
+                return Err(TransactionError::InvalidState {
+                    current: format!("{:?}", self.state),
+                    expected: "Active".to_string(),
+                }
+                .into());
+            }
+
+            // A namespace is immutable after creation: reject an explicit
+            // namespace on this replace rather than silently ignoring it (#3349).
+            namespace::reject_namespace_on_update(options.namespace.as_ref())?;
+
+            // Reject engine-reserved keys on the user-supplied overwrite map
+            // (Issue #3349); the immutable namespace is re-stamped from the
+            // existing node inside `buffer_node_replace`.
+            namespace::reject_reserved_keys(&properties)?;
+
+            let label_interned = GLOBAL_INTERNER.intern(label)?;
+            self.buffer_node_replace(node_id, label_interned, properties, options)
+        })();
+
+        result.record_error_metric()
+    }
+
+    fn replace_edge_with_options(
+        &mut self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+    ) -> Result<()> {
+        let result = (|| {
+            // Check transaction state
+            if self.state != TxState::Active {
+                return Err(TransactionError::InvalidState {
+                    current: format!("{:?}", self.state),
+                    expected: "Active".to_string(),
+                }
+                .into());
+            }
+
+            // A namespace is immutable after creation: reject an explicit
+            // namespace on this replace rather than silently ignoring it (#3349).
+            namespace::reject_namespace_on_update(options.namespace.as_ref())?;
+
+            // Reject engine-reserved keys on the user-supplied overwrite map
+            // (Issue #3349); the immutable namespace is re-stamped from the
+            // existing edge inside `buffer_edge_replace`.
+            namespace::reject_reserved_keys(&properties)?;
+
+            // Verify the edge exists and capture its immutable endpoints/type
+            // (read-your-own-writes, Issue #3417). Full overwrite of properties
+            // only: source/target/label are preserved from the existing edge.
+            let edge = self.read_own_edge(edge_id)?;
+            self.buffer_edge_replace(edge, properties, options)
+        })();
+
+        result.record_error_metric()
+    }
+
+    fn remove_node_property(&mut self, node_id: NodeId, key: &str) -> Result<()> {
+        // An engine-reserved key (the namespace ride-along, #3349) is not a
+        // user property and may not be targeted for removal.
+        if namespace::is_reserved_property_key(key) {
+            return Err(namespace::NamespaceError::ReservedPropertyKey {
+                key: key.to_string(),
+            }
+            .into())
+            .record_error_metric();
+        }
+        // Check transaction state up front so an absent-key no-op on an
+        // inactive transaction still reports the state error.
+        if self.state != TxState::Active {
+            return Err(TransactionError::InvalidState {
+                current: format!("{:?}", self.state),
+                expected: "Active".to_string(),
+            }
+            .into())
+            .record_error_metric();
+        }
+
+        // Read-your-own-writes current map.
+        let node = match self.read_own_node(node_id) {
+            Ok(node) => node,
+            Err(e) => return Err(e).record_error_metric(),
+        };
+
+        // Absent key: no-op success, record NO new version (Issue #3549).
+        if !node.properties.contains_key(key) {
+            return Ok(());
+        }
+
+        // Drop the key and replace with the reduced map, preserving the node's
+        // existing (already-interned) label — no interner `resolve` needed.
+        let new_properties = PropertyMapBuilder::from_map(node.properties.clone())
+            .remove(key)
+            .build();
+
+        self.buffer_node_replace(
+            node_id,
+            node.label,
+            new_properties,
+            WriteRequestOptions::default(),
+        )
+        .record_error_metric()
+    }
+
+    fn remove_edge_property(&mut self, edge_id: EdgeId, key: &str) -> Result<()> {
+        // An engine-reserved key (#3349) is not a user property.
+        if namespace::is_reserved_property_key(key) {
+            return Err(namespace::NamespaceError::ReservedPropertyKey {
+                key: key.to_string(),
+            }
+            .into())
+            .record_error_metric();
+        }
+        if self.state != TxState::Active {
+            return Err(TransactionError::InvalidState {
+                current: format!("{:?}", self.state),
+                expected: "Active".to_string(),
+            }
+            .into())
+            .record_error_metric();
+        }
+
+        let edge = match self.read_own_edge(edge_id) {
+            Ok(edge) => edge,
+            Err(e) => return Err(e).record_error_metric(),
+        };
+
+        // Absent key: no-op success, record NO new version.
+        if !edge.properties.contains_key(key) {
+            return Ok(());
+        }
+
+        let new_properties = PropertyMapBuilder::from_map(edge.properties.clone())
+            .remove(key)
+            .build();
+
+        // Reuse the already-read edge (NIT: avoid a second `read_own_edge`).
+        // `buffer_edge_replace` preserves endpoints/type; record the error
+        // metric here since the helper does not.
+        self.buffer_edge_replace(edge, new_properties, WriteRequestOptions::default())
+            .record_error_metric()
     }
 
     fn delete_node_with_options(
@@ -2177,37 +2993,39 @@ pub(crate) mod commit_test_hooks {
         }
     }
 
-    static PRE_APPLY_HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+    static PRE_COMMIT_CLOCK_HOOK: Mutex<Option<Hook>> = Mutex::new(None);
 
-    /// Install a hook fired just BEFORE `apply::apply_changes` (i.e. after
-    /// `validate`/`detect_conflicts`/WAL, before the `historical.write()` guard
-    /// is acquired). This is the symmetric counterpart to the pre-finalize hook
-    /// and is the seam that lets a test drive the Issue #3416 Pt1 MIRROR
-    /// interleaving deterministically: a committing edge-creator can be parked
-    /// here (endpoints already validated, guard not yet held) while a concurrent
-    /// node delete commits, so the edge tx then aborts at its own commit-time
-    /// endpoint re-check. Parking here (rather than at pre-finalize) avoids a
-    /// self-deadlock: the guard is not yet held, so the concurrent deleter can
-    /// acquire `historical.write()` and commit.
-    pub(crate) fn set_pre_apply_hook(hook: Hook) {
-        *PRE_APPLY_HOOK
+    /// Install a hook fired just BEFORE the committing transaction acquires the
+    /// `current_timestamp` lock — i.e. after `validate`/`detect_conflicts`/
+    /// `check_constraints` but before the WAL abort-framing critical section
+    /// (Issue #3413). This is the seam that drives the #3416 write-skew re-checks
+    /// deterministically now that `current_timestamp` is held across apply: a test
+    /// parks the victim here (holding no commit-path lock yet) while a concurrent
+    /// delete/create commits, so the victim then aborts at its own commit-time
+    /// re-check under `current_timestamp`.
+    ///
+    /// Firing HERE (rather than after the WAL append, as the removed pre-apply
+    /// hook did) is what avoids a self-deadlock: `current_timestamp` is NOT yet
+    /// held, so the concurrent committer can acquire it and commit.
+    pub(crate) fn set_pre_commit_clock_hook(hook: Hook) {
+        *PRE_COMMIT_CLOCK_HOOK
             .lock()
-            .expect("pre-apply hook mutex poisoned") = Some(hook);
+            .expect("pre-commit-clock hook mutex poisoned") = Some(hook);
     }
 
-    /// Remove any installed pre-apply hook.
-    pub(crate) fn clear_pre_apply_hook() {
-        *PRE_APPLY_HOOK
+    /// Remove any installed pre-commit-clock hook.
+    pub(crate) fn clear_pre_commit_clock_hook() {
+        *PRE_COMMIT_CLOCK_HOOK
             .lock()
-            .expect("pre-apply hook mutex poisoned") = None;
+            .expect("pre-commit-clock hook mutex poisoned") = None;
     }
 
-    /// Invoke the installed pre-apply hook, if any (Arc cloned out from under
-    /// the mutex, as with `run_pre_finalize_hook`).
-    pub(crate) fn run_pre_apply_hook() {
-        let hook = PRE_APPLY_HOOK
+    /// Invoke the installed pre-commit-clock hook, if any (Arc cloned out from
+    /// under the mutex, as with `run_pre_finalize_hook`).
+    pub(crate) fn run_pre_commit_clock_hook() {
+        let hook = PRE_COMMIT_CLOCK_HOOK
             .lock()
-            .expect("pre-apply hook mutex poisoned")
+            .expect("pre-commit-clock hook mutex poisoned")
             .clone();
         if let Some(hook) = hook {
             hook();

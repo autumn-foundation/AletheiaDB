@@ -159,6 +159,18 @@ async fn main() {
     let cors = parse_cors_config();
     let data_dir = parse_data_dir();
 
+    // The legacy HTTP server owns storage — refuse a data directory a live
+    // daemon already owns (Issue #2905), rather than becoming a second writer.
+    if let Some(dir) = data_dir.as_deref()
+        && let Some(pid) = aletheiadb::daemon_lock::live_owner(dir)
+    {
+        eprintln!(
+            "aletheia-server refusing to start: {}",
+            aletheiadb::daemon_lock::already_owned_message(dir, pid)
+        );
+        std::process::exit(1);
+    }
+
     let mut builder = ServerConfig::builder()
         .port(port)
         .host(host)

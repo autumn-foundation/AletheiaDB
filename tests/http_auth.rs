@@ -83,9 +83,17 @@ async fn missing_credential_returns_401_with_uniform_body() {
     assert_eq!(www, "Bearer");
 
     let body: Value = serde_json::from_slice(&resp.body).expect("json body");
-    assert_eq!(body["success"], false);
-    assert_eq!(body["code"], "UNAUTHENTICATED");
-    assert!(!body["error"].as_str().expect("error string").is_empty());
+    assert!(
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "UNAUTHENTICATED");
+    assert!(
+        !body["error"]["message"]
+            .as_str()
+            .expect("error string")
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -192,7 +200,7 @@ async fn malformed_authorization_shadows_valid_x_api_key() {
         "a malformed Authorization header must not fall back to x-api-key"
     );
     let body: Value = serde_json::from_slice(&resp.body).expect("json body");
-    assert_eq!(body["code"], "UNAUTHENTICATED");
+    assert_eq!(body["error"]["code"], "UNAUTHENTICATED");
 }
 
 /// When BOTH headers carry valid keys, `Authorization` wins. Observable via
@@ -217,9 +225,9 @@ async fn authorization_header_wins_over_x_api_key_when_both_valid() {
         "Authorization (reader) must win over x-api-key (writer)"
     );
     let body: Value = serde_json::from_slice(&resp.body).expect("json body");
-    assert_eq!(body["code"], "PERMISSION_DENIED");
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .expect("error string")
             .contains("reader"),
@@ -311,7 +319,7 @@ async fn every_registered_route_returns_uniform_401_without_credential() {
             route.path
         );
         let body: Value = serde_json::from_slice(&resp.body).expect("json 401 body");
-        assert_eq!(body["code"], "UNAUTHENTICATED");
+        assert_eq!(body["error"]["code"], "UNAUTHENTICATED");
         match &reference_body {
             None => reference_body = Some(resp.body.clone()),
             Some(reference) => assert_eq!(
@@ -368,9 +376,9 @@ async fn non_admin_roles_get_403_on_every_admin_route() {
                 route.path
             );
             let body: Value = serde_json::from_slice(&resp.body).expect("json 403 body");
-            assert_eq!(body["code"], "PERMISSION_DENIED");
+            assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
             assert!(
-                body["error"]
+                body["error"]["message"]
                     .as_str()
                     .expect("error string")
                     .contains(role_name),
@@ -414,8 +422,11 @@ async fn reader_can_read_but_not_write() {
     // create_node: 403 PERMISSION_DENIED.
     let (status, body) = post_query_with_key(&client, &key, &create_node_op()).await;
     assert_eq!(status, 403);
-    assert_eq!(body["success"], false);
-    assert_eq!(body["code"], "PERMISSION_DENIED");
+    assert!(
+        body.get("success").is_none(),
+        "flat `success` field dropped: {body}"
+    );
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
 
     // bulk_delete_nodes: 403 PERMISSION_DENIED.
     let (status, body) = post_query_with_key(
@@ -425,7 +436,7 @@ async fn reader_can_read_but_not_write() {
     )
     .await;
     assert_eq!(status, 403);
-    assert_eq!(body["code"], "PERMISSION_DENIED");
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
 
     // The node must still exist (authorization happened before any DB work).
     assert!(db.get_node(node_id).is_ok());
@@ -449,7 +460,7 @@ async fn metrics_role_can_probe_status_but_not_read_data() {
     // /query read: 403.
     let (status, body) = post_query_with_key(&client, &key, &find_node_op()).await;
     assert_eq!(status, 403);
-    assert_eq!(body["code"], "PERMISSION_DENIED");
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
 }
 
 #[tokio::test]
@@ -494,7 +505,7 @@ async fn writer_can_read_and_write_but_not_admin() {
         .await;
     assert_eq!(revoke.status.as_u16(), 403);
     let body: Value = serde_json::from_slice(&revoke.body).expect("json");
-    assert_eq!(body["code"], "PERMISSION_DENIED");
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
 }
 
 #[tokio::test]
@@ -550,7 +561,7 @@ async fn reader_gets_403_for_mutating_execute_query() {
     )
     .await;
     assert_eq!(status, 403, "mutating statement must need Write: {body}");
-    assert_eq!(body["code"], "PERMISSION_DENIED");
+    assert_eq!(body["error"]["code"], "PERMISSION_DENIED");
 }
 
 // ---------------------------------------------------------------------------
@@ -624,7 +635,7 @@ async fn admin_key_lifecycle_end_to_end() {
     // 5. The same key is now rejected with the uniform 401.
     let (status, body) = post_query_with_key(&client, &reader_key, &find_node_op()).await;
     assert_eq!(status, 401);
-    assert_eq!(body["code"], "UNAUTHENTICATED");
+    assert_eq!(body["error"]["code"], "UNAUTHENTICATED");
 }
 
 /// Invalid create-key input (empty or overlong name) is a 400 BadRequest,
@@ -648,7 +659,10 @@ async fn create_key_with_invalid_name_returns_400() {
             name.len()
         );
         let body: Value = serde_json::from_slice(&resp.body).expect("json body");
-        assert_eq!(body["success"], false);
+        assert!(
+            body.get("success").is_none(),
+            "flat `success` field dropped: {body}"
+        );
     }
 
     // No key was minted by the rejected requests.

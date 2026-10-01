@@ -1,0 +1,10 @@
+# Baseline retrieval: vector-only k-NN (pgvector-equivalent). No traversal, so
+# two-hop gold evidence is unreachable.
+# Diff against full.toml: hybrid and provenance_filter flip off.
+k = 5
+hybrid = false
+temporal_anchoring = false
+provenance_filter = false
+max_hops = 2
+trusted_sources = ["curated"]
+seed = 42

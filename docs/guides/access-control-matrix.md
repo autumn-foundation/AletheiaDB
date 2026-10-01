@@ -29,26 +29,36 @@ Defined by `Role::allows(AccessClass)` in `src/auth/role.rs`.
 
 ## Error contract
 
+> **Breaking change (HTTP error-envelope unification, Issue #3234):** the HTTP
+> error body is now the **same nested `{"error":{"code","message","retriable",
+> "details"?}}` envelope** the MCP surface emits, with `trace_id` (when present)
+> as a top-level sibling of `error`. The legacy flat body
+> (`{"success":false,"error":"<msg>","code":…}`) — the top-level `success` and
+> the flat `error` string — has been **removed**. Read `error.code` /
+> `error.message` / `error.retriable` / `error.details` instead of the old
+> top-level fields.
+
 - **Unauthenticated** (missing/unknown/revoked credential, `required` mode):
-  - HTTP: `401`, body `{"success":false,"error":"authentication required","code":"UNAUTHENTICATED"}` — byte-identical regardless of why authentication failed (no key-existence oracle).
+  - HTTP: `401`, body `{"error":{"code":"UNAUTHENTICATED","message":"authentication required","retriable":false}}` — byte-identical regardless of why authentication failed (no key-existence oracle).
   - MCP: structured error `{"error":{"code":"UNAUTHENTICATED","message":"authentication required","retriable":false}}` — uniform for **every** tool, including unknown tool names (the tool inventory is not revealed to unauthenticated callers). Never echoes the presented credential.
 - **Permission denied** (authenticated, role does not allow the class):
-  - HTTP: `403`, body `{"success":false,"error":"role '<role>' does not permit <class> access","code":"PERMISSION_DENIED"}`.
-  - MCP: `{"error":{"code":"PERMISSION_DENIED","message":"role '<role>' does not permit <class> access","retriable":false,"details":{"required_class":"<class>","principal_role":"<role>"}}}`.
+  - HTTP: `403`, body `{"error":{"code":"PERMISSION_DENIED","message":"role '<role>' does not permit <class> access","retriable":false,"details":{"required_class":"<class>","principal_role":"<role>"}}}`.
+  - MCP: `{"error":{"code":"PERMISSION_DENIED","message":"role '<role>' does not permit <class> access","retriable":false,"details":{"required_class":"<class>","principal_role":"<role>"}}}` — now identical to the HTTP body.
 
 Both codes are additive to the #3234 enum and are never retriable: obtain a
 valid credential / a sufficient role, then re-issue.
 
 - **Resource limit exceeded** (per-query limits, HTTP `/query`, Issue #3368):
   authentication and authorization run **first**, so these are only reachable
-  by an already-authorized caller.
-  - HTTP `429`, `code:"RESOURCE_EXHAUSTED"`, `retriable:true`,
-    `details:{dimension:"wall_clock_timeout", limit_ms}` — wall-clock timeout.
-  - HTTP `413`, `code:"RESOURCE_EXHAUSTED"`, `retriable:false`,
-    `details:{dimension:"result_rows"|"result_bytes", limit, consumed}` — result
+  by an already-authorized caller. All fields below live under the nested
+  `error` object (e.g. `error.code`, `error.details.dimension`).
+  - HTTP `429`, `error.code:"RESOURCE_EXHAUSTED"`, `error.retriable:true`,
+    `error.details:{dimension:"wall_clock_timeout", limit_ms}` — wall-clock timeout.
+  - HTTP `413`, `error.code:"RESOURCE_EXHAUSTED"`, `error.retriable:false`,
+    `error.details:{dimension:"result_rows"|"result_bytes", limit, consumed}` — result
     too large (row `Reject` policy / byte cap).
-  - HTTP `422`, `code:"INVALID_ARGUMENT"`, `retriable:false`,
-    `details:{dimension, requested, ceiling}` — a per-call `limits` override
+  - HTTP `422`, `error.code:"INVALID_ARGUMENT"`, `error.retriable:false`,
+    `error.details:{dimension, requested, ceiling}` — a per-call `limits` override
     exceeded the operator ceiling.
   - See [HTTP Per-Query Resource Limits](http-query-limits.md) for the full
     contract. (MCP parity is deferred to the MCP lane.)
@@ -60,9 +70,11 @@ process start via `ALETHEIADB_MCP_API_KEY`) and re-verified on every tool
 call — revoking the key takes effect on the next call. Enforcement happens at
 the single dispatch point before any tool executes.
 
-There are no `admin`-class MCP tools yet: key lifecycle (create/list/revoke)
-is served by the HTTP admin endpoints over the shared persisted store
-(`{data_dir}/auth/keys.json`).
+The `admin`-class MCP tools are the GDPR crypto-shred surface
+(`designate_subject` / `erase_subject`, Issue #3359) — erasure destroys
+per-subject key material, an irreversible privileged operation. Key lifecycle
+(create/list/revoke) is **not** an MCP tool: it is served by the HTTP admin
+endpoints over the shared persisted store (`{data_dir}/auth/keys.json`).
 
 <!-- mcp-tool-matrix:start -->
 
@@ -78,12 +90,22 @@ is served by the HTTP admin endpoints over the shared persisted store
 | `get_incoming_edges` | read |
 | `traverse` | read |
 | `find_similar` | read |
+| `embed_query` | read |
+| `embed_text` | read |
+| `semantic_search` | read |
+| `semantic_path` | read |
+| `concept_analogy` | read |
+| `concept_mean` | read |
+| `find_duplicate_candidates` | read |
+| `semantic_horizon` | read |
+| `context_aspects` | read |
 | `list_vector_indexes` | read |
 | `list_unique_constraints` | read |
 | `get_node_at_time` | read |
 | `get_edge_at_time` | read |
 | `find_nodes_at_time` | read |
 | `list_changes` | read |
+| `await_changes` | read |
 | `get_node_at_valid_time` | read |
 | `get_node_at_transaction_time` | read |
 | `get_node_history` | read |
@@ -92,6 +114,14 @@ is served by the HTTP admin endpoints over the shared persisted store
 | `get_edge_at_transaction_time` | read |
 | `get_edge_history` | read |
 | `diff_edge_versions` | read |
+| `get_belief_revisions` | read |
+| `list_drift_monitors` | read |
+| `query_drift_alarms` | read |
+| `contradiction_genealogy` | read |
+| `find_contradictions` | read |
+| `counterfactual_replay` | read |
+| `trust_breakdown` | read |
+| `list_trust_policies` | read |
 | `hybrid_query` | read |
 | `query` | read |
 | `get_schema` | read |
@@ -101,6 +131,8 @@ is served by the HTTP admin endpoints over the shared persisted store
 | `audit_export` | read |
 | `verify_chain` | read |
 | `export_chain_head` | read |
+| `list_namespaces` | read |
+| `describe_namespace` | read |
 | `database_stats` | metrics |
 | `create_node` | write |
 | `update_node` | write |
@@ -114,12 +146,32 @@ is served by the HTTP admin endpoints over the shared persisted store
 | `apply_batch` | write |
 | `enable_vector_index` | write |
 | `enable_unique_constraint` | write |
+| `create_node_with_embedding` | write |
+| `update_node_embedding` | write |
+| `create_namespace` | write |
+| `create_drift_monitor` | write |
+| `delete_drift_monitor` | write |
+| `resolve_drift_alarm` | write |
+| `designate_subject` | admin |
+| `erase_subject` | admin |
 
 <!-- mcp-tool-matrix:end -->
 
 Note: `query` is classified `read` because the tool is read-only **by
 contract** — mutating clauses (CREATE/MERGE/SET/DELETE/…) are rejected by the
 shared guard (`src/query/read_only.rs`) before execution and never write.
+
+Note: `database_stats` stays `metrics`-class (any monitoring credential may read
+the holistic snapshot), but one **field is admin-gated** (Issue #3678): the
+changefeed **`per_principal` identity breakdown** — the roster of *other*
+principals' ids and live subscription counts — is included **only for an `admin`
+caller**. A `metrics`/`reader`/`writer` caller receives every scalar aggregate
+(including `changefeed.active_subscriptions`) but the `per_principal` key is
+omitted entirely, so a low-privilege credential cannot enumerate who is
+currently subscribed. Both surfaces enforce this: the MCP handler derives
+admin-ness from the session principal, the HTTP `GET /database_stats` route from
+its own authenticated principal. Conformance:
+`crates/aletheia-server/tests/changefeed_principal_quota_surface.rs::database_stats_per_principal_breakdown_is_admin_gated`.
 
 ## HTTP surface
 
@@ -136,6 +188,15 @@ The HTTP credential is per-request (`Authorization: Bearer <key>` or
 | `POST /admin/keys` (create key) | admin |
 | `GET /admin/keys` (list keys, masked) | admin |
 | `POST /admin/keys/revoke` | admin |
+| `POST /admin/promote` (promote replica to primary, Issue #3355 Slice C) | admin |
+| `GET /changes/stream` (SSE changefeed stream) | read |
+| `POST /changes/await` (`await_changes` long-poll) | read |
+
+Note: `GET /changes/stream` is a **route-only** Server-Sent Events surface
+(Issue #3375) — it is served over HTTP + OpenAPI but is deliberately **not** an
+MCP tool (like `GET /metrics`). Its long-poll MCP projection is the
+`await_changes` tool (also served at `POST /changes/await`). Both are `read`
+class.
 
 ## Framework endpoints outside this matrix (HTTP)
 

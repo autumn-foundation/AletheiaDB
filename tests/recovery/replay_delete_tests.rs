@@ -139,9 +139,10 @@ fn test_replay_delete_node_after_update() -> Result<()> {
     // Then: Node should NOT exist in current storage
     assert_eq!(current.node_count(), 0);
 
-    // And: Historical storage should have 3 versions (create + update + delete)
+    // And: Historical storage should have 4 versions (create + update +
+    // the update's structural carry-forward (ADR-0061) + delete)
     let hist_stats = historical.stats();
-    assert_eq!(hist_stats.total_node_versions, 3);
+    assert_eq!(hist_stats.total_node_versions, 4);
 
     Ok(())
 }
@@ -811,8 +812,9 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
     // - Delete node 2: v4 tombstone (v2 closed, v4 tombstone open)
     // - Create node 3: v5
     // Total: 5 versions (v1 closed, v2 closed, v3 open, v4 tombstone, v5 open)
+    // + 1 structural carry-forward from the update (ADR-0061) = 6
     let hist_stats = historical.stats();
-    assert_eq!(hist_stats.total_node_versions, 5);
+    assert_eq!(hist_stats.total_node_versions, 6);
 
     Ok(())
 }

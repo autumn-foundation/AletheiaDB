@@ -1,0 +1,485 @@
+//! Built-in synthetic, SNB-shaped graph generator.
+//!
+//! This produces a deterministic (seeded) social-network graph in the shape of
+//! the LDBC SNB schema subset the suite exercises: `Person`, `Forum`, `Post`,
+//! `Comment`, `Tag`, and the relationships between them. It ships so the suite
+//! runs with **zero external dependencies**.
+//!
+//! ## Honesty
+//!
+//! This is **NOT** the official LDBC Datagen (Spark) output. The official
+//! generator produces power-law degree distributions, realistic attribute
+//! correlations, and audited scale factors. This built-in generator produces a
+//! simpler, uniform-random-ish graph at scale points we label
+//! `"sf0.1-equivalent"` and `"smoke"` — deliberately *shaped like* SNB but not
+//! claiming its statistical fidelity. To run against the real generator,
+//! feed its CSV output through the (documented) CSV loader path instead — see
+//! `README.md` and `docs/METHODOLOGY.md`.
+//!
+//! The generator output is a pure data description; [`crate::loader`] turns it
+//! into an AletheiaDB instance.
+
+use crate::prng::SplitMix64;
+use serde::Serialize;
+
+/// An invalid generation-parameter override was supplied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenConfigError {
+    /// A `vector_dim` override of `0` was supplied. Embedding dimensionality
+    /// must be strictly positive; the value is never silently coerced.
+    ZeroVectorDim,
+}
+
+impl std::fmt::Display for GenConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroVectorDim => write!(f, "vector_dim must be greater than 0"),
+        }
+    }
+}
+
+impl std::error::Error for GenConfigError {}
+
+/// The scale point to generate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scale {
+    /// Tiny size for smoke tests and CI (a few dozen persons).
+    Smoke,
+    /// "SF0.1-equivalent": a small but non-trivial size. NOT the official
+    /// LDBC SF0.1 person count — see module docs.
+    Sf01,
+    /// "SF1-equivalent": ~10x the `Sf01` preset, sized to the LDBC SNB SF1
+    /// scale factor's proportions. Like `Sf01`, this is deliberately *shaped
+    /// like* SNB SF1 (person/forum/tag proportions ~10x `Sf01`) but is NOT the
+    /// official LDBC Datagen SF1 dataset — see module docs.
+    Sf1,
+}
+
+impl Scale {
+    /// Parse a scale from its CLI string form.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "smoke" => Some(Self::Smoke),
+            "sf0.1" | "sf01" | "sf0_1" => Some(Self::Sf01),
+            "sf1" | "sf1.0" | "sf1_0" => Some(Self::Sf1),
+            _ => None,
+        }
+    }
+
+    /// The canonical string label used in reports.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Smoke => "smoke",
+            Self::Sf01 => "sf0.1",
+            Self::Sf1 => "sf1",
+        }
+    }
+
+    /// The concrete generation parameters for this scale.
+    #[must_use]
+    pub fn params(self) -> GenParams {
+        match self {
+            Self::Smoke => GenParams {
+                persons: 60,
+                avg_knows_degree: 6,
+                forums: 6,
+                posts_per_forum: 8,
+                comments_per_post: 2,
+                tags: 12,
+                // Vector-extension embeddings are attached to Posts. Smoke keeps
+                // this tiny; the real vector scale run is reported honestly.
+                embedding_dim: 32,
+                // Number of extra update-stream revisions applied to a subset of
+                // persons (builds bi-temporal history for the temporal extension).
+                update_revisions: 3,
+                // No dedicated large-vector corpus by default; the vector
+                // extension runs over Post embeddings unless `--vector-count`
+                // dials up a standalone corpus (see `params_with_overrides`).
+                vector_count: 0,
+            },
+            Self::Sf01 => GenParams {
+                persons: 1_500,
+                avg_knows_degree: 14,
+                forums: 60,
+                posts_per_forum: 40,
+                comments_per_post: 3,
+                tags: 120,
+                embedding_dim: 64,
+                update_revisions: 4,
+                vector_count: 0,
+            },
+            // ~10x the Sf01 preset on the SNB axes, mirroring the LDBC SNB
+            // SF1-vs-SF0.1 scale-factor proportions. The vector axis stays
+            // independent (default 0 extra corpus): a 1M-vector run is dialed
+            // in separately via `--vector-count`.
+            Self::Sf1 => GenParams {
+                persons: 15_000,
+                avg_knows_degree: 20,
+                forums: 600,
+                posts_per_forum: 40,
+                comments_per_post: 3,
+                tags: 1_200,
+                embedding_dim: 128,
+                update_revisions: 4,
+                vector_count: 0,
+            },
+        }
+    }
+
+    /// The generation parameters for this scale with optional independent
+    /// overrides of the vector-extension corpus size and dimensionality.
+    ///
+    /// The SNB graph axes (persons, forums, posts, …) are fixed by the preset;
+    /// `vector_count` and `vector_dim` are an *independent* axis so a run can
+    /// target, e.g., a 1M-vector k-NN scale (`vector_count = 1_000_000`,
+    /// `vector_dim = 384`) without inflating the social graph. Both overrides
+    /// are `Option`: `None` keeps the preset value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GenConfigError::ZeroVectorDim`] if `vector_dim` is `Some(0)`.
+    pub fn params_with_overrides(
+        self,
+        vector_count: Option<usize>,
+        vector_dim: Option<usize>,
+    ) -> Result<GenParams, GenConfigError> {
+        let mut params = self.params();
+        if let Some(count) = vector_count {
+            params.vector_count = count;
+        }
+        if let Some(dim) = vector_dim {
+            if dim == 0 {
+                return Err(GenConfigError::ZeroVectorDim);
+            }
+            params.embedding_dim = dim;
+        }
+        Ok(params)
+    }
+}
+
+/// Concrete generation parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenParams {
+    /// Number of `Person` nodes.
+    pub persons: usize,
+    /// Target average out-degree of the `KNOWS` relationship.
+    pub avg_knows_degree: usize,
+    /// Number of `Forum` nodes.
+    pub forums: usize,
+    /// `Post` nodes created per forum.
+    pub posts_per_forum: usize,
+    /// `Comment` nodes created per post.
+    pub comments_per_post: usize,
+    /// Number of `Tag` nodes.
+    pub tags: usize,
+    /// Embedding dimensionality for the vector extension.
+    pub embedding_dim: usize,
+    /// Update-stream revisions applied per selected person.
+    pub update_revisions: usize,
+    /// Size of a **dedicated** standalone vector-extension corpus, generated
+    /// and indexed *in addition to* Post embeddings. `0` (the preset default)
+    /// means the vector extension runs over Post embeddings only; a non-zero
+    /// value (dialed in via `--vector-count`) lets the k-NN scale be raised
+    /// independently of the SNB graph size — e.g. a 1M-vector run.
+    pub vector_count: usize,
+}
+
+/// A generated person.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GenPerson {
+    /// Zero-based index (stable identity within the generated graph).
+    pub idx: usize,
+    /// Display name (`Person <idx>`).
+    pub first_name: String,
+    /// Deterministic "city" bucket.
+    pub city: String,
+    /// Deterministic pseudo-birth-year.
+    pub birth_year: i64,
+}
+
+/// A generated forum.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GenForum {
+    /// Zero-based index.
+    pub idx: usize,
+    /// Forum title.
+    pub title: String,
+    /// Moderator person index, or `None` when the source FK was unknown/absent
+    /// (the HAS_MODERATOR edge is then skipped rather than mis-attributed).
+    pub moderator: Option<usize>,
+}
+
+/// A generated post.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GenPost {
+    /// Zero-based index.
+    pub idx: usize,
+    /// Owning forum index, or `None` when the source container FK was
+    /// unknown/absent (the CONTAINER_OF edge is then skipped).
+    pub forum: Option<usize>,
+    /// Creator person index, or `None` when the source FK was unknown/absent
+    /// (the HAS_CREATOR edge is then skipped rather than mis-attributed).
+    pub creator: Option<usize>,
+    /// Tag index attached to this post.
+    pub tag: usize,
+    /// Deterministic content length (a stand-in property).
+    pub length: i64,
+    /// Deterministic embedding vector for the vector extension.
+    pub embedding: Vec<f32>,
+}
+
+/// A generated comment.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GenComment {
+    /// Zero-based index.
+    pub idx: usize,
+    /// The post this comment replies to.
+    pub reply_to_post: usize,
+    /// Creator person index.
+    pub creator: usize,
+}
+
+/// A single vector in the dedicated standalone vector-extension corpus.
+///
+/// These are decoupled from Posts so the vector-extension k-NN scale can be
+/// dialed independently of the SNB graph (Issue #3628). Each is loaded as an
+/// `Embedding`-labeled node carrying the `embedding` property.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GenVector {
+    /// Zero-based index (stable identity within the generated corpus).
+    pub idx: usize,
+    /// Deterministic unit-normalized embedding vector.
+    pub embedding: Vec<f32>,
+}
+
+/// A single update-stream revision to a person's property (builds history).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GenPersonRevision {
+    /// Target person index.
+    pub person: usize,
+    /// Revision number (1-based; revision N is applied after revision N-1).
+    pub revision: usize,
+    /// New city value at this revision.
+    pub city: String,
+}
+
+/// The full generated graph (pure data; no DB dependency).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GeneratedGraph {
+    /// The scale label.
+    pub scale: String,
+    /// The seed used.
+    pub seed: u64,
+    /// Generation parameters.
+    #[serde(skip)]
+    pub params: GenParams,
+    /// Person nodes.
+    pub persons: Vec<GenPerson>,
+    /// Directed `KNOWS` edges as `(source_idx, target_idx)`.
+    pub knows: Vec<(usize, usize)>,
+    /// Forum nodes.
+    pub forums: Vec<GenForum>,
+    /// Post nodes.
+    pub posts: Vec<GenPost>,
+    /// Comment nodes.
+    pub comments: Vec<GenComment>,
+    /// Tag names (index-addressed).
+    pub tags: Vec<String>,
+    /// Update-stream person revisions, in application order.
+    pub person_revisions: Vec<GenPersonRevision>,
+    /// Dedicated standalone vector-extension corpus (empty unless a
+    /// `--vector-count` override dials one in). Loaded as `Embedding` nodes.
+    pub vectors: Vec<GenVector>,
+}
+
+const CITIES: &[&str] = &[
+    "Springfield",
+    "Rivertown",
+    "Lakeside",
+    "Hillcrest",
+    "Fairview",
+    "Brookfield",
+    "Ashford",
+    "Millbrook",
+];
+
+/// Deterministically generate a graph for the given scale and seed, using the
+/// scale's preset parameters (no vector-scale overrides).
+#[must_use]
+pub fn generate(scale: Scale, seed: u64) -> GeneratedGraph {
+    // The preset is always valid (positive dim, `vector_count` = 0), so the
+    // override path cannot fail here.
+    generate_with_params(scale.label(), scale.params(), seed)
+}
+
+/// Deterministically generate a graph for the given scale and seed, applying
+/// optional independent overrides of the vector-extension corpus size and
+/// dimensionality (see [`Scale::params_with_overrides`]).
+///
+/// # Errors
+///
+/// Returns [`GenConfigError::ZeroVectorDim`] if `vector_dim` is `Some(0)`.
+pub fn generate_with_overrides(
+    scale: Scale,
+    seed: u64,
+    vector_count: Option<usize>,
+    vector_dim: Option<usize>,
+) -> Result<GeneratedGraph, GenConfigError> {
+    let params = scale.params_with_overrides(vector_count, vector_dim)?;
+    Ok(generate_with_params(scale.label(), params, seed))
+}
+
+/// Deterministically generate a graph from fully-resolved parameters.
+#[must_use]
+fn generate_with_params(scale_label: &str, params: GenParams, seed: u64) -> GeneratedGraph {
+    let mut rng = SplitMix64::new(seed);
+
+    // --- Tags ---
+    let tags: Vec<String> = (0..params.tags).map(|i| format!("Tag{i}")).collect();
+
+    // --- Persons ---
+    let persons: Vec<GenPerson> = (0..params.persons)
+        .map(|idx| {
+            let city = CITIES[rng.next_below(CITIES.len())].to_string();
+            let birth_year = 1950 + rng.next_below(55) as i64;
+            GenPerson {
+                idx,
+                first_name: format!("Person{idx}"),
+                city,
+                birth_year,
+            }
+        })
+        .collect();
+
+    // --- KNOWS edges ---
+    // For each person, sample ~avg_knows_degree distinct other persons. We
+    // dedup per source so the effective degree is at most the target.
+    let mut knows = Vec::new();
+    if params.persons > 1 {
+        for src in 0..params.persons {
+            let mut targets = std::collections::BTreeSet::new();
+            let mut attempts = 0;
+            while targets.len() < params.avg_knows_degree && attempts < params.avg_knows_degree * 4
+            {
+                attempts += 1;
+                let t = rng.next_below(params.persons);
+                if t != src {
+                    targets.insert(t);
+                }
+            }
+            for t in targets {
+                knows.push((src, t));
+            }
+        }
+    }
+
+    // --- Forums ---
+    let forums: Vec<GenForum> = (0..params.forums)
+        .map(|idx| GenForum {
+            idx,
+            title: format!("Forum{idx}"),
+            moderator: Some(rng.next_below(params.persons.max(1))),
+        })
+        .collect();
+
+    // --- Posts (with deterministic embeddings) ---
+    let mut posts = Vec::new();
+    let mut post_idx = 0usize;
+    for forum in &forums {
+        for _ in 0..params.posts_per_forum {
+            let creator = rng.next_below(params.persons.max(1));
+            let tag = if params.tags > 0 {
+                rng.next_below(params.tags)
+            } else {
+                0
+            };
+            let length = 40 + rng.next_below(400) as i64;
+            let embedding = deterministic_embedding(&mut rng, params.embedding_dim);
+            posts.push(GenPost {
+                idx: post_idx,
+                forum: Some(forum.idx),
+                creator: Some(creator),
+                tag,
+                length,
+                embedding,
+            });
+            post_idx += 1;
+        }
+    }
+
+    // --- Comments ---
+    let mut comments = Vec::new();
+    let mut comment_idx = 0usize;
+    for post in &posts {
+        for _ in 0..params.comments_per_post {
+            let creator = rng.next_below(params.persons.max(1));
+            comments.push(GenComment {
+                idx: comment_idx,
+                reply_to_post: post.idx,
+                creator,
+            });
+            comment_idx += 1;
+        }
+    }
+
+    // --- Update-stream person revisions (bi-temporal history) ---
+    // Apply revisions to the first quarter of persons so the temporal
+    // extension has multiple versions to reconstruct.
+    let mut person_revisions = Vec::new();
+    let revised_persons = (params.persons / 4).max(1).min(params.persons);
+    for person in 0..revised_persons {
+        for revision in 1..=params.update_revisions {
+            let city = CITIES[rng.next_below(CITIES.len())].to_string();
+            person_revisions.push(GenPersonRevision {
+                person,
+                revision,
+                city,
+            });
+        }
+    }
+
+    // --- Dedicated standalone vector-extension corpus ---
+    // Generated after the graph so it does not perturb the graph's PRNG stream
+    // (a graph with `vector_count = 0` is byte-identical to prior behavior).
+    let vectors: Vec<GenVector> = (0..params.vector_count)
+        .map(|idx| GenVector {
+            idx,
+            embedding: deterministic_embedding(&mut rng, params.embedding_dim),
+        })
+        .collect();
+
+    GeneratedGraph {
+        scale: scale_label.to_string(),
+        seed,
+        params,
+        persons,
+        knows,
+        forums,
+        posts,
+        comments,
+        tags,
+        person_revisions,
+        vectors,
+    }
+}
+
+/// Produce a deterministic unit-ish embedding vector.
+///
+/// Shared by the synthetic generator and the Datagen ingest front-end
+/// ([`crate::datagen`]) so both draw their vector corpus from the same
+/// deterministic path (official LDBC Datagen ships no embeddings).
+pub(crate) fn deterministic_embedding(rng: &mut SplitMix64, dim: usize) -> Vec<f32> {
+    let mut v: Vec<f32> = (0..dim).map(|_| rng.next_f32() - 0.5).collect();
+    // Normalize to unit length so cosine similarity is well-behaved.
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > f32::EPSILON {
+        for x in &mut v {
+            *x /= norm;
+        }
+    } else if !v.is_empty() {
+        v[0] = 1.0;
+    }
+    v
+}

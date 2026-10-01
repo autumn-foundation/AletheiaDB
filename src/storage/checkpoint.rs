@@ -512,14 +512,14 @@ impl CheckpointManager {
                 &graph_data,
                 &graph_path,
                 self.config.compression_level,
-                keyring,
+                keyring.as_ref(),
             )
             .map_err(persistence_err)?;
         } else {
             crate::storage::index_persistence::graph::save_graph_index_with_keyring(
                 &graph_data,
                 &graph_path,
-                keyring,
+                keyring.as_ref(),
             )
             .map_err(persistence_err)?;
         }
@@ -533,7 +533,7 @@ impl CheckpointManager {
         crate::storage::index_persistence::temporal::save_temporal_index_with_keyring(
             &temporal_data,
             &temporal_path,
-            self.persistence_manager.keyring(),
+            keyring.as_ref(),
         )
         .map_err(persistence_err)?;
         bytes_written += std::fs::metadata(&temporal_path)
@@ -1041,7 +1041,7 @@ impl CheckpointManager {
             let mut graph_data =
                 crate::storage::index_persistence::graph::load_graph_index_with_keyring(
                     &graph_path,
-                    self.persistence_manager.keyring(),
+                    self.persistence_manager.keyring().as_ref(),
                 )
                 .map_err(persistence_err)?;
             remap.remap_graph_index_data(&mut graph_data);
@@ -1118,7 +1118,7 @@ impl CheckpointManager {
             let mut temporal_data =
                 crate::storage::index_persistence::temporal::load_temporal_index_with_keyring(
                     &temporal_path,
-                    self.persistence_manager.keyring(),
+                    self.persistence_manager.keyring().as_ref(),
                 )
                 .map_err(persistence_err)?;
             remap.remap_temporal_index_data(&mut temporal_data);
@@ -2100,8 +2100,9 @@ mod tests {
         let node = recovered_current.get_node(node_id)?;
         assert_eq!(node.get_property("age").unwrap().as_int().unwrap(), 31);
 
-        // Verify historical has versions (create + update)
-        assert_eq!(recovered_historical.get_node_versions().len(), 2);
+        // Verify historical has versions (create + update + the update's
+        // structural carry-forward of the superseded valid-time prefix).
+        assert_eq!(recovered_historical.get_node_versions().len(), 3);
 
         Ok(())
     }
@@ -2164,8 +2165,8 @@ mod tests {
         let edge = recovered_current.get_edge(edge_id)?;
         assert_eq!(edge.get_property("strength").unwrap().as_int().unwrap(), 10);
 
-        // Verify historical has edge versions (create + update)
-        assert_eq!(recovered_historical.get_edge_versions().len(), 2);
+        // Verify historical has edge versions (create + update + carry-forward)
+        assert_eq!(recovered_historical.get_edge_versions().len(), 3);
 
         Ok(())
     }

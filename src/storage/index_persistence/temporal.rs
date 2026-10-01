@@ -725,6 +725,7 @@ pub fn save_temporal_index_with_cipher(
 
 /// Save temporal index data, encrypting with an
 /// [`IndexKeyring`](super::common::IndexKeyring) (Issue #488 key rotation).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn save_temporal_index_with_keyring(
     data: &TemporalIndexData,
     path: &Path,
@@ -775,6 +776,7 @@ pub fn load_temporal_index_with_cipher(
 /// Load temporal index data, decrypting via an
 /// [`IndexKeyring`](super::common::IndexKeyring) that dispatches on the header
 /// `key_version` (Issue #488 key rotation).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn load_temporal_index_with_keyring(
     path: &Path,
     keyring: Option<&super::common::IndexKeyring>,

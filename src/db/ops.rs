@@ -651,6 +651,328 @@ impl AletheiaDB {
         self.write(|tx| tx.update_edge_with_options(edge_id, properties, options))
     }
 
+    /// Compare-and-set a node's properties, conditional on its committed head
+    /// still being `expected_version` (Issue #3577).
+    ///
+    /// A conditional **full replace** of the property map (label preserved). On
+    /// success the new version id is returned; on a lost claim the write is
+    /// aborted with
+    /// [`TransactionError::CasMismatch`](crate::core::error::TransactionError::CasMismatch)
+    /// (non-retriable) and nothing is written. The version match is re-checked
+    /// at commit under the commit-serialization guard, so concurrent claimants
+    /// cannot both win. See
+    /// [`WriteOps::compare_and_set_node`](crate::api::transaction::WriteOps::compare_and_set_node).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn compare_and_set_node(
+        &self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        properties: PropertyMap,
+    ) -> Result<VersionId> {
+        self.write(|tx| tx.compare_and_set_node(node_id, expected_version, properties))
+    }
+
+    /// [`compare_and_set_node`](Self::compare_and_set_node) with a
+    /// [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions)
+    /// bundle (backdated `valid_from` and/or write-time provenance).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn compare_and_set_node_with_options(
+        &self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        properties: PropertyMap,
+        options: crate::api::transaction::WriteRequestOptions,
+    ) -> Result<VersionId> {
+        self.write(|tx| {
+            tx.compare_and_set_node_with_options(node_id, expected_version, properties, options)
+        })
+    }
+
+    /// Compare-and-set an edge's properties, conditional on its committed head
+    /// still being `expected_version` (Issue #3577). Endpoints and type are
+    /// immutable. See [`compare_and_set_node`](Self::compare_and_set_node).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn compare_and_set_edge(
+        &self,
+        edge_id: EdgeId,
+        expected_version: VersionId,
+        properties: PropertyMap,
+    ) -> Result<VersionId> {
+        self.write(|tx| tx.compare_and_set_edge(edge_id, expected_version, properties))
+    }
+
+    /// [`compare_and_set_edge`](Self::compare_and_set_edge) with a
+    /// [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions) bundle.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn compare_and_set_edge_with_options(
+        &self,
+        edge_id: EdgeId,
+        expected_version: VersionId,
+        properties: PropertyMap,
+        options: crate::api::transaction::WriteRequestOptions,
+    ) -> Result<VersionId> {
+        self.write(|tx| {
+            tx.compare_and_set_edge_with_options(edge_id, expected_version, properties, options)
+        })
+    }
+
+    /// Claim a node via a lease, succeeding iff the version still matches OR the
+    /// existing lease is expired at commit time (Issue #3577).
+    ///
+    /// Stamps `lease_owner_key = owner` and `lease_until_key = lease_until` into
+    /// the property map (full replace) and enforces the claim under the
+    /// commit-serialization guard. See
+    /// [`WriteOps::claim_with_lease`](crate::api::transaction::WriteOps::claim_with_lease).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_with_lease(
+        &self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        owner: PropertyValue,
+        lease_until: Timestamp,
+        properties: PropertyMap,
+    ) -> Result<VersionId> {
+        self.write(|tx| {
+            tx.claim_with_lease(
+                node_id,
+                expected_version,
+                lease_owner_key,
+                lease_until_key,
+                owner,
+                lease_until,
+                properties,
+            )
+        })
+    }
+
+    /// [`claim_with_lease`](Self::claim_with_lease) with a
+    /// [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions)
+    /// bundle, so a top-level caller can backdate the claim's `valid_from` and/or
+    /// attach write-time provenance (Issue #3577).
+    ///
+    /// The "exactly one winner" lease guarantee is unaffected: claimants write a
+    /// **future** `lease_until`, so at most one concurrent claim can find the
+    /// lease expired-or-matching under the commit-serialization guard. See
+    /// [`WriteOps::claim_with_lease_with_options`](crate::api::transaction::WriteOps::claim_with_lease_with_options).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_with_lease_with_options(
+        &self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        owner: PropertyValue,
+        lease_until: Timestamp,
+        properties: PropertyMap,
+        options: crate::api::transaction::WriteRequestOptions,
+    ) -> Result<VersionId> {
+        self.write(|tx| {
+            tx.claim_with_lease_with_options(
+                node_id,
+                expected_version,
+                lease_owner_key,
+                lease_until_key,
+                owner,
+                lease_until,
+                properties,
+                options,
+            )
+        })
+    }
+
+    /// Fenced claim (DBOS Phase 3e): a safe-for-multi-executor
+    /// [`claim_with_lease`](Self::claim_with_lease) that enforces a **server-side
+    /// monotonic fence** and computes the lease deadline on the **DB** clock.
+    ///
+    /// The claim stamps `fence_key = new_fence` and is admitted only if
+    /// `new_fence` is strictly greater than the entity's committed fence (re-read
+    /// under the commit-serialization guard), making the stale-fence steal
+    /// collision impossible — a violation aborts with
+    /// [`TransactionError::FenceTooLow`](crate::core::error::TransactionError::FenceTooLow)
+    /// (non-retriable). `lease_until` is computed as `engine_now + lease_ttl`, so
+    /// a skewed-fast executor cannot install a far-future, un-stealable lease.
+    ///
+    /// # Crash-durable fence (Issue #3413)
+    ///
+    /// The fence re-check now runs BEFORE the WAL append (under
+    /// `current_timestamp`), so a `FenceTooLow`-rejected claim appends **no WAL
+    /// frame** and is therefore never re-applied by crash recovery. The fence is
+    /// safe for zombie fencing across a crash. See
+    /// [`WriteOps::claim_with_lease_fenced`](crate::api::transaction::WriteOps::claim_with_lease_fenced).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_with_lease_fenced(
+        &self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        fence_key: &str,
+        owner: PropertyValue,
+        lease_ttl: std::time::Duration,
+        new_fence: i64,
+        properties: PropertyMap,
+    ) -> Result<VersionId> {
+        self.write(|tx| {
+            tx.claim_with_lease_fenced(
+                node_id,
+                expected_version,
+                lease_owner_key,
+                lease_until_key,
+                fence_key,
+                owner,
+                lease_ttl,
+                new_fence,
+                properties,
+            )
+        })
+    }
+
+    /// [`claim_with_lease_fenced`](Self::claim_with_lease_fenced) with a
+    /// [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions)
+    /// bundle (backdated `valid_from` and/or write-time provenance).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_with_lease_fenced_with_options(
+        &self,
+        node_id: NodeId,
+        expected_version: VersionId,
+        lease_owner_key: &str,
+        lease_until_key: &str,
+        fence_key: &str,
+        owner: PropertyValue,
+        lease_ttl: std::time::Duration,
+        new_fence: i64,
+        properties: PropertyMap,
+        options: crate::api::transaction::WriteRequestOptions,
+    ) -> Result<VersionId> {
+        self.write(|tx| {
+            tx.claim_with_lease_fenced_with_options(
+                node_id,
+                expected_version,
+                lease_owner_key,
+                lease_until_key,
+                fence_key,
+                owner,
+                lease_ttl,
+                new_fence,
+                properties,
+                options,
+            )
+        })
+    }
+
+    // ===== Replace / tombstone (non-PATCH) writes (Issue #3549) =====
+
+    /// Replace a node's entire property map AND label (full overwrite, non-PATCH).
+    ///
+    /// Unlike [`update_node`](Self::update_node) (PATCH-merge), the node's
+    /// resulting map is *exactly* `properties`: any prior key it omits is
+    /// removed from current state (history preserved), and the label is
+    /// overwritten. See
+    /// [`WriteOps::replace_node_with_options`](crate::api::transaction::WriteOps::replace_node_with_options).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn replace_node(
+        &self,
+        node_id: NodeId,
+        label: &str,
+        properties: PropertyMap,
+    ) -> Result<()> {
+        self.write(|tx| tx.replace_node(node_id, label, properties))
+    }
+
+    /// Replace a node's entire map and label with an optional backdated valid time.
+    ///
+    /// See [`replace_node`](Self::replace_node).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn replace_node_with_valid_time(
+        &self,
+        node_id: NodeId,
+        label: &str,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        self.write(|tx| tx.replace_node_with_valid_time(node_id, label, properties, valid_from))
+    }
+
+    /// Replace a node's entire map and label with an optional
+    /// [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions)
+    /// bundle (backdated `valid_from` and/or write-time provenance).
+    ///
+    /// See [`replace_node`](Self::replace_node).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn replace_node_with_options(
+        &self,
+        node_id: NodeId,
+        label: &str,
+        properties: PropertyMap,
+        options: crate::api::transaction::WriteRequestOptions,
+    ) -> Result<()> {
+        self.write(|tx| tx.replace_node_with_options(node_id, label, properties, options))
+    }
+
+    /// Replace an edge's entire property map (full overwrite, non-PATCH).
+    ///
+    /// The edge's source, target, and type are immutable and preserved; any
+    /// prior property key omitted from `properties` is removed from current
+    /// state (history preserved). See
+    /// [`WriteOps::replace_edge_with_options`](crate::api::transaction::WriteOps::replace_edge_with_options).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn replace_edge(&self, edge_id: EdgeId, properties: PropertyMap) -> Result<()> {
+        self.write(|tx| tx.replace_edge(edge_id, properties))
+    }
+
+    /// Replace an edge's entire map with an optional backdated valid time.
+    ///
+    /// See [`replace_edge`](Self::replace_edge).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn replace_edge_with_valid_time(
+        &self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        self.write(|tx| tx.replace_edge_with_valid_time(edge_id, properties, valid_from))
+    }
+
+    /// Replace an edge's entire map with an optional
+    /// [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions) bundle.
+    ///
+    /// See [`replace_edge`](Self::replace_edge).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn replace_edge_with_options(
+        &self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        options: crate::api::transaction::WriteRequestOptions,
+    ) -> Result<()> {
+        self.write(|tx| tx.replace_edge_with_options(edge_id, properties, options))
+    }
+
+    /// Remove a single property key from a node (read-modify-replace).
+    ///
+    /// Removing an absent key is a no-op success that records no new version.
+    /// See
+    /// [`WriteOps::remove_node_property`](crate::api::transaction::WriteOps::remove_node_property).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn remove_node_property(&self, node_id: NodeId, key: &str) -> Result<()> {
+        self.write(|tx| tx.remove_node_property(node_id, key))
+    }
+
+    /// Remove a single property key from an edge (read-modify-replace).
+    ///
+    /// Removing an absent key is a no-op success that records no new version.
+    /// See
+    /// [`WriteOps::remove_edge_property`](crate::api::transaction::WriteOps::remove_edge_property).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn remove_edge_property(&self, edge_id: EdgeId, key: &str) -> Result<()> {
+        self.write(|tx| tx.remove_edge_property(edge_id, key))
+    }
+
     /// Get the provenance bundle attached to a node's *current* version, if any.
     ///
     /// Returns `Ok(None)` (not an error) if the node has no provenance --
@@ -765,7 +1087,13 @@ impl AletheiaDB {
     /// This uses the fast path (current storage) for O(1) lookup.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node(&self, node_id: NodeId) -> Result<Node> {
-        self.current.get_node(node_id).record_error_metric()
+        let node = self.current.get_node(node_id).record_error_metric()?;
+        // GDPR crypto-shred (Issue #3359, PR-1b): unseal designated properties on
+        // read (active subjects -> plaintext; erased -> opaque ciphertext). No-op
+        // unless the database has designations.
+        #[cfg(feature = "audit-export")]
+        let node = self.unseal_node_view(node);
+        Ok(node)
     }
 
     /// Access a node without cloning, executing a closure on the node data.
@@ -797,7 +1125,12 @@ impl AletheiaDB {
     /// Get the current state of an edge.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge(&self, edge_id: EdgeId) -> Result<Edge> {
-        self.current.get_edge(edge_id).record_error_metric()
+        let edge = self.current.get_edge(edge_id).record_error_metric()?;
+        // GDPR crypto-shred (Issue #3359, PR-1b): unseal designated properties on
+        // read. No-op unless the database has designations.
+        #[cfg(feature = "audit-export")]
+        let edge = self.unseal_edge_view(edge);
+        Ok(edge)
     }
 
     /// Scan all nodes with a specific label, returning an iterator over node IDs.
@@ -872,6 +1205,59 @@ impl AletheiaDB {
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_source(&self, edge_id: EdgeId) -> Result<NodeId> {
         self.current.get_edge_source(edge_id).record_error_metric()
+    }
+
+    /// Layer occupancy of the two current-state adjacency indexes (Issue #3810).
+    ///
+    /// Adjacency reads (`get_outgoing_edges`, `get_incoming_edges`, traversal)
+    /// take the frozen-CSR fast path only while both indexes are compacted --
+    /// i.e. while `stats.is_fully_compacted()` holds. Background maintenance
+    /// restores that state on its own shortly after writes go quiet; this is
+    /// how you observe it.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use aletheiadb::AletheiaDB;
+    /// let db = AletheiaDB::new()?;
+    /// let stats = db.adjacency_stats();
+    /// assert_eq!(stats.outgoing.frozen_edges, 0);
+    /// assert!(stats.is_fully_compacted());
+    /// # Ok::<(), aletheiadb::Error>(())
+    /// ```
+    #[must_use = "the statistics snapshot should be used"]
+    pub fn adjacency_stats(&self) -> crate::index::current::AdjacencyIndexStats {
+        self.current.adjacency_stats()
+    }
+
+    /// Merge the adjacency delta buffers into the frozen CSR now (Issue #3810).
+    ///
+    /// Background maintenance does this automatically once writes go quiet, so
+    /// an application normally never needs to call it. It is useful to force a
+    /// deterministic state: right after a bulk load, before benchmarking reads,
+    /// or when background maintenance is disabled via
+    /// [`AdjacencyMaintenanceConfig::disabled`](crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig::disabled).
+    ///
+    /// Cost is O(E log E) in the number of edges. Reads stay correct and never
+    /// block on it: they keep using the previous frozen CSR until the new one is
+    /// published atomically, and the entries the two layers briefly share are
+    /// de-duplicated. Compacting an already-compacted index is a cheap no-op.
+    ///
+    /// # Deadlock
+    ///
+    /// Retiring the merged delta entries takes the same per-shard locks a live
+    /// adjacency guard holds, so do not call this while holding an adjacency
+    /// iterator from the *same* thread:
+    ///
+    /// ```ignore
+    /// let edges = db.get_outgoing_edges_iter(node); // holds a shard guard
+    /// db.compact_adjacency();                       // deadlocks: same shard
+    /// ```
+    ///
+    /// Collect the iterator (or drop it) first. Other threads are unaffected --
+    /// they never wait on compaction, compaction waits on them.
+    pub fn compact_adjacency(&self) {
+        self.current.compact_adjacency();
     }
 
     /// Get outgoing edges from a node (current state).
@@ -1377,14 +1763,11 @@ mod tests {
             );
         }
 
-        // NOTE: Updating/deleting closes the *transaction time* of the previous
-        // version at commit (standard MVCC on the transaction-time axis), so a
-        // valid-time probe strictly between the old and new `valid_from` is not
-        // reachable via `get_node_at_valid_time(id, probe)` (which always queries
-        // as of the *current* transaction time). This is pre-existing, unmodified
-        // `WriteOps` behavior -- verified the same way the transaction-level tests
-        // in `api::transaction::write::tests` do: by reading the recorded
-        // `valid_from` back from historical storage directly.
+        // NOTE: An update closes the *transaction time* of the superseded
+        // version and appends a structural carry-forward recording it over
+        // `[old_valid_from, new_valid_from)` (ADR-0061), so a valid-time probe
+        // strictly between the old and new `valid_from` resolves to the old
+        // state via `get_node_at_valid_time` (asserted below).
         #[test]
         fn update_node_with_valid_time_backdated_round_trip() {
             let (_tmp, db) = create_test_db().unwrap();
@@ -1411,6 +1794,14 @@ mod tests {
             let version = historical.get_node_version(version_id).unwrap();
             assert_eq!(version.temporal.valid_time().start(), t_update);
             drop(historical);
+
+            // The prior state is still the current belief before t_update.
+            let between = HybridTimestamp::new(now - 90 * 60_000_000, 0).unwrap();
+            let old_state = db.get_node_at_valid_time(id, between).unwrap();
+            assert_eq!(
+                old_state.properties.get("city"),
+                Some(&PropertyValue::from("Paris"))
+            );
 
             // Updated properties are visible from their own valid_from onward.
             let new_state = db.get_node_at_valid_time(id, t_update).unwrap();
@@ -1458,6 +1849,13 @@ mod tests {
             let version = historical.get_edge_version(version_id).unwrap();
             assert_eq!(version.temporal.valid_time().start(), t_update);
             drop(historical);
+
+            let between = HybridTimestamp::new(now - 90 * 60_000_000, 0).unwrap();
+            let old_state = db.get_edge_at_valid_time(edge_id, between).unwrap();
+            assert_eq!(
+                old_state.properties.get("strength"),
+                Some(&PropertyValue::from(1i64))
+            );
 
             let new_state = db.get_edge_at_valid_time(edge_id, t_update).unwrap();
             assert_eq!(
@@ -1741,6 +2139,14 @@ mod tests {
                 3,
                 "create + update + retraction = 3 versions, zero loss"
             );
+
+            // The update's structural carry-forward (omitted from history)
+            // keeps v1 as current belief over [t_create, t_update) (ADR-0061).
+            let slices = db.get_node_valid_time_slices(id).unwrap();
+            assert_eq!(slices.len(), 2);
+            assert!(slices[0].version_id.is_structural());
+            assert_eq!(slices[0].temporal.valid_time().start(), t_create);
+            assert_eq!(slices[0].temporal.valid_time().end(), t_update);
 
             // v1: [t_create, open). #3504: the update supersedes v1 on the
             // transaction-time dimension only; v1's valid interval stays
@@ -2864,10 +3270,7 @@ mod tests {
         /// These tests are single-threaded, so no commit can slip between
         /// the two phases.
         fn anchor_after_commits(db: &AletheiaDB) -> crate::core::temporal::Timestamp {
-            let committed = *db
-                .current_timestamp
-                .lock()
-                .expect("current_timestamp mutex poisoned");
+            let committed = db.current_timestamp.load();
             // Phase 1: anchor strictly after every committed stamp.
             let mut anchor = time::now();
             while anchor <= committed {

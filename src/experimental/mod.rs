@@ -25,14 +25,14 @@
 //!
 //! ```toml
 //! [dependencies]
-//! aletheiadb = { version = "0.1", features = ["nova"] }
+//! aletheiadb = { version = "0.2", features = ["nova"] }
 //! ```
 //!
 //! Or pick a single category:
 //!
 //! ```toml
 //! [dependencies]
-//! aletheiadb = { version = "0.1", features = ["semantic-temporal"] }
+//! aletheiadb = { version = "0.2", features = ["semantic-temporal"] }
 //! ```
 //!
 //! > ⚠️ **Breaking change in 0.1:** the `nova` umbrella no longer enables the

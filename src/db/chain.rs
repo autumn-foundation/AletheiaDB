@@ -423,3 +423,339 @@ mod tamper_tests {
         assert!(v.earliest_broken_seq.is_some());
     }
 }
+
+#[cfg(all(test, feature = "audit-export"))]
+mod crypto_shred_ac4_tests {
+    //! AC4 (Issue #3359, GDPR crypto-shred slice 2): the provenance hash chain
+    //! stays verifiable **after** a subject is crypto-shredded, and a tamper of a
+    //! sealed value is still caught.
+    //!
+    //! This holds **by construction** as of the seal-before-apply write path
+    //! (#3689): a designated property is sealed to a `PropertyValue::Bytes(SUBJ…)`
+    //! envelope in the write buffer *before* `apply_changes`, so historical
+    //! storage records ciphertext. The chain leaf is computed *post-commit* by the
+    //! sealer from `DbVersionSource`, which reconstructs from the **raw**
+    //! `reconstruct_*_properties` storage path (crypto-shred-unaware) — so the leaf
+    //! binds the stored ciphertext, never plaintext. `erase_subject` destroys only
+    //! the subject key; the stored envelope bytes survive, so `verify_chain`
+    //! recomputes an identical leaf and the chain stays valid. Mutating the stored
+    //! envelope, by contrast, changes the recomputed leaf and is detected.
+    //!
+    //! These tests combine the `chain` + `encryption` + designation harnesses
+    //! (neither `tamper_tests::enabled_db` nor `crypto_shred::integration_tests`
+    //! configures both) and are the regression guard for that property.
+
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::PropertyMapBuilder;
+    use crate::config::{AletheiaDBConfig, WalConfigBuilder};
+    use crate::core::property::PropertyValue;
+    use crate::core::version::VersionData;
+    use crate::db::AletheiaDB;
+    use crate::db::crypto_shred::DesignationTarget;
+    use crate::db::crypto_shred::envelope::is_envelope;
+    use crate::encryption::FileKeyProvider;
+    use crate::encryption::config::EncryptionConfig;
+    use crate::provenance_chain::{ChainConfig, ChainFsyncMode};
+    use crate::storage::index_persistence::PersistenceConfig;
+    use crate::storage::wal::DurabilityMode;
+
+    const SEALED: &str = "AC4_SEALED_PLAINTEXT_that_will_be_crypto_shredded_c1f2";
+
+    /// A combined config: WAL + index persistence + provenance chain + encryption,
+    /// so a single database exercises seal-at-write together with the chain
+    /// sealer. `enabled_db` (chain only) and the crypto-shred integration harness
+    /// (encryption only) each configure just one half; AC4 needs both.
+    fn enc_chain_db(dir: &std::path::Path) -> AletheiaDB {
+        let key_file = dir.join("mek.key");
+        if !key_file.exists() {
+            FileKeyProvider::generate_key_file(&key_file).unwrap();
+        }
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(dir.join("wal"))
+                    .durability_mode(DurabilityMode::Synchronous)
+                    .build(),
+            )
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: dir.join("indexes"),
+                load_on_startup: true,
+                ..Default::default()
+            })
+            .chain(ChainConfig {
+                enabled: true,
+                fsync: ChainFsyncMode::PerTransaction,
+                dir: None,
+            })
+            .encryption(EncryptionConfig::file_based(&key_file))
+            .build();
+        AletheiaDB::with_unified_config(config).unwrap()
+    }
+
+    fn wait_seq(db: &AletheiaDB, expected: u64) {
+        for _ in 0..300 {
+            if db.export_chain_head().unwrap().seq >= expected {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "chain head stuck at {}",
+            db.export_chain_head().unwrap().seq
+        );
+    }
+
+    /// Read the raw (stored) value of a node property through the *same* storage
+    /// reconstruction path the chain source uses — NOT the unsealing read
+    /// boundary — so the returned value is the on-disk sealed envelope.
+    fn stored_node_property(
+        db: &AletheiaDB,
+        node: crate::core::id::NodeId,
+        key: &str,
+    ) -> PropertyValue {
+        let hist = db.historical.read();
+        let vid = hist.get_current_node_version(node).unwrap();
+        let props = hist.reconstruct_node_properties(vid).unwrap();
+        props.get(key).unwrap().clone()
+    }
+
+    /// (a) The provenance chain still verifies after a **node** subject is
+    /// crypto-shredded: the leaf bound the ciphertext, which survives erasure.
+    #[test]
+    fn verify_chain_passes_after_crypto_shred_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = enc_chain_db(dir.path());
+
+        // Placeholder (plaintext) so we capture the id, THEN designate + replace so
+        // the sealed version carries the designated value.
+        let alice = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("stage", "placeholder")
+                    .build(),
+            )
+            .unwrap();
+        db.designate_subject(
+            "subject-A",
+            vec![DesignationTarget::WholeNode(alice.as_u64())],
+        )
+        .unwrap();
+        db.replace_node(
+            alice,
+            "Person",
+            PropertyMapBuilder::new().insert("email", SEALED).build(),
+        )
+        .unwrap();
+        // A second designated update, to exercise a multi-version sealed chain.
+        db.replace_node(
+            alice,
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("email", SEALED)
+                .insert("v", 2_i64)
+                .build(),
+        )
+        .unwrap();
+        wait_seq(&db, 3);
+
+        // Guardrail: the stored value is the sealed SUBJ envelope (ciphertext),
+        // not the plaintext — this is exactly what the chain leaf binds.
+        match &stored_node_property(&db, alice, "email") {
+            PropertyValue::Bytes(b) => {
+                assert!(is_envelope(b), "designated value must be sealed at rest");
+                assert_ne!(
+                    b.as_ref(),
+                    SEALED.as_bytes(),
+                    "leaf must not bind plaintext"
+                );
+            }
+            other => panic!("expected sealed Bytes envelope at rest, got {other:?}"),
+        }
+
+        // Chain verifies while the subject is active.
+        assert!(
+            db.verify_chain().unwrap().passed,
+            "chain must verify before erasure"
+        );
+
+        // Crypto-shred the subject: destroys the key only, not the ciphertext.
+        db.erase_subject("subject-A").unwrap();
+
+        // The stored value is still the same opaque SUBJ envelope (only the key is
+        // gone) — so the recomputed leaf is unchanged.
+        match &stored_node_property(&db, alice, "email") {
+            PropertyValue::Bytes(b) => {
+                assert!(is_envelope(b), "erased value stays a SUBJ envelope");
+                assert_ne!(
+                    b.as_ref(),
+                    SEALED.as_bytes(),
+                    "erased read never surfaces plaintext"
+                );
+            }
+            other => panic!("expected sealed Bytes envelope after erase, got {other:?}"),
+        }
+
+        // AC4: the chain STILL verifies after the crypto-shred. Clear the
+        // reconstruction cache first so verify re-reads the *surviving* ciphertext
+        // from storage rather than a warm cache — proving the leaf recomputes
+        // identically from the on-disk envelope, not from a stale plaintext read.
+        db.historical.read().__test_clear_property_cache();
+        let v = db.verify_chain().unwrap();
+        assert!(
+            v.passed,
+            "provenance chain must remain valid after crypto-shred (leaf bound ciphertext); earliest_broken_seq={:?}",
+            v.earliest_broken_seq
+        );
+    }
+
+    /// (a, edge variant) Same property for an **edge** subject.
+    #[test]
+    fn verify_chain_passes_after_crypto_shred_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = enc_chain_db(dir.path());
+
+        let a = db
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "a").build())
+            .unwrap();
+        let b = db
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "b").build())
+            .unwrap();
+        let edge = db
+            .create_edge(
+                a,
+                b,
+                "KNOWS",
+                PropertyMapBuilder::new().insert("stage", "ph").build(),
+            )
+            .unwrap();
+        db.designate_subject(
+            "subject-E",
+            vec![DesignationTarget::WholeEdge(edge.as_u64())],
+        )
+        .unwrap();
+        db.replace_edge(
+            edge,
+            PropertyMapBuilder::new().insert("secret", SEALED).build(),
+        )
+        .unwrap();
+        wait_seq(&db, 4);
+
+        // Guardrail: stored edge value is a sealed envelope.
+        {
+            let hist = db.historical.read();
+            let vid = hist.get_current_edge_version(edge).unwrap();
+            let props = hist.reconstruct_edge_properties(vid).unwrap();
+            match props.get("secret").unwrap() {
+                PropertyValue::Bytes(bytes) => {
+                    assert!(is_envelope(bytes), "designated edge value must be sealed");
+                    assert_ne!(bytes.as_ref(), SEALED.as_bytes());
+                }
+                other => panic!("expected sealed edge Bytes, got {other:?}"),
+            }
+        }
+
+        assert!(
+            db.verify_chain().unwrap().passed,
+            "chain valid before erase"
+        );
+        db.erase_subject("subject-E").unwrap();
+        // Re-read the surviving ciphertext from storage (not a warm cache).
+        db.historical.read().__test_clear_edge_property_cache();
+        let v = db.verify_chain().unwrap();
+        assert!(
+            v.passed,
+            "edge chain must remain valid after crypto-shred; earliest_broken_seq={:?}",
+            v.earliest_broken_seq
+        );
+    }
+
+    /// (b) Tampering with the stored sealed envelope IS still detected — the chain
+    /// binds the ciphertext bytes, so any mutation of them breaks verification.
+    #[test]
+    fn tamper_of_sealed_envelope_still_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = enc_chain_db(dir.path());
+
+        let alice = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("stage", "placeholder")
+                    .build(),
+            )
+            .unwrap();
+        db.designate_subject(
+            "subject-T",
+            vec![DesignationTarget::WholeNode(alice.as_u64())],
+        )
+        .unwrap();
+        db.replace_node(
+            alice,
+            "Person",
+            PropertyMapBuilder::new().insert("email", SEALED).build(),
+        )
+        .unwrap();
+        wait_seq(&db, 2);
+        assert!(db.verify_chain().unwrap().passed);
+
+        // Flip one byte of the stored sealed-envelope value in place, then clear
+        // the reconstruction cache. The cache assumes per-version immutability
+        // (`node_property_cache`, never invalidated), so a genuine on-disk tamper
+        // is only re-read after the cache misses — e.g. on a fresh process / cold
+        // reopen. Clearing it here reproduces that fresh read within one process.
+        {
+            let mut hist = db.historical.write();
+            let vid = hist.get_current_node_version(alice).unwrap();
+            let mut v = hist.get_node_version(vid).unwrap().clone();
+            let full = hist.reconstruct_node_properties(vid).unwrap();
+            let mut env = match full.get("email").unwrap() {
+                PropertyValue::Bytes(b) => {
+                    assert!(is_envelope(b), "value must be sealed to tamper it");
+                    b.to_vec()
+                }
+                other => panic!("expected sealed Bytes to tamper, got {other:?}"),
+            };
+            let last = env.len() - 1;
+            env[last] ^= 0xFF; // mutate the AEAD tag/ciphertext region
+            let tampered = full
+                .builder()
+                .insert("email", PropertyValue::Bytes(Arc::from(env)))
+                .build();
+            v.data = VersionData::anchor(tampered);
+            hist.insert_restored_node_version(v).unwrap();
+            hist.__test_clear_property_cache();
+        }
+
+        let v = db.verify_chain().unwrap();
+        assert!(!v.passed, "a mutated sealed envelope must be detected");
+        assert!(v.earliest_broken_seq.is_some(), "tamper is localized");
+    }
+
+    /// (c) Sanity: with encryption enabled but NO designation, a normal node's
+    /// value is stored as plaintext and the chain verifies — zero regression for
+    /// non-crypto-shred data.
+    #[test]
+    fn non_designated_node_chain_still_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = enc_chain_db(dir.path());
+        let bob = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+        wait_seq(&db, 1);
+
+        // Non-designated: stored value is exactly the plaintext (never an envelope).
+        assert_eq!(
+            stored_node_property(&db, bob, "name"),
+            PropertyValue::from("Bob".to_string()),
+            "a non-designated write must not be sealed"
+        );
+        assert!(db.verify_chain().unwrap().passed);
+    }
+}

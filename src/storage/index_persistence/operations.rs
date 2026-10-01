@@ -109,7 +109,7 @@ pub(crate) fn persist_vector_indexes(
         crate::storage::index_persistence::vector::save_hnsw_index_with_keyring(
             index.as_ref(),
             &usearch_path,
-            keyring,
+            keyring.as_ref(),
         )
         .map_err(|e| {
             StorageError::PersistenceError(format!("Failed to save usearch index: {}", e))
@@ -132,14 +132,13 @@ pub(crate) fn persist_vector_indexes(
         // Set the actual vector count
         vector_meta.vector_count = vector_count as u64;
 
-        save_vector_meta_with_keyring(&vector_meta, &vec_path.join("meta.idx"), keyring).map_err(
-            |e| {
-                StorageError::PersistenceError(format!(
-                    "Failed to save vector metadata for {}: {}",
-                    property_name, e
-                ))
-            },
-        )?;
+        save_vector_meta_with_keyring(&vector_meta, &vec_path.join("meta.idx"), keyring.as_ref())
+            .map_err(|e| {
+            StorageError::PersistenceError(format!(
+                "Failed to save vector metadata for {}: {}",
+                property_name, e
+            ))
+        })?;
 
         // Create and save mappings
         use crate::storage::index_persistence::formats::VectorMapping;
@@ -156,7 +155,7 @@ pub(crate) fn persist_vector_indexes(
         save_vector_mappings_with_keyring(
             &vector_mappings,
             &vec_path.join("mappings.idx"),
-            keyring,
+            keyring.as_ref(),
         )
         .map_err(|e| {
             StorageError::PersistenceError(format!(
@@ -424,7 +423,7 @@ pub(crate) fn load_vector_indexes(
     // otherwise propagate the panic through `collect`).
     // Clone the index cipher (cheap Arc clone) so each parallel task can decrypt
     // encrypted vector meta/mappings files (Issue #481).
-    let keyring = manager.keyring().cloned();
+    let keyring = manager.keyring();
     let staged: Vec<std::result::Result<LoadedVectorIndex, SkippedVectorIndex>> = index_dirs
         .par_iter()
         .map(|path| {
@@ -536,9 +535,8 @@ pub(crate) fn persist_graph_index(
 
     // Stream all nodes without collecting into intermediate Vec (prevents OOM on large graphs)
     for node in current.all_nodes() {
-        let properties = persist_property_map(&node.properties).map_err(|e| {
-            StorageError::PersistenceError(format!("Failed to persist node properties: {}", e))
-        })?;
+        let properties = persist_property_map(&node.properties)
+            .map_err(|e| e.into_persist_storage_error("Failed to persist node properties"))?;
 
         graph_data.nodes.push(PersistedNode {
             id: node.id.as_u64(),
@@ -551,9 +549,8 @@ pub(crate) fn persist_graph_index(
 
     // Stream all edges without collecting into intermediate Vec (prevents OOM on large graphs)
     for edge in current.all_edges() {
-        let properties = persist_property_map(&edge.properties).map_err(|e| {
-            StorageError::PersistenceError(format!("Failed to persist edge properties: {}", e))
-        })?;
+        let properties = persist_property_map(&edge.properties)
+            .map_err(|e| e.into_persist_storage_error("Failed to persist edge properties"))?;
 
         graph_data.edges.push(PersistedEdge {
             id: edge.id.as_u64(),
@@ -566,9 +563,17 @@ pub(crate) fn persist_graph_index(
     }
     graph_data.edge_count = graph_data.edges.len() as u64;
 
-    // Export CSR adjacency structures for fast loading
-    let (outgoing_node_ids, outgoing_offsets, outgoing_neighbors) = current.export_outgoing_csr();
-    let (incoming_node_ids, incoming_offsets, incoming_neighbors) = current.export_incoming_csr();
+    // Export CSR adjacency structures for fast loading.
+    //
+    // As ONE compaction-consistent pair (Issue #3810): the outgoing and
+    // incoming indexes are compacted independently by the background
+    // maintenance worker, so two separate exports can capture an edge in one
+    // direction's CSR and not the other's, and the restore path would then
+    // either duplicate it in one direction's adjacency or lose it there.
+    let (
+        (outgoing_node_ids, outgoing_offsets, outgoing_neighbors),
+        (incoming_node_ids, incoming_offsets, incoming_neighbors),
+    ) = current.export_csr_pair();
 
     graph_data.outgoing_node_ids = outgoing_node_ids;
     graph_data.outgoing_offsets = outgoing_offsets;
@@ -592,9 +597,9 @@ pub(crate) fn persist_graph_index(
         StorageError::PersistenceError(format!("Failed to create graph directory: {}", e))
     })?;
 
-    save_graph_index_with_keyring(&graph_data, &graph_path, manager.keyring()).map_err(|e| {
-        StorageError::PersistenceError(format!("Failed to save graph index: {}", e))
-    })?;
+    save_graph_index_with_keyring(&graph_data, &graph_path, manager.keyring().as_ref()).map_err(
+        |e| StorageError::PersistenceError(format!("Failed to save graph index: {}", e)),
+    )?;
 
     if let Some(tracker) = tracker {
         tracker.reset_graph_mutations();
@@ -626,16 +631,15 @@ pub(crate) fn persist_graph_index_from_snapshot(
     current_lsn: u64,
 ) -> Result<(u64, u64)> {
     use crate::storage::index_persistence::graph::{
-        extract_graph_data_from_snapshot, save_graph_index_with_cipher,
+        extract_graph_data_from_snapshot, save_graph_index_with_keyring,
     };
 
     // Extract nodes/edges from the coherent snapshot. Property serialization can
     // intern previously unseen string values, so this must precede the interner
     // save below (mirrors `persist_graph_index`'s "interner AFTER graph
     // conversion" ordering).
-    let graph_data = extract_graph_data_from_snapshot(snapshot).map_err(|e| {
-        StorageError::PersistenceError(format!("Failed to extract graph snapshot: {}", e))
-    })?;
+    let graph_data = extract_graph_data_from_snapshot(snapshot)
+        .map_err(|e| e.into_persist_storage_error("Failed to extract graph snapshot"))?;
 
     manager.save_string_interner().map_err(|e| {
         StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
@@ -649,12 +653,9 @@ pub(crate) fn persist_graph_index_from_snapshot(
     // (Issue #3564): when a cipher is configured the snapshot-persisted file MUST be
     // encrypted, not plaintext, or the coherent-snapshot path would be a security
     // regression vs the live path.
-    save_graph_index_with_cipher(
-        &graph_data,
-        &graph_path,
-        manager.keyring().and_then(|k| k.current_cipher()).as_ref(),
-    )
-    .map_err(|e| StorageError::PersistenceError(format!("Failed to save graph index: {}", e)))?;
+    save_graph_index_with_keyring(&graph_data, &graph_path, manager.keyring().as_ref()).map_err(
+        |e| StorageError::PersistenceError(format!("Failed to save graph index: {}", e)),
+    )?;
 
     if let Some(tracker) = tracker {
         tracker.reset_graph_mutations();
@@ -726,11 +727,14 @@ pub(crate) fn persist_temporal_index(
         } else {
             convert_node_version(version)
         }
+        // Preserve a structured interner-capacity signal (configurable interner
+        // cap): a property VALUE interned here can exhaust the cap, and the
+        // background worker must classify that as deterministic (suspend), not
+        // transient. Every other conversion failure keeps the contextual wrap.
         .map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to convert node version {}: {}",
-                version.id.as_u64(),
-                e
+            e.into_persist_storage_error(&format!(
+                "Failed to convert node version {}",
+                version.id.as_u64()
             ))
         })?;
         node_versions.push(entry);
@@ -770,11 +774,12 @@ pub(crate) fn persist_temporal_index(
         } else {
             convert_edge_version(version)
         }
+        // Preserve a structured interner-capacity signal (configurable interner
+        // cap), same rationale as the node-version path above.
         .map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to convert edge version {}: {}",
-                version.id.as_u64(),
-                e
+            e.into_persist_storage_error(&format!(
+                "Failed to convert edge version {}",
+                version.id.as_u64()
             ))
         })?;
         edge_versions.push(entry);
@@ -800,9 +805,10 @@ pub(crate) fn persist_temporal_index(
 
     // Save to disk
     let temporal_path = manager.indexes_path().join("temporal").join("versions.idx");
-    save_temporal_index_with_keyring(&temporal_data, &temporal_path, manager.keyring()).map_err(
-        |e| StorageError::PersistenceError(format!("Failed to save temporal index: {}", e)),
-    )?;
+    save_temporal_index_with_keyring(&temporal_data, &temporal_path, manager.keyring().as_ref())
+        .map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to save temporal index: {}", e))
+        })?;
 
     tracker.reset_temporal_mutations();
     tracker.update_temporal_lsn(current_lsn);
@@ -940,7 +946,7 @@ pub(crate) fn persist_temporal_index_from_snapshot(
     use crate::storage::index_persistence::temporal::{
         convert_edge_version, convert_node_version, materialize_version_data_for_persistence,
         needs_sparse_vector_materialization, new_temporal_index_data,
-        save_temporal_index_with_cipher,
+        save_temporal_index_with_keyring,
     };
 
     // Build id->version maps only when a sparse-vector delta is actually present
@@ -983,11 +989,14 @@ pub(crate) fn persist_temporal_index_from_snapshot(
         } else {
             convert_node_version(version)
         }
+        // Preserve a structured interner-capacity signal (configurable interner
+        // cap): a property VALUE interned here can exhaust the cap, and the
+        // background worker must classify that as deterministic (suspend), not
+        // transient. Every other conversion failure keeps the contextual wrap.
         .map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to convert node version {}: {}",
-                version.id.as_u64(),
-                e
+            e.into_persist_storage_error(&format!(
+                "Failed to convert node version {}",
+                version.id.as_u64()
             ))
         })?;
         node_versions.push(entry);
@@ -1011,11 +1020,12 @@ pub(crate) fn persist_temporal_index_from_snapshot(
         } else {
             convert_edge_version(version)
         }
+        // Preserve a structured interner-capacity signal (configurable interner
+        // cap), same rationale as the node-version path above.
         .map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to convert edge version {}: {}",
-                version.id.as_u64(),
-                e
+            e.into_persist_storage_error(&format!(
+                "Failed to convert edge version {}",
+                version.id.as_u64()
             ))
         })?;
         edge_versions.push(entry);
@@ -1035,12 +1045,10 @@ pub(crate) fn persist_temporal_index_from_snapshot(
     // Route through the same at-rest encryption path as the live `persist_temporal_index`
     // (Issue #3564): when a cipher is configured the snapshot-persisted file MUST be
     // encrypted, not plaintext.
-    save_temporal_index_with_cipher(
-        &temporal_data,
-        &temporal_path,
-        manager.keyring().and_then(|k| k.current_cipher()).as_ref(),
-    )
-    .map_err(|e| StorageError::PersistenceError(format!("Failed to save temporal index: {}", e)))?;
+    save_temporal_index_with_keyring(&temporal_data, &temporal_path, manager.keyring().as_ref())
+        .map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to save temporal index: {}", e))
+        })?;
 
     tracker.reset_temporal_mutations();
     tracker.update_temporal_lsn(current_lsn);
@@ -1056,16 +1064,13 @@ pub(crate) fn persist_string_interner(
     tracker: &Arc<PersistenceTracker>,
     current_lsn: u64,
 ) -> Result<u64> {
-    manager.save_string_interner().map_err(|e| {
+    // Use the EXACT number of strings the save actually wrote for the manifest
+    // count, not a later `GLOBAL_INTERNER.len()` sample that can race a
+    // concurrent writer interning more strings between the write and the read
+    // (configurable interner cap fix).
+    let count = manager.save_string_interner().map_err(|e| {
         StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
     })?;
-
-    // Capture the count *after* save completes. Since GLOBAL_INTERNER is append-only,
-    // this count is at least what was saved. If new strings were interned concurrently,
-    // they might not be in the file yet, but having a slightly higher count in the manifest
-    // is safer than lower (though ideally exact).
-    // Note: save_string_interner likely iterates and saves.
-    let count = crate::core::GLOBAL_INTERNER.len() as u64;
 
     tracker.reset_string_mutations();
     tracker.update_string_lsn(current_lsn);
@@ -1089,7 +1094,7 @@ pub(crate) fn persist_temporal_adjacency_index(
         save_temporal_adjacency_index_with_keyring(
             adj_index,
             manager.base_path(),
-            manager.keyring(),
+            manager.keyring().as_ref(),
         )
         .map_err(|e| {
             StorageError::PersistenceError(format!(
@@ -1127,8 +1132,38 @@ pub(crate) fn persist_all_indexes(
     manager: &Arc<IndexPersistenceManager>,
     tracker: &Arc<PersistenceTracker>,
 ) -> Result<()> {
-    let current_lsn = wal.current_lsn().0;
+    persist_all_indexes_at_lsn(
+        current,
+        historical,
+        temporal_indexes,
+        manager,
+        tracker,
+        wal.current_lsn().0,
+    )
+}
 
+/// Persist all indexes, stamping the manifest (and every component's tracked
+/// LSN) with an explicit `manifest_lsn` rather than the local WAL's current
+/// LSN.
+///
+/// This is the seam the replication engine (Issue #3355, Slice B) uses: a
+/// replica applies entries from a PRIMARY's independent LSN space and never
+/// appends that data to its own local WAL, so `wal.current_lsn()` (which
+/// [`persist_all_indexes`] uses) would stamp the manifest with the wrong
+/// coordinate. Passing the replica's `applied_lsn` here instead means a
+/// restarted replica resumes fetching from the correct primary LSN (see
+/// [`load_indexes_startup`]'s returned `manifest.lsn`).
+///
+/// Identical to [`persist_all_indexes`] in every other respect (same
+/// component order, same best-effort error handling, same manifest shape).
+pub(crate) fn persist_all_indexes_at_lsn(
+    current: &Arc<CurrentStorage>,
+    historical: &Arc<RwLock<HistoricalStorage>>,
+    temporal_indexes: &Arc<TemporalIndexes>,
+    manager: &Arc<IndexPersistenceManager>,
+    tracker: &Arc<PersistenceTracker>,
+    current_lsn: u64,
+) -> Result<()> {
     // Persist all indexes - log errors but continue with remaining indexes
     if let Err(e) = persist_string_interner(manager, tracker, current_lsn) {
         eprintln!("Failed to persist string interner: {}", e);
@@ -1268,7 +1303,7 @@ pub(crate) fn load_indexes_startup(
             load_graph_index_with_keyring, restore_property_map,
         };
 
-        match load_graph_index_with_keyring(&graph_path, manager.keyring()) {
+        match load_graph_index_with_keyring(&graph_path, manager.keyring().as_ref()) {
             Ok(mut graph_data) => {
                 // Issue #3490: translate persisted (file-space) interner ids
                 // (node/edge labels, property keys, and string property values)
@@ -1503,7 +1538,7 @@ pub(crate) fn load_indexes_startup(
             load_temporal_index_with_keyring, restore_into_historical_storage,
         };
 
-        match load_temporal_index_with_keyring(&temporal_path, manager.keyring()) {
+        match load_temporal_index_with_keyring(&temporal_path, manager.keyring().as_ref()) {
             Ok(mut temporal_data) => {
                 // Issue #3490: translate persisted (file-space) interner ids in
                 // the historical versions/anchors (labels, property keys, string
@@ -1630,7 +1665,7 @@ pub(crate) fn load_indexes_startup(
     if adjacency_file.exists() {
         match load_temporal_adjacency_index_with_keyring_and_remap(
             manager.base_path(),
-            manager.keyring(),
+            manager.keyring().as_ref(),
             &interner_remap,
         ) {
             Ok(adj_index) => {

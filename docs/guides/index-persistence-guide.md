@@ -812,5 +812,5 @@ PersistenceConfig {
 
 For issues, questions, or feature requests, please:
 - Check the [Troubleshooting](#troubleshooting) section
-- Search existing [GitHub Issues](https://github.com/madmax983/AletheiaDB/issues)
+- Search existing [GitHub Issues](https://github.com/autumn-foundation/AletheiaDB/issues)
 - Create a new issue with `[persistence]` tag

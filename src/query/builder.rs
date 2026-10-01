@@ -54,11 +54,13 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::core::NodeId;
+use crate::core::namespace::{Namespace, NamespaceScope};
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::core::vector::DistanceMetric as VectorMetric;
 use crate::index::vector::DistanceMetric;
 
 use super::ir::{Predicate, QueryOp, TraversalDepth};
+use super::limits::QueryLimitsOverride;
 use super::plan::{IndexHint, QueryHints, TemporalContext};
 
 /// A fully constructed query ready for execution.
@@ -70,6 +72,19 @@ pub struct Query {
     pub(crate) temporal_context: Option<TemporalContext>,
     /// Query hints for optimization
     pub(crate) hints: QueryHints,
+    /// Namespace scope (Issue #3349, PR2). `None` reproduces prior,
+    /// namespace-agnostic behavior exactly. When set, the executor filters
+    /// produced entities — start nodes, traversal results, and ranked results —
+    /// to those whose (immutable) namespace ∈ scope, and traversal never crosses
+    /// an out-of-scope edge or bridges through an out-of-scope node.
+    pub(crate) scope: Option<NamespaceScope>,
+    /// Per-call engine-lane resource-limit override (Issue #3368 public API),
+    /// set via [`QueryBuilder::with_timeout`]/[`with_max_rows`](QueryBuilder::with_max_rows)/
+    /// [`with_memory_budget`](QueryBuilder::with_memory_budget). `None` reproduces
+    /// prior behavior exactly: the database's configured
+    /// [`EngineQueryLimitsConfig`](crate::query::limits::EngineQueryLimitsConfig)
+    /// defaults apply with no per-call override.
+    pub(crate) limits: Option<QueryLimitsOverride>,
 }
 
 impl Query {
@@ -137,6 +152,8 @@ pub struct QueryBuilder<S: QueryState> {
     ops: Vec<QueryOp>,
     temporal_context: Option<TemporalContext>,
     hints: QueryHints,
+    scope: Option<NamespaceScope>,
+    limits: Option<QueryLimitsOverride>,
     _phantom: PhantomData<S>,
 }
 
@@ -148,6 +165,8 @@ impl QueryBuilder<state::Initial> {
             ops: Vec::new(),
             temporal_context: None,
             hints: QueryHints::default(),
+            scope: None,
+            limits: None,
             _phantom: PhantomData,
         }
     }
@@ -168,6 +187,17 @@ impl QueryBuilder<state::Initial> {
     ///
     /// Uses the default "embedding" property and Cosine distance.
     /// For custom properties or metrics, use [`find_similar_builder()`](Self::find_similar_builder).
+    ///
+    /// **Namespace scope caveat (Issue #3349, PR2):** when combined with
+    /// [`in_namespace`](Self::in_namespace)/[`in_namespaces`](Self::in_namespaces),
+    /// the executor performs the index k-NN first and then **post-filters** the
+    /// `k` results to the scope, so a scoped vector search here may return
+    /// **fewer than `k`** in-scope rows. For a filter-complete k-NN that
+    /// over-fetches to guarantee `k` genuinely in-scope results, use
+    /// [`AletheiaDB::find_similar_scoped`](crate::AletheiaDB::find_similar_scoped)
+    /// /
+    /// [`find_similar_by_embedding_scoped`](crate::AletheiaDB::find_similar_by_embedding_scoped)
+    /// instead.
     #[must_use]
     pub fn find_similar(
         self,
@@ -766,6 +796,45 @@ impl<S: QueryState> QueryBuilder<S> {
         self
     }
 
+    /// Set a per-call wall-clock timeout for this query (Issue #3368 public API).
+    ///
+    /// The requested value is folded with the database's configured
+    /// [`EngineQueryLimitsConfig`](crate::query::limits::EngineQueryLimitsConfig)
+    /// operator ceiling at [`execute`](Self::execute) time: a request within the
+    /// ceiling is honored (even when tighter than the server default); a request
+    /// exceeding the ceiling — or requesting unlimited (`Duration::ZERO`) under a
+    /// finite ceiling — is rejected with `INVALID_ARGUMENT` before any work is
+    /// done. The duration is saturated to milliseconds (`as_millis() as u64`).
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        let millis = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        self.limits.get_or_insert_with(Default::default).timeout_ms = Some(millis);
+        self
+    }
+
+    /// Set a per-call maximum result-row cap for this query (Issue #3368
+    /// public API). See [`with_timeout`](Self::with_timeout) for the ceiling
+    /// merge/rejection semantics (identical, applied per-dimension).
+    #[must_use]
+    pub fn with_max_rows(mut self, max_rows: usize) -> Self {
+        self.limits
+            .get_or_insert_with(Default::default)
+            .max_result_rows = Some(max_rows);
+        self
+    }
+
+    /// Set a per-call estimated working-memory budget in bytes for this query
+    /// (Issue #3368 public API). See [`with_timeout`](Self::with_timeout) for
+    /// the ceiling merge/rejection semantics (identical, applied
+    /// per-dimension).
+    #[must_use]
+    pub fn with_memory_budget(mut self, max_bytes: usize) -> Self {
+        self.limits
+            .get_or_insert_with(Default::default)
+            .max_memory_bytes = Some(max_bytes);
+        self
+    }
+
     /// Execute the query against the database.
     ///
     /// This is a convenience method that combines `build()` and `db.execute_query()`.
@@ -816,6 +885,55 @@ impl<S: QueryState> QueryBuilder<S> {
         let query = self.build();
         db.execute_query(query)
     }
+    /// Scope the query to a single namespace (Issue #3349, PR2).
+    ///
+    /// Results — start nodes, traversal results, and ranked results — are
+    /// filtered to entities whose (immutable) namespace equals `namespace`, and
+    /// traversal never crosses an out-of-scope edge or bridges through an
+    /// out-of-scope node. Omitting the scope reproduces prior behavior exactly.
+    ///
+    /// Note: for a filter-complete index-backed k-NN (`k` guaranteed in-scope
+    /// results even under a highly selective scope), prefer
+    /// [`AletheiaDB::find_similar_scoped`](crate::AletheiaDB::find_similar_scoped);
+    /// the builder applies scope as a post-filter, so an index-search start
+    /// (`find_similar`/`similar_to`) may yield fewer than `k` in-scope rows.
+    #[must_use]
+    pub fn in_namespace(mut self, namespace: Namespace) -> Self {
+        self.scope = Some(NamespaceScope::single(namespace));
+        self
+    }
+
+    /// Scope the query to the **union** of a non-empty list of namespaces
+    /// (Issue #3349, PR2). See [`in_namespace`](Self::in_namespace).
+    ///
+    /// An empty list is an **invalid** scope, not "no scope": an empty union
+    /// would silently match nothing, which the never-silently-wrong contract
+    /// forbids. Because the builder cannot surface an error, the empty-list
+    /// intent is preserved as an empty [`NamespaceScope::List`] and rejected with
+    /// `INVALID_ARGUMENT` when the query is executed
+    /// ([`execute`](Self::execute) → `AletheiaDB::execute_query` calls
+    /// `validate_scope`). It must never silently degrade to the unscoped
+    /// (all-namespaces) path.
+    #[must_use]
+    pub fn in_namespaces(mut self, namespaces: impl IntoIterator<Item = Namespace>) -> Self {
+        let list: Vec<Namespace> = namespaces.into_iter().collect();
+        // Preserve the empty-list intent (do NOT collapse to `None`, which would
+        // mean "unscoped / all namespaces"). An empty `List` is a distinct,
+        // match-nothing scope that the execute path validates and rejects as
+        // INVALID_ARGUMENT (Issue #3349 A2).
+        self.scope = Some(NamespaceScope::List(list));
+        self
+    }
+
+    /// Scope the query to every namespace (Issue #3349, PR2) — i.e. no namespace
+    /// filtering, the `all` selector. Useful to make cross-namespace intent
+    /// explicit at a call site.
+    #[must_use]
+    pub fn in_all_namespaces(mut self) -> Self {
+        self.scope = Some(NamespaceScope::all());
+        self
+    }
+
     /// Build the final query
     #[must_use]
     pub fn build(self) -> Query {
@@ -823,6 +941,8 @@ impl<S: QueryState> QueryBuilder<S> {
             ops: self.ops,
             temporal_context: self.temporal_context,
             hints: self.hints,
+            scope: self.scope,
+            limits: self.limits,
         }
     }
 
@@ -833,6 +953,8 @@ impl<S: QueryState> QueryBuilder<S> {
             ops: self.ops,
             temporal_context: self.temporal_context,
             hints: self.hints,
+            scope: self.scope,
+            limits: self.limits,
             _phantom: PhantomData,
         }
     }

@@ -465,9 +465,12 @@ impl CostModel {
             }
 
             PhysicalOp::Project { input, .. }
+            | PhysicalOp::ProjectProvenance { input, .. }
             | PhysicalOp::Distinct { input }
             | PhysicalOp::Count { input }
             | PhysicalOp::Aggregate { input, .. }
+            | PhysicalOp::TemporalWindowAggregate { input, .. }
+            | PhysicalOp::TemporalAlign { input, .. }
             | PhysicalOp::Materialize { input }
             | PhysicalOp::TemporalTrack { input, .. } => self.estimate(input, stats),
 
@@ -543,7 +546,9 @@ impl CostModel {
             PhysicalOp::Limit { count, input, .. } => {
                 (*count).min(self.estimate_cardinality(input, stats))
             }
-            PhysicalOp::Sort { input, .. } | PhysicalOp::Project { input, .. } => {
+            PhysicalOp::Sort { input, .. }
+            | PhysicalOp::Project { input, .. }
+            | PhysicalOp::ProjectProvenance { input, .. } => {
                 self.estimate_cardinality(input, stats)
             }
             PhysicalOp::Distinct { input } => {
@@ -579,6 +584,24 @@ impl CostModel {
             PhysicalOp::Except { left, .. } => self.estimate_cardinality(left, stats),
             PhysicalOp::Materialize { input } | PhysicalOp::TemporalTrack { input, .. } => {
                 self.estimate_cardinality(input, stats)
+            }
+            PhysicalOp::TemporalWindowAggregate { spec, .. } => {
+                // One output row per tumbling window; estimate the window count
+                // directly from the spec (cheap, storage-free).
+                crate::query::temporal_window::generate_windows(
+                    spec.range_start_micros,
+                    spec.range_end_micros,
+                    spec.granularity,
+                )
+                .map(|w| w.len().max(1))
+                .unwrap_or(1)
+            }
+            PhysicalOp::TemporalAlign { input, .. } => {
+                // Alignment fans each matched participant pairing out into one
+                // row per driver event / overlap sub-interval; the exact count
+                // is data-dependent (needs history), so use the input
+                // cardinality as a cheap storage-free proxy.
+                self.estimate_cardinality(input, stats).max(1)
             }
             PhysicalOp::SimilarToNode { k, .. } => *k,
             PhysicalOp::OptionalApply { input, .. } => {

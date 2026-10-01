@@ -27,7 +27,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  MUTANTS_FEATURES: "config-toml,mcp-server,sharding-rpc"
+  MUTANTS_FEATURES: "config-toml,mcp-server,sharding-rpc,sql,cypher"
   # Pinned for reproducibility and stable flag/exit-code semantics
   # (--sharding round-robin requires cargo-mutants 27.x; exit codes per
   # https://mutants.rs/exit-codes.html: 0 = all caught, 2 = missed mutants,
@@ -49,7 +49,7 @@ jobs:
     name: Mutants (PR diff)
     if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'diff')
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

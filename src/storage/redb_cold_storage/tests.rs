@@ -2384,6 +2384,736 @@ fn test_no_cipher_backward_compatible() {
 }
 
 // ========================================================================
+// Cold-tier key rotation (Issue #3617 PR3): ACV1 wrapper, bulk re-encrypt,
+// resume cursor, legacy fallback.
+// ========================================================================
+
+/// AES-256-GCM cipher whose key's first byte is `b` (distinct DEKs for the two
+/// rotation generations).
+fn cipher_with_byte(b: u8) -> Arc<dyn crate::encryption::cipher::Cipher> {
+    use crate::encryption::Aes256GcmCipher;
+    use zeroize::Zeroizing;
+    let mut key = Zeroizing::new([0u8; 32]);
+    key[0] = b;
+    key[1] = 0x5A;
+    Arc::new(Aes256GcmCipher::new(&key))
+}
+
+/// Read the raw (undecoded) stored value for a key from a versions table.
+fn raw_value(
+    storage: &RedbColdStorage,
+    table_def: redb::TableDefinition<'static, u64, &'static [u8]>,
+    key: u64,
+) -> Vec<u8> {
+    let rtxn = storage.db.begin_read().unwrap();
+    let t = rtxn.open_table(table_def).unwrap();
+    t.get(key).unwrap().unwrap().value().to_vec()
+}
+
+/// Write a raw metadata record (e.g. a planted resume cursor).
+fn insert_raw_metadata(storage: &RedbColdStorage, key: &'static str, bytes: &[u8]) {
+    let wtxn = storage.db.begin_write().unwrap();
+    {
+        let mut t = wtxn.open_table(METADATA_TABLE).unwrap();
+        t.insert(key, bytes).unwrap();
+    }
+    wtxn.commit().unwrap();
+}
+
+/// Insert a raw value directly into a versions table (bypassing the wrapper), to
+/// plant a legacy or mid-rotation on-disk state.
+fn insert_raw(
+    storage: &RedbColdStorage,
+    table_def: redb::TableDefinition<'static, u64, &'static [u8]>,
+    key: u64,
+    bytes: &[u8],
+) {
+    let wtxn = storage.db.begin_write().unwrap();
+    {
+        let mut t = wtxn.open_table(table_def).unwrap();
+        t.insert(key, bytes).unwrap();
+    }
+    wtxn.commit().unwrap();
+}
+
+#[test]
+fn legacy_cold_value_reads_under_current_dek() {
+    // A pre-#3617 value is bare compress-then-encrypt with NO ACV1 wrapper. It
+    // must still read after the keyring refactor (backward compatibility).
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("legacy.redb");
+    let cipher = test_cipher();
+
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(Arc::clone(&cipher));
+
+    // Hand-build a legacy (unwrapped) value exactly as the pre-#3617 store did.
+    let version = create_test_node_version(1);
+    let compressed = storage.compress(&encode_node_version(&version)).unwrap();
+    let bare = cipher.encrypt(&compressed, &[]).unwrap();
+    insert_raw(&storage, NODE_VERSIONS_TABLE, 1, &bare);
+
+    // Reads via the keyring fall back to the legacy (bare-ciphertext) path.
+    let loaded = storage
+        .get_node_version(version.version_id())
+        .unwrap()
+        .expect("a legacy unwrapped value must still read");
+    assert_eq!(loaded.version_id(), version.version_id());
+    assert_eq!(loaded.node_id, version.node_id);
+}
+
+#[test]
+fn cold_value_roundtrips_with_acv1_wrapper() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("acv1.redb");
+    let cipher = test_cipher();
+
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(Arc::clone(&cipher));
+
+    let version = create_test_node_version(7);
+    storage.store_node_version(&version).unwrap();
+
+    // The stored value carries the ACV1 wrapper stamped at the current version.
+    let raw = raw_value(&storage, NODE_VERSIONS_TABLE, 7);
+    let (kv, _ct) = parse_cold_wrapper(&raw).expect("a written value must be ACV1-wrapped");
+    assert_eq!(kv, 1, "fresh encrypted store stamps generation 1");
+
+    let loaded = storage
+        .get_node_version(version.version_id())
+        .unwrap()
+        .expect("wrapped value round-trips");
+    assert_eq!(loaded.version_id(), version.version_id());
+    drop(storage);
+
+    // Reading the same ACV1@1 value under a keyring that holds ONLY generation 2
+    // (unknown version 1) must fail LOUDLY (AEAD auth) — never silent wrong data.
+    let ring = ColdKeyring::single(Arc::clone(&cipher));
+    ring.add_generation(2, Arc::clone(&cipher));
+    ring.retain_only(2); // strict keyring with gen 2 only; version 1 is unknown
+    let storage2 = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cold_keyring(ring);
+    let result = storage2.get_node_version(version.version_id());
+    assert!(
+        result.is_err(),
+        "an ACV1 value naming an unheld generation must fail loudly, not read wrong data"
+    );
+}
+
+#[test]
+fn bulk_reencrypt_rewrites_all_values_new_generation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("bulk.redb");
+    let c1 = cipher_with_byte(0x11);
+    let c2 = cipher_with_byte(0x22);
+
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(Arc::clone(&c1));
+
+    let nodes: Vec<NodeVersion> = (1..=3).map(create_test_node_version).collect();
+    let edges: Vec<EdgeVersion> = (10..=11).map(create_test_edge_version).collect();
+    storage
+        .store_batch_with_lsn(&nodes, &edges, LSN(100))
+        .unwrap();
+
+    let flushed_before = storage.get_flushed_lsn().unwrap();
+    let extent_before = storage.get_temporal_extent_bounds().unwrap();
+    assert_eq!(flushed_before, Some(LSN(100)));
+
+    // Install the new generation and bulk re-encrypt every value to it.
+    storage.install_cold_generation(2, Arc::clone(&c2)).unwrap();
+    let stats = storage.reencrypt_cold_values(2).unwrap();
+    assert_eq!(stats.values_rewrapped, 5, "3 nodes + 2 edges re-wrapped");
+    assert_eq!(stats.values_skipped, 0);
+
+    // Every value is now ACV1@2, and the terminal format marker is set.
+    for k in 1..=3 {
+        let (kv, _) = parse_cold_wrapper(&raw_value(&storage, NODE_VERSIONS_TABLE, k)).unwrap();
+        assert_eq!(kv, 2, "node {k} must be re-wrapped at generation 2");
+    }
+    for k in 10..=11 {
+        let (kv, _) = parse_cold_wrapper(&raw_value(&storage, EDGE_VERSIONS_TABLE, k)).unwrap();
+        assert_eq!(kv, 2, "edge {k} must be re-wrapped at generation 2");
+    }
+    assert_eq!(storage.cold_value_format_version().unwrap(), Some(2));
+
+    // Plaintext metadata is preserved untouched by the value-only pass.
+    assert_eq!(storage.get_flushed_lsn().unwrap(), flushed_before);
+    assert_eq!(storage.get_temporal_extent_bounds().unwrap(), extent_before);
+
+    // Every value still decodes (now under the new cold DEK).
+    storage.retire_cold_generations(2).unwrap();
+    for node in &nodes {
+        let loaded = storage
+            .get_node_version(node.version_id())
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.version_id(), node.version_id());
+    }
+    for edge in &edges {
+        let loaded = storage
+            .get_edge_version(edge.version_id())
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.version_id(), edge.version_id());
+    }
+}
+
+#[test]
+fn crash_mid_cold_batch_resumes_from_cursor() {
+    // Simulate a crash after some batches committed: nodes 1..=3 are already
+    // re-wrapped at generation 2 with a durable cursor at (node, key=3); nodes
+    // 4..=5 remain at generation 1. Resume must continue from the cursor (no
+    // double-encrypt of 1..=3), finish 4..=5, and complete.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("resume.redb");
+    let c1 = cipher_with_byte(0x33);
+    let c2 = cipher_with_byte(0x44);
+
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(Arc::clone(&c1));
+    let nodes: Vec<NodeVersion> = (1..=5).map(create_test_node_version).collect();
+    for n in &nodes {
+        storage.store_node_version(n).unwrap();
+    }
+    storage.install_cold_generation(2, Arc::clone(&c2)).unwrap();
+
+    // Manually re-wrap nodes 1..=3 to ACV1@2 and plant the resume cursor.
+    for k in 1..=3u64 {
+        let raw = raw_value(&storage, NODE_VERSIONS_TABLE, k);
+        let compressed = storage.decrypt_if_needed(&raw).unwrap();
+        let ct2 = c2.encrypt(&compressed, &[]).unwrap();
+        insert_raw(&storage, NODE_VERSIONS_TABLE, k, &wrap_cold_value(2, &ct2));
+    }
+    let cursor = ColdRotationCursor {
+        target_version: 2,
+        table: ColdTableKind::Node,
+        last_completed_key: 3,
+    };
+    insert_raw_metadata(&storage, COLD_ROTATION_CURSOR_KEY, &cursor.to_bytes());
+    let node1_before = raw_value(&storage, NODE_VERSIONS_TABLE, 1);
+
+    // Resume.
+    let stats = storage.reencrypt_cold_values(2).unwrap();
+    // Nodes 1..=3 are past the cursor (not revisited); only 4..=5 are rewrapped.
+    assert_eq!(
+        stats.values_rewrapped, 2,
+        "only nodes 4,5 remain to re-wrap"
+    );
+
+    // No double-encrypt: node 1's bytes are unchanged.
+    assert_eq!(
+        raw_value(&storage, NODE_VERSIONS_TABLE, 1),
+        node1_before,
+        "an already-wrapped value past the cursor must not be re-encrypted"
+    );
+    // Every node now ACV1@2 and the pass completed (cursor cleared, marker set).
+    for k in 1..=5u64 {
+        let (kv, _) = parse_cold_wrapper(&raw_value(&storage, NODE_VERSIONS_TABLE, k)).unwrap();
+        assert_eq!(kv, 2);
+    }
+    assert_eq!(storage.cold_value_format_version().unwrap(), Some(2));
+    assert!(storage.read_cold_rotation_cursor().unwrap().is_none());
+
+    // All values still read.
+    storage.retire_cold_generations(2).unwrap();
+    for n in &nodes {
+        let loaded = storage.get_node_version(n.version_id()).unwrap().unwrap();
+        assert_eq!(loaded.version_id(), n.version_id());
+    }
+}
+
+#[test]
+fn enable_wrap_plaintext_resumes_from_cursor() {
+    // Issue #3616 PR3 (A4): the enable bare→ACV1 wrap pass (`WrapPlaintext` mode)
+    // must resume from the DURABLE cursor a real crash mid-pass leaves — NOT merely
+    // the per-value idempotency backstop. Simulate a crash after some batches: bare
+    // nodes 1..=3 already wrapped to ACV1@1 with a cursor pinned at (Node, key=3);
+    // nodes 4..=5 remain BARE (plaintext). Resume must continue strictly AFTER the
+    // cursor (never revisiting 1..=3), wrap 4..=5, and complete.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("enable_resume.redb");
+    let cipher = test_cipher();
+    let target = crate::db::rotation::ENABLE_KEY_VERSION;
+
+    // Build the store WITH the enable cipher (so wrap + reads work), but plant BARE
+    // (compressed, UNENCRYPTED) values directly — the plaintext-at-rest an enable wraps.
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(Arc::clone(&cipher));
+    let nodes: Vec<NodeVersion> = (1..=5).map(create_test_node_version).collect();
+    let mut bare_compressed = std::collections::HashMap::new();
+    for (k, n) in (1..=5u64).zip(&nodes) {
+        let compressed = storage.compress(&encode_node_version(n)).unwrap();
+        insert_raw(&storage, NODE_VERSIONS_TABLE, k, &compressed);
+        bare_compressed.insert(k, compressed);
+    }
+
+    // Manually wrap nodes 1..=3 to ACV1@target and plant the resume cursor at key=3.
+    for k in 1..=3u64 {
+        let ct = cipher.encrypt(&bare_compressed[&k], &[]).unwrap();
+        insert_raw(
+            &storage,
+            NODE_VERSIONS_TABLE,
+            k,
+            &wrap_cold_value(target, &ct),
+        );
+    }
+    let cursor = ColdRotationCursor {
+        target_version: target,
+        table: ColdTableKind::Node,
+        last_completed_key: 3,
+    };
+    insert_raw_metadata(&storage, COLD_ROTATION_CURSOR_KEY, &cursor.to_bytes());
+    let node1_before = raw_value(&storage, NODE_VERSIONS_TABLE, 1);
+
+    // Resume the enable wrap pass.
+    let stats = storage.wrap_plaintext_cold_values(&cipher, target).unwrap();
+    // Nodes 1..=3 are past the cursor (never revisited); only 4..=5 are wrapped.
+    assert_eq!(
+        stats.values_rewrapped, 2,
+        "only the bare nodes 4,5 past the cursor are wrapped"
+    );
+
+    // No re-encrypt of the already-wrapped, past-the-cursor node 1.
+    assert_eq!(
+        raw_value(&storage, NODE_VERSIONS_TABLE, 1),
+        node1_before,
+        "a value past the cursor must not be revisited/re-encrypted"
+    );
+    // Every node is ACV1@target now; the pass completed (cursor cleared, marker set).
+    for k in 1..=5u64 {
+        let (kv, _) = parse_cold_wrapper(&raw_value(&storage, NODE_VERSIONS_TABLE, k)).unwrap();
+        assert_eq!(kv, target);
+    }
+    assert_eq!(storage.cold_value_format_version().unwrap(), Some(target));
+    assert!(storage.read_cold_rotation_cursor().unwrap().is_none());
+
+    // All values still decrypt back to their records.
+    for n in &nodes {
+        let loaded = storage.get_node_version(n.version_id()).unwrap().unwrap();
+        assert_eq!(loaded.version_id(), n.version_id());
+    }
+}
+
+#[test]
+fn reencrypt_is_idempotent_over_already_wrapped_values() {
+    // A re-run after a stale/absent cursor must skip already-target-wrapped
+    // values, never double-encrypt (the ACV1 wrapper is the idempotency backstop).
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("idem.redb");
+    let c1 = cipher_with_byte(0x55);
+    let c2 = cipher_with_byte(0x66);
+
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(Arc::clone(&c1));
+    for n in (1..=4).map(create_test_node_version) {
+        storage.store_node_version(&n).unwrap();
+    }
+    storage.install_cold_generation(2, Arc::clone(&c2)).unwrap();
+    let first = storage.reencrypt_cold_values(2).unwrap();
+    assert_eq!(first.values_rewrapped, 4);
+
+    let raw_after_first = raw_value(&storage, NODE_VERSIONS_TABLE, 1);
+    // Re-run: every value is already ACV1@2, so all are skipped, none rewrapped.
+    let second = storage.reencrypt_cold_values(2).unwrap();
+    assert_eq!(second.values_rewrapped, 0);
+    assert_eq!(second.values_skipped, 4);
+    assert_eq!(
+        raw_value(&storage, NODE_VERSIONS_TABLE, 1),
+        raw_after_first,
+        "an idempotent re-run must not change already-wrapped bytes"
+    );
+}
+
+#[test]
+fn reencrypt_honors_configurable_batch_size() {
+    // Issue #3617 PR3: the per-transaction re-encrypt batch size is a runtime
+    // knob (`RedbConfig::reencrypt_batch_size`). Configure a SMALL cap (2), seed
+    // MORE values than the cap (5 nodes), and assert the pass (a) re-wraps every
+    // value under the new DEK and (b) actually spanned MULTIPLE bounded batches
+    // (batches_committed > 1), proving the small cap is honored, not ignored.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("small_batch.redb");
+    let c1 = cipher_with_byte(0x77);
+    let c2 = cipher_with_byte(0x88);
+
+    let config = RedbConfig::new().with_reencrypt_batch_size(2);
+    assert_eq!(config.reencrypt_batch_size, 2);
+    let storage = RedbColdStorage::new(&db_path, config)
+        .unwrap()
+        .with_cipher(Arc::clone(&c1));
+
+    let nodes: Vec<NodeVersion> = (1..=5).map(create_test_node_version).collect();
+    for n in &nodes {
+        storage.store_node_version(n).unwrap();
+    }
+
+    storage.install_cold_generation(2, Arc::clone(&c2)).unwrap();
+    let stats = storage.reencrypt_cold_values(2).unwrap();
+
+    // (a) every value re-wrapped at the new generation.
+    assert_eq!(stats.values_rewrapped, 5, "all 5 nodes re-wrapped");
+    assert_eq!(stats.values_skipped, 0);
+    for k in 1..=5u64 {
+        let (kv, _) = parse_cold_wrapper(&raw_value(&storage, NODE_VERSIONS_TABLE, k)).unwrap();
+        assert_eq!(kv, 2, "node {k} must be re-wrapped at generation 2");
+    }
+    assert_eq!(storage.cold_value_format_version().unwrap(), Some(2));
+
+    // (b) the small cap of 2 over 5 values forced ceil(5/2) = 3 committed
+    // batches (2 + 2 + 1), so the cap was honored, not ignored.
+    assert_eq!(
+        stats.batches_committed, 3,
+        "a batch cap of 2 over 5 values must span 3 bounded transactions"
+    );
+
+    // Every value still decrypts under the new cold DEK.
+    storage.retire_cold_generations(2).unwrap();
+    for n in &nodes {
+        let loaded = storage.get_node_version(n.version_id()).unwrap().unwrap();
+        assert_eq!(loaded.version_id(), n.version_id());
+    }
+}
+
+#[test]
+fn reencrypt_default_batch_size_is_single_transaction() {
+    // Default (unset) behavior is unchanged: with the 4096 default a 5-value
+    // pass commits in exactly ONE batch — the guarantee that omitting the knob
+    // reproduces prior behavior.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("default_batch.redb");
+    let c1 = cipher_with_byte(0x99);
+    let c2 = cipher_with_byte(0xAA);
+
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(Arc::clone(&c1));
+    assert_eq!(RedbConfig::new().reencrypt_batch_size, 4096);
+
+    for n in (1..=5).map(create_test_node_version) {
+        storage.store_node_version(&n).unwrap();
+    }
+    storage.install_cold_generation(2, Arc::clone(&c2)).unwrap();
+    let stats = storage.reencrypt_cold_values(2).unwrap();
+    assert_eq!(stats.values_rewrapped, 5);
+    assert_eq!(
+        stats.batches_committed, 1,
+        "the 4096 default re-wraps 5 values in a single transaction"
+    );
+}
+
+#[test]
+fn reencrypt_zero_batch_size_is_floored_to_one() {
+    // A 0 batch size would make no forward progress; the setter (and the read
+    // site) floor it to 1. The pass must still complete, spanning one batch per
+    // value (5 values -> 5 committed batches).
+    let cfg = RedbConfig::new().with_reencrypt_batch_size(0);
+    assert_eq!(cfg.reencrypt_batch_size, 1, "0 is clamped up to 1");
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("zero_batch.redb");
+    let c1 = cipher_with_byte(0xBB);
+    let c2 = cipher_with_byte(0xCC);
+    let storage = RedbColdStorage::new(&db_path, cfg)
+        .unwrap()
+        .with_cipher(Arc::clone(&c1));
+    for n in (1..=5).map(create_test_node_version) {
+        storage.store_node_version(&n).unwrap();
+    }
+    storage.install_cold_generation(2, Arc::clone(&c2)).unwrap();
+    let stats = storage.reencrypt_cold_values(2).unwrap();
+    assert_eq!(stats.values_rewrapped, 5);
+    assert_eq!(
+        stats.batches_committed, 5,
+        "a floored batch size of 1 commits once per value"
+    );
+    for k in 1..=5u64 {
+        let (kv, _) = parse_cold_wrapper(&raw_value(&storage, NODE_VERSIONS_TABLE, k)).unwrap();
+        assert_eq!(kv, 2);
+    }
+}
+
+#[test]
+fn mixed_legacy_and_wrapped_values_read_during_rotation() {
+    // During an interrupted rotation the store holds a mix: some legacy (bare,
+    // old DEK) values and some ACV1@2 (new DEK) values. A two-generation keyring
+    // reads both correctly.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("mixed.redb");
+    let c1 = cipher_with_byte(0x77);
+    let c2 = cipher_with_byte(0x88);
+
+    // Two-generation keyring: gen 1 (old, c1) + gen 2 (new, c2), current = 2.
+    let ring = ColdKeyring::single(Arc::clone(&c1));
+    ring.add_generation(2, Arc::clone(&c2));
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cold_keyring(ring);
+
+    // Legacy (bare) value under the OLD DEK at key 1.
+    let legacy = create_test_node_version(1);
+    let legacy_bare = c1
+        .encrypt(
+            &storage.compress(&encode_node_version(&legacy)).unwrap(),
+            &[],
+        )
+        .unwrap();
+    insert_raw(&storage, NODE_VERSIONS_TABLE, 1, &legacy_bare);
+
+    // Freshly-written value is wrapped ACV1@2 under the NEW DEK at key 2.
+    let fresh = create_test_node_version(2);
+    storage.store_node_version(&fresh).unwrap();
+    let (kv, _) = parse_cold_wrapper(&raw_value(&storage, NODE_VERSIONS_TABLE, 2)).unwrap();
+    assert_eq!(
+        kv, 2,
+        "a write during rotation stamps the current (new) generation"
+    );
+
+    // Both read correctly, each under its own generation.
+    assert_eq!(
+        storage
+            .get_node_version(legacy.version_id())
+            .unwrap()
+            .unwrap()
+            .version_id(),
+        legacy.version_id()
+    );
+    assert_eq!(
+        storage
+            .get_node_version(fresh.version_id())
+            .unwrap()
+            .unwrap()
+            .version_id(),
+        fresh.version_id()
+    );
+}
+
+#[test]
+fn bulk_reencrypt_upgrades_all_legacy_table() {
+    // Pre-#3617 on-disk state: values are BARE compress-then-encrypt with NO
+    // ACV1 wrapper. Every existing bulk test seeds ACV1@1 via `store_*`, so the
+    // legacy(unwrapped) -> wrapped upgrade THROUGH the bulk pass is otherwise
+    // uncovered. A full-MEK rotation must upgrade every such legacy value to
+    // ACV1@new and re-key it (counted as re-wrapped, never skipped).
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("legacy_bulk.redb");
+    let c1 = cipher_with_byte(0x11);
+    let c2 = cipher_with_byte(0x22);
+
+    // Two-generation keyring: legacy (bare) values decrypt under the OLDEST
+    // generation (gen 1 = c1); the bulk pass re-encrypts every value to gen 2.
+    let ring = ColdKeyring::single(Arc::clone(&c1));
+    ring.add_generation(2, Arc::clone(&c2));
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cold_keyring(ring);
+
+    // Seed 3 node + 2 edge LEGACY bare values (no ACV1 wrapper), exactly as the
+    // pre-#3617 store wrote them: compress, encrypt under the old DEK, insert raw.
+    for id in 1..=3u64 {
+        let n = create_test_node_version(id);
+        let bare = c1
+            .encrypt(&storage.compress(&encode_node_version(&n)).unwrap(), &[])
+            .unwrap();
+        insert_raw(&storage, NODE_VERSIONS_TABLE, id, &bare);
+    }
+    for id in 10..=11u64 {
+        let e = create_test_edge_version(id);
+        let bare = c1
+            .encrypt(&storage.compress(&encode_edge_version(&e)).unwrap(), &[])
+            .unwrap();
+        insert_raw(&storage, EDGE_VERSIONS_TABLE, id, &bare);
+    }
+
+    // Bulk re-encrypt: every legacy value is upgraded to ACV1@2 (re-wrapped),
+    // none skipped (nothing was already at the target generation).
+    let stats = storage.reencrypt_cold_values(2).unwrap();
+    assert_eq!(
+        stats.values_rewrapped, 5,
+        "3 legacy nodes + 2 legacy edges must all be upgraded through the bulk pass"
+    );
+    assert_eq!(
+        stats.values_skipped, 0,
+        "no legacy value was already ACV1@2, so none may be skipped"
+    );
+
+    // Every value is now ACV1@2 (upgraded from bare legacy) and the marker is set.
+    for id in 1..=3u64 {
+        let (kv, _) = parse_cold_wrapper(&raw_value(&storage, NODE_VERSIONS_TABLE, id)).unwrap();
+        assert_eq!(kv, 2, "legacy node {id} must upgrade to ACV1@2");
+    }
+    for id in 10..=11u64 {
+        let (kv, _) = parse_cold_wrapper(&raw_value(&storage, EDGE_VERSIONS_TABLE, id)).unwrap();
+        assert_eq!(kv, 2, "legacy edge {id} must upgrade to ACV1@2");
+    }
+    assert_eq!(storage.cold_value_format_version().unwrap(), Some(2));
+
+    // Retire the old generation, then confirm every upgraded value decrypts under
+    // the NEW cold DEK alone — proving the legacy bytes were truly re-keyed.
+    storage.retire_cold_generations(2).unwrap();
+    for id in 1..=3u64 {
+        let n = create_test_node_version(id);
+        assert_eq!(
+            storage.get_node_version(n.id).unwrap().unwrap().id,
+            n.id,
+            "upgraded node {id} must decrypt under the new DEK"
+        );
+    }
+    for id in 10..=11u64 {
+        let e = create_test_edge_version(id);
+        assert_eq!(
+            storage.get_edge_version(e.id).unwrap().unwrap().id,
+            e.id,
+            "upgraded edge {id} must decrypt under the new DEK"
+        );
+    }
+}
+
+#[test]
+fn crafted_acv1_prefixed_legacy_value_fails_loudly() {
+    // Finding 1(d): a legacy bare ciphertext whose leading bytes happen to
+    // collide with the `ACV1` magic + a held key-version (a ~2^-32 event under a
+    // single-generation `match_any` keyring, where `has_version` short-circuits
+    // `true` so ONLY the 4-byte magic discriminates) is MISCLASSIFIED as wrapped.
+    // This MUST surface as a LOUD AEAD authentication failure (a read
+    // availability fault) — never a panic, and never silent wrong data.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("crafted.redb");
+    let cipher = test_cipher();
+
+    // Single-generation (match_any) keyring: `has_version` returns true for EVERY
+    // version, so the trailing u32 adds no discrimination on read.
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(Arc::clone(&cipher));
+
+    // A genuine legacy bare ciphertext for node 1, whose leading 8 bytes we then
+    // FORCE to collide with `ACV1` + held version 1. This simulates the ~2^-32
+    // event where a real ciphertext prefix equals the wrapper header: the first 8
+    // bytes are truly part of the ciphertext, so treating them as a wrapper strips
+    // real ciphertext bytes and the AEAD tag can no longer authenticate.
+    let version = create_test_node_version(1);
+    let mut crafted = cipher
+        .encrypt(
+            &storage.compress(&encode_node_version(&version)).unwrap(),
+            &[],
+        )
+        .unwrap();
+    assert!(
+        crafted.len() >= 8,
+        "an AEAD ciphertext is always at least the wrapper length"
+    );
+    crafted[0..4].copy_from_slice(b"ACV1"); // COLD_VALUE_MAGIC
+    crafted[4..8].copy_from_slice(&1u32.to_le_bytes()); // a held key-version
+    insert_raw(&storage, NODE_VERSIONS_TABLE, 1, &crafted);
+
+    // parse_cold_wrapper now (mis)reads it as ACV1@1; has_version(1) short-circuits
+    // true under match_any, so it is decrypted as wrapped and the 8-byte-stripped
+    // slice is fed to `decrypt` -> AEAD auth fails -> Err (loud, availability-only).
+    let result = storage.get_node_version(version.id);
+    assert!(
+        result.is_err(),
+        "a crafted ACV1-colliding legacy value must fail loudly (AEAD auth), \
+         never return silent wrong data (finding 1(d): loud, availability-only)"
+    );
+}
+
+#[test]
+fn cold_rotation_resumes_after_real_reopen() {
+    // Genuine cross-process-style resume: partially rotate + plant a DURABLE
+    // cursor, DROP the redb + storage handle (closing the on-disk file), then
+    // reopen a FRESH `RedbColdStorage` from the same path and resume. The cursor
+    // must be read from durable redb metadata (not in-process state), the pass
+    // must continue from it with no double-encrypt, and every value must end
+    // ACV1@2 decrypting under the new DEK.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("reopen_resume.redb");
+    let c1 = cipher_with_byte(0xA1);
+    let c2 = cipher_with_byte(0xB2);
+
+    // Handle A: store 5 nodes (ACV1@1), manually rewrap the 1..=3 prefix to
+    // ACV1@2 + plant the resume cursor at (Node, key=3), then DROP the handle.
+    let node1_before;
+    {
+        let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+            .unwrap()
+            .with_cipher(Arc::clone(&c1));
+        for id in 1..=5u64 {
+            storage
+                .store_node_version(&create_test_node_version(id))
+                .unwrap();
+        }
+        storage.install_cold_generation(2, Arc::clone(&c2)).unwrap();
+        for id in 1..=3u64 {
+            let raw = raw_value(&storage, NODE_VERSIONS_TABLE, id);
+            let compressed = storage.decrypt_if_needed(&raw).unwrap();
+            let ct2 = c2.encrypt(&compressed, &[]).unwrap();
+            insert_raw(&storage, NODE_VERSIONS_TABLE, id, &wrap_cold_value(2, &ct2));
+        }
+        let cursor = ColdRotationCursor {
+            target_version: 2,
+            table: ColdTableKind::Node,
+            last_completed_key: 3,
+        };
+        insert_raw_metadata(&storage, COLD_ROTATION_CURSOR_KEY, &cursor.to_bytes());
+        node1_before = raw_value(&storage, NODE_VERSIONS_TABLE, 1);
+    } // drop handle A: closes the redb file so the reopen is genuinely from disk
+
+    // Handle B: reopen FRESH from disk with a 2-generation keyring, then resume.
+    let ring = ColdKeyring::single(Arc::clone(&c1));
+    ring.add_generation(2, Arc::clone(&c2));
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cold_keyring(ring);
+
+    // The durable cursor is read from redb metadata by the freshly-opened handle.
+    assert_eq!(
+        storage
+            .read_cold_rotation_cursor()
+            .unwrap()
+            .map(|c| c.last_completed_key),
+        Some(3),
+        "reopened handle must read the durable resume cursor from disk"
+    );
+
+    let stats = storage.reencrypt_cold_values(2).unwrap();
+    assert_eq!(
+        stats.values_rewrapped, 2,
+        "only nodes 4,5 remain past the durable cursor"
+    );
+
+    // No double-encrypt of the already-done prefix after reopen.
+    assert_eq!(
+        raw_value(&storage, NODE_VERSIONS_TABLE, 1),
+        node1_before,
+        "a value past the durable cursor must not be re-encrypted after a real reopen"
+    );
+    for id in 1..=5u64 {
+        let (kv, _) = parse_cold_wrapper(&raw_value(&storage, NODE_VERSIONS_TABLE, id)).unwrap();
+        assert_eq!(kv, 2, "every node must end ACV1@2");
+    }
+    assert!(
+        storage.read_cold_rotation_cursor().unwrap().is_none(),
+        "cursor cleared on completion"
+    );
+    assert_eq!(storage.cold_value_format_version().unwrap(), Some(2));
+
+    // Every value decrypts under the new DEK alone.
+    storage.retire_cold_generations(2).unwrap();
+    for id in 1..=5u64 {
+        let v = create_test_node_version(id);
+        assert_eq!(storage.get_node_version(v.id).unwrap().unwrap().id, v.id);
+    }
+}
+
+// ========================================================================
 // Version-counter seeding at open (Issue #3222 review follow-up)
 // ========================================================================
 
@@ -2612,4 +3342,468 @@ fn extent_bounds_round_trip_serialization() {
     // An empty buffer likewise decodes to None (guards the length check
     // against an index-out-of-bounds panic on `bytes[0]`).
     assert_eq!(ColdTemporalExtentBounds::from_bytes(&[]), None);
+}
+
+// ========================================================================
+// #3616 PR4 disable: ACV1 -> bare unwrap (inverse of the enable wrap pass)
+// ========================================================================
+
+/// The exact enable->disable cold round-trip: an encrypted store whose values
+/// are `ACV1`-wrapped is unwrapped back to bare plaintext; every raw value loses
+/// its wrapper, the format marker clears, the unwrapped bytes are byte-identical
+/// to what a plaintext store holds, and reopening WITHOUT a keyring decodes every
+/// record.
+#[test]
+fn cold_unwrap_restores_bare_plaintext_and_reopens_without_key() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("disable_unwrap.redb");
+    let cipher = test_cipher();
+
+    let nodes: Vec<NodeVersion> = (1..=4).map(create_test_node_version).collect();
+    let edges: Vec<EdgeVersion> = (10..=12).map(create_test_edge_version).collect();
+
+    // The expected BARE bytes: compress(encode(v)) — what a plaintext store holds.
+    let mut expected_node_bare = std::collections::HashMap::new();
+    let mut expected_edge_bare = std::collections::HashMap::new();
+
+    {
+        let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+            .unwrap()
+            .with_cipher(Arc::clone(&cipher));
+        for n in &nodes {
+            storage.store_node_version(n).unwrap();
+            expected_node_bare.insert(
+                n.version_id().as_u64(),
+                storage.compress(&encode_node_version(n)).unwrap(),
+            );
+        }
+        for e in &edges {
+            storage.store_edge_version(e).unwrap();
+            expected_edge_bare.insert(
+                e.version_id().as_u64(),
+                storage.compress(&encode_edge_version(e)).unwrap(),
+            );
+        }
+
+        // Precondition: every stored value is ACV1-wrapped.
+        for n in &nodes {
+            assert!(
+                storage.raw_node_value_is_acv1_for_test(n.version_id().as_u64()),
+                "node value is ACV1 before unwrap"
+            );
+        }
+
+        // Unwrap the whole store back to bare plaintext.
+        let stats = storage.unwrap_encrypted_cold_values().unwrap();
+        assert_eq!(stats.values_unwrapped, nodes.len() + edges.len());
+        assert_eq!(stats.values_skipped, 0);
+
+        // Every raw value is now BARE (no ACV1 wrapper) and byte-identical to the
+        // plaintext-at-rest form.
+        for n in &nodes {
+            let raw = raw_value(&storage, NODE_VERSIONS_TABLE, n.version_id().as_u64());
+            assert!(
+                parse_cold_wrapper(&raw).is_none(),
+                "node value bare after unwrap"
+            );
+            assert_eq!(
+                raw,
+                expected_node_bare[&n.version_id().as_u64()],
+                "byte-identical bare node value"
+            );
+        }
+        for e in &edges {
+            let raw = raw_value(&storage, EDGE_VERSIONS_TABLE, e.version_id().as_u64());
+            assert!(
+                parse_cold_wrapper(&raw).is_none(),
+                "edge value bare after unwrap"
+            );
+            assert_eq!(
+                raw,
+                expected_edge_bare[&e.version_id().as_u64()],
+                "byte-identical bare edge value"
+            );
+        }
+
+        // The format marker is cleared: the store reports plaintext.
+        assert_eq!(storage.cold_value_format_version().unwrap(), None);
+        assert!(storage.read_cold_rotation_cursor().unwrap().is_none());
+    }
+
+    // Reopen WITHOUT a keyring (plaintext handle) — every record decodes.
+    let plain = RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap();
+    assert!(!plain.is_encrypted());
+    for n in &nodes {
+        let loaded = plain.get_node_version(n.version_id()).unwrap().unwrap();
+        assert_eq!(loaded.version_id(), n.version_id());
+    }
+    for e in &edges {
+        let loaded = plain.get_edge_version(e.version_id()).unwrap().unwrap();
+        assert_eq!(loaded.version_id(), e.version_id());
+    }
+}
+
+/// Unwrap is idempotent: a second pass over an already-bare store skips every
+/// value (bare == done) and rewrites nothing.
+#[test]
+fn cold_unwrap_is_idempotent_over_bare_values() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("disable_idem.redb");
+    let cipher = test_cipher();
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(Arc::clone(&cipher));
+
+    let nodes: Vec<NodeVersion> = (1..=3).map(create_test_node_version).collect();
+    for n in &nodes {
+        storage.store_node_version(n).unwrap();
+    }
+
+    let first = storage.unwrap_encrypted_cold_values().unwrap();
+    assert_eq!(first.values_unwrapped, nodes.len());
+    assert_eq!(first.values_skipped, 0);
+
+    // Second pass: everything is already bare -> all skipped, none unwrapped.
+    let second = storage.unwrap_encrypted_cold_values().unwrap();
+    assert_eq!(second.values_unwrapped, 0);
+    assert_eq!(second.values_skipped, nodes.len());
+}
+
+/// A genuine MIX of ACV1 + bare values (a resumed / partial unwrap): the pass
+/// decrypts only the still-wrapped values and skips the already-bare ones.
+#[test]
+fn cold_unwrap_mixed_only_touches_wrapped() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("disable_mixed.redb");
+    let cipher = test_cipher();
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(Arc::clone(&cipher));
+
+    let nodes: Vec<NodeVersion> = (1..=5).map(create_test_node_version).collect();
+    for n in &nodes {
+        storage.store_node_version(n).unwrap();
+    }
+    // Roll nodes 1..=2 back to bare directly (fake a partial unwrap crash).
+    for n in nodes.iter().take(2) {
+        let bare = storage.compress(&encode_node_version(n)).unwrap();
+        insert_raw(
+            &storage,
+            NODE_VERSIONS_TABLE,
+            n.version_id().as_u64(),
+            &bare,
+        );
+    }
+
+    let stats = storage.unwrap_encrypted_cold_values().unwrap();
+    assert_eq!(
+        stats.values_unwrapped, 3,
+        "only the still-ACV1 nodes are unwrapped"
+    );
+    assert_eq!(
+        stats.values_skipped, 2,
+        "the two already-bare nodes are skipped"
+    );
+
+    // Every node is bare now.
+    for n in &nodes {
+        let raw = raw_value(&storage, NODE_VERSIONS_TABLE, n.version_id().as_u64());
+        assert!(
+            parse_cold_wrapper(&raw).is_none(),
+            "all bare after mixed unwrap"
+        );
+    }
+}
+
+/// Unwrap over an unencrypted (no-keyring) store is refused with a structured
+/// error and touches nothing (the mirror of the wrap needing a cipher).
+#[test]
+fn cold_unwrap_refuses_plaintext_store() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("disable_plain.redb");
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap();
+    assert!(!storage.is_encrypted());
+
+    let node = create_test_node_version(1);
+    storage.store_node_version(&node).unwrap();
+    let before = raw_value(&storage, NODE_VERSIONS_TABLE, 1);
+
+    let err = storage.unwrap_encrypted_cold_values().unwrap_err();
+    assert!(
+        format!("{err}").contains("not encrypted"),
+        "unexpected error: {err}"
+    );
+    // Value untouched.
+    assert_eq!(raw_value(&storage, NODE_VERSIONS_TABLE, 1), before);
+    // Still readable.
+    assert_eq!(
+        storage
+            .get_node_version(node.version_id())
+            .unwrap()
+            .unwrap()
+            .version_id(),
+        node.version_id()
+    );
+}
+
+/// An empty encrypted store unwraps cleanly (no values, marker cleared, no error).
+#[test]
+fn cold_unwrap_empty_store_is_clean_noop() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("disable_empty.redb");
+    let cipher = test_cipher();
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new())
+        .unwrap()
+        .with_cipher(cipher);
+
+    let stats = storage.unwrap_encrypted_cold_values().unwrap();
+    assert_eq!(stats.values_unwrapped, 0);
+    assert_eq!(stats.values_skipped, 0);
+    assert_eq!(storage.cold_value_format_version().unwrap(), None);
+}
+
+// ========================================================================
+// Issue #3708 — runtime-installable COLD keyring install seam.
+//
+// Mirrors the WAL `install_wal_keyring` ArcSwapOption seam (#3669): a live
+// plaintext cold store gains a keyring at runtime via a None -> Some presence
+// flip into an atomic-swap cell, serialized by a leaf install lock so a
+// double-install is fail-closed, and observed by concurrent readers without a
+// torn read.
+// ========================================================================
+
+/// None -> Some install flips the store to encrypted, and a value written AFTER
+/// the install is genuinely encrypted at rest (ACV1-wrapped at the current
+/// generation) and round-trips.
+#[test]
+fn install_cold_keyring_none_to_some_flips_encrypted_and_wraps() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("install_flip.redb");
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap();
+
+    // A plaintext-opened store reports no encryption and no current version.
+    assert!(!storage.is_encrypted());
+    assert_eq!(storage.current_cold_key_version(), None);
+
+    // Install a keyring at runtime (the plaintext -> encrypted enable seam).
+    storage
+        .install_cold_keyring(ColdKeyring::single(test_cipher()))
+        .unwrap();
+
+    assert!(
+        storage.is_encrypted(),
+        "installing a keyring must flip the cold store to encrypted"
+    );
+    assert_eq!(
+        storage.current_cold_key_version(),
+        Some(1),
+        "a freshly installed single keyring stamps generation 1"
+    );
+
+    // A value written after the install is ACV1-wrapped at rest and round-trips.
+    let version = create_test_node_version(42);
+    storage.store_node_version(&version).unwrap();
+    let raw = raw_value(&storage, NODE_VERSIONS_TABLE, 42);
+    let (kv, _ct) =
+        parse_cold_wrapper(&raw).expect("a post-install value must be ACV1-wrapped at rest");
+    assert_eq!(kv, 1, "post-install value stamps the installed generation");
+
+    let loaded = storage
+        .get_node_version(version.version_id())
+        .unwrap()
+        .expect("post-install value round-trips");
+    assert_eq!(loaded.version_id(), version.version_id());
+    assert_eq!(loaded.node_id, version.node_id);
+}
+
+/// Fail-closed double-install: installing when a keyring is already present is
+/// rejected (never a silent replace), and no previously written data is lost.
+#[test]
+fn install_cold_keyring_twice_is_rejected() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("install_twice.redb");
+    let storage = RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap();
+
+    storage
+        .install_cold_keyring(ColdKeyring::single(cipher_with_byte(0x11)))
+        .unwrap();
+    let version = create_test_node_version(7);
+    storage.store_node_version(&version).unwrap();
+
+    let err = storage
+        .install_cold_keyring(ColdKeyring::single(cipher_with_byte(0x22)))
+        .expect_err("a second install must be rejected, not silently applied");
+    assert!(
+        matches!(
+            err,
+            crate::core::error::Error::Storage(
+                crate::core::error::StorageError::ColdKeyringAlreadyInstalled { .. }
+            )
+        ),
+        "double-install must return the distinguishable ColdKeyringAlreadyInstalled \
+         variant (mapped to FAILED_PRECONDITION), got: {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("already") || msg.contains("installed"),
+        "rejection error should explain a keyring is already present, got: {msg}"
+    );
+
+    // Still encrypted under the FIRST keyring, and no data lost.
+    assert!(storage.is_encrypted());
+    assert_eq!(storage.current_cold_key_version(), Some(1));
+    let loaded = storage
+        .get_node_version(version.version_id())
+        .unwrap()
+        .expect("a rejected double-install must not lose the existing value");
+    assert_eq!(loaded.version_id(), version.version_id());
+}
+
+/// No torn reads on the presence cell: concurrent loaders read the cell while one
+/// thread installs. A load must always yield either the old `None` or a
+/// fully-valid `Some` (a resolvable current generation), never a partial state.
+/// The cross-thread saw_none/saw_some record proves the None -> Some store is
+/// actually observed (a bare "never torn" check alone can never fail).
+#[test]
+fn install_cold_keyring_no_torn_reads_on_cell() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering as AtOrd};
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("install_torn.redb");
+    let storage = Arc::new(RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap());
+
+    let loaders = 6usize;
+    let stop = Arc::new(AtomicBool::new(false));
+    let barrier = Arc::new(Barrier::new(loaders + 1));
+
+    let mut handles = Vec::new();
+    for _ in 0..loaders {
+        let storage = Arc::clone(&storage);
+        let stop = Arc::clone(&stop);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            let mut saw_none = false;
+            let mut saw_some = false;
+            barrier.wait();
+            while !stop.load(AtOrd::Relaxed) {
+                if storage.is_encrypted() {
+                    saw_some = true;
+                    // Any observed keyring must be fully-constructed: an
+                    // encrypted store always resolves a current generation.
+                    assert!(
+                        storage.current_cold_key_version().is_some(),
+                        "an installed keyring must have a resolvable current generation"
+                    );
+                } else {
+                    saw_none = true;
+                }
+            }
+            (saw_none, saw_some)
+        }));
+    }
+
+    barrier.wait();
+    // Let loaders observe the pre-install `None` before the store flips it.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    storage
+        .install_cold_keyring(ColdKeyring::single(test_cipher()))
+        .unwrap();
+    // Keep loaders running long enough to observe the post-install `Some`.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    stop.store(true, AtOrd::Relaxed);
+
+    let mut any_saw_none = false;
+    let mut any_saw_some = false;
+    for h in handles {
+        let (saw_none, saw_some) = h.join().unwrap();
+        any_saw_none |= saw_none;
+        any_saw_some |= saw_some;
+    }
+    assert!(
+        any_saw_none,
+        "loaders must have observed the pre-install None state"
+    );
+    assert!(
+        any_saw_some,
+        "loaders must have observed the post-install Some state \
+         (proving the store is seen across threads)"
+    );
+    assert!(
+        storage.is_encrypted(),
+        "install must be visible after the store"
+    );
+}
+
+/// Concurrent double-install TOCTOU: two threads race `install_cold_keyring` on
+/// the same store. Without the install lock both could observe `None`, both pass
+/// the presence check, and both store — the second silently replacing the first
+/// keyring. With the lock, EXACTLY one returns `Ok` and one returns `Err`, the
+/// store ends encrypted, and post-install writes round-trip under the survivor.
+#[test]
+fn install_cold_keyring_concurrent_double_install_rejected() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtOrd};
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("install_race.redb");
+    let storage = Arc::new(RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap());
+
+    let ok_count = Arc::new(AtomicUsize::new(0));
+    let err_count = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(Barrier::new(2));
+
+    let mut handles = Vec::new();
+    for seed in [0x11u8, 0x22u8] {
+        let storage = Arc::clone(&storage);
+        let ok_count = Arc::clone(&ok_count);
+        let err_count = Arc::clone(&err_count);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            match storage.install_cold_keyring(ColdKeyring::single(cipher_with_byte(seed))) {
+                Ok(()) => ok_count.fetch_add(1, AtOrd::Relaxed),
+                Err(e) => {
+                    assert!(
+                        matches!(
+                            e,
+                            crate::core::error::Error::Storage(
+                                crate::core::error::StorageError::ColdKeyringAlreadyInstalled { .. }
+                            )
+                        ),
+                        "the rejected concurrent install must return the distinguishable \
+                         ColdKeyringAlreadyInstalled variant, got: {e:?}"
+                    );
+                    err_count.fetch_add(1, AtOrd::Relaxed)
+                }
+            };
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    assert_eq!(
+        ok_count.load(AtOrd::Relaxed),
+        1,
+        "exactly one concurrent install must succeed"
+    );
+    assert_eq!(
+        err_count.load(AtOrd::Relaxed),
+        1,
+        "exactly one concurrent install must be rejected"
+    );
+    assert!(
+        storage.is_encrypted(),
+        "the survivor keyring must be installed"
+    );
+
+    // Post-install writes round-trip under the survivor keyring.
+    let version = create_test_node_version(99);
+    storage.store_node_version(&version).unwrap();
+    let loaded = storage
+        .get_node_version(version.version_id())
+        .unwrap()
+        .expect("post-install value round-trips under the survivor keyring");
+    assert_eq!(loaded.version_id(), version.version_id());
 }

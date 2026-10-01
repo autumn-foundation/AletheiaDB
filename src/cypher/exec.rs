@@ -48,8 +48,8 @@ use crate::query::Query;
 use crate::query::executor::{QueryResults, QueryRow, ResultIterator};
 
 use super::ast::{
-    CypherExpr, CypherPattern, CypherPatternElement, CypherReturn, CypherReturnItem,
-    CypherStatement, CypherValue,
+    CypherExpr, CypherNamespaceClause, CypherPattern, CypherPatternElement, CypherReturn,
+    CypherReturnItem, CypherStatement, CypherValue,
 };
 use super::converter::{CypherConverter, CypherParameterValue};
 use super::error::CypherError;
@@ -164,6 +164,20 @@ pub fn plan_cypher_with_params(
             })
         }
         other if needs_multi_binding(&other) => {
+            // Fail-closed (Issue #3349): a *restricting* namespace read scope
+            // cannot be threaded through the multi-variable pattern evaluator in
+            // v1, and silently dropping it would widen results across
+            // namespaces. Reject it with a structured error rather than run
+            // unscoped. A non-restricting `USE ALL NAMESPACES` imposes no filter
+            // and runs unchanged.
+            if statement_namespace(&other).is_some_and(CypherNamespaceClause::is_restricting) {
+                return Err(CypherError::UnsupportedFeature(
+                    "namespace scoping is not supported by the multi-variable pattern \
+                     evaluator in v1; scope a single-variable MATCH, or use USE ALL \
+                     NAMESPACES to run unscoped"
+                        .to_string(),
+                ));
+            }
             // A multi-variable / multi-pattern MATCH has no faithful
             // single-entity `Query` representation; route it to the dedicated
             // evaluator (which needs the DB handle) instead of converting.
@@ -225,6 +239,18 @@ fn lower_for_plan(
              no physical query plan to display"
         ))),
         stmt => CypherConverter::with_params(params).convert(stmt),
+    }
+}
+
+/// The namespace read-scope clause carried by a `MATCH` statement, if any
+/// (Issue #3349). Every other statement kind carries no in-statement scope
+/// (writes and standalone UNWIND reject the prefix at parse time), so this
+/// returns `None` for them. Used by the fail-closed dispatch guards that must
+/// refuse a *restricting* clause on a path that cannot thread the scope.
+pub(crate) fn statement_namespace(stmt: &CypherStatement) -> Option<&CypherNamespaceClause> {
+    match stmt {
+        CypherStatement::Match { namespace, .. } => namespace.as_ref(),
+        _ => None,
     }
 }
 

@@ -1,0 +1,125 @@
+//! Push-changefeed subscription API on [`AletheiaDB`] (Issue #3375).
+//!
+//! The [`AletheiaDB::list_changes`](crate::AletheiaDB::list_changes) *pull* feed answers
+//! "what changed between T1 and T2?" on demand. This module adds the complementary *push*
+//! feed: [`subscribe_changes`](AletheiaDB::subscribe_changes) hands out a
+//! [`Subscription`] whose buffer fills with matching [`ChangeRecord`](crate::ChangeRecord)s
+//! as transactions commit — no polling.
+//!
+//! # No-loss contract
+//!
+//! Delivery is **best-effort at-least-once**; the *durable* ground truth is `list_changes`.
+//! A consumer that lags (buffer overflow → disconnected), reconnects, or survives a crash
+//! resumes with **zero loss** by pulling `list_changes` from its last
+//! [`resume_token`](Subscription::resume_token) — see
+//! [`docs/guides/reacting-to-change.md`](https://example/) and
+//! [`crate::core::changefeed_subscription`] for the full contract (including
+//! duplicate-on-resume, deduped by the stable `ChangeRecord` cursor).
+//!
+//! The HTTP SSE surface and the MCP `await_changes` tool that wrap the blocking
+//! [`Subscription::recv_timeout`] long-poll are a coordinated follow-up (Lane 1).
+
+use crate::core::changefeed_subscription::{ChangeFilter, ChangefeedConfig, Subscription};
+use crate::core::error::Result;
+use crate::db::AletheiaDB;
+
+impl AletheiaDB {
+    /// Subscribe to the push changefeed, receiving every committed change matching `filter`.
+    ///
+    /// The returned [`Subscription`] buffers matching changes as transactions commit; drain
+    /// it with [`Subscription::poll`] (non-blocking) or [`Subscription::recv_timeout`]
+    /// (blocking long-poll). Dropping the subscription deregisters it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::CapacityExceeded`](crate::StorageError::CapacityExceeded) when
+    /// the configured maximum number of concurrent subscriptions is already reached.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use aletheiadb::{AletheiaDB, ChangeFilter};
+    /// use aletheiadb::api::WriteOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let sub = db.subscribe_changes(ChangeFilter::all())?;
+    ///
+    /// db.write(|tx| { tx.create_node("Person", aletheiadb::PropertyMap::new())?; Ok::<_, aletheiadb::Error>(()) })?;
+    ///
+    /// let events = sub.poll();
+    /// assert_eq!(events.len(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use = "the returned Subscription must be held to keep receiving changes"]
+    pub fn subscribe_changes(&self, filter: ChangeFilter) -> Result<Subscription> {
+        // Capture the committed frontier as the subscription's initial resume anchor
+        // (Issue #3375 review F4). Reading `current_timestamp` (lock order class 1, taken
+        // alone here) snapshots the last commit's HLC; any future commit gets a strictly
+        // greater timestamp, so `baseline_after(frontier)` is a gap-free "resume from where I
+        // subscribed" cursor even before the consumer drains its first event. Poison-recover
+        // the guard so a panicked writer elsewhere can never make subscribe unwind.
+        // Lock-free frontier read: no guard to poison, so a panicking writer
+        // elsewhere can no longer make subscribe unwind (it previously had to
+        // recover the poisoned guard by hand).
+        let frontier = self.current_timestamp.load();
+        let baseline = crate::core::changefeed::ChangeCursor::baseline_after(frontier);
+        self.changefeed
+            .subscribe_with_baseline(filter, Some(baseline))
+    }
+
+    /// Subscribe to the push changefeed on behalf of an authenticated principal,
+    /// enforcing the per-principal subscription quota (Issue #3678).
+    ///
+    /// Identical to [`subscribe_changes`](Self::subscribe_changes) but accounts
+    /// the new subscription against `principal_key`'s quota bucket. The changefeed
+    /// surfaces (MCP `await_changes`, HTTP `/changes/await` and `/changes/stream`)
+    /// call this with the authenticated principal id, or the shared `"anonymous"`
+    /// bucket in anonymous mode, so no principal can exhaust the global cap and
+    /// starve others. Passing `None` reproduces the unquota'd
+    /// [`subscribe_changes`](Self::subscribe_changes) behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::CapacityExceeded`](crate::StorageError::CapacityExceeded)
+    /// at the global cap, or
+    /// [`StorageError::PrincipalQuotaExceeded`](crate::StorageError::PrincipalQuotaExceeded)
+    /// when `principal_key` already holds its maximum concurrent subscriptions
+    /// (mapping to the `RESOURCE_EXHAUSTED`, `retriable: true` envelope).
+    #[must_use = "the returned Subscription must be held to keep receiving changes"]
+    pub fn subscribe_changes_for_principal(
+        &self,
+        principal_key: Option<&str>,
+        filter: ChangeFilter,
+    ) -> Result<Subscription> {
+        // Lock-free frontier read: no guard to poison, so a panicking writer
+        // elsewhere can no longer make subscribe unwind (it previously had to
+        // recover the poisoned guard by hand).
+        let frontier = self.current_timestamp.load();
+        let baseline = crate::core::changefeed::ChangeCursor::baseline_after(frontier);
+        self.changefeed.subscribe_with_baseline_and_principal(
+            filter,
+            Some(baseline),
+            principal_key.map(str::to_string),
+        )
+    }
+
+    /// Live changefeed subscription counts per principal bucket (Issue #3678),
+    /// sorted by principal id. Powers the authenticated `database_stats`
+    /// per-principal breakdown; never exposed on the bounded `/metrics` surface.
+    pub fn changefeed_principal_counts(&self) -> Vec<(String, usize)> {
+        self.changefeed.per_principal_counts()
+    }
+
+    /// Reconfigure the changefeed caps (max concurrent subscriptions and per-subscription
+    /// buffer capacity). The subscription cap takes effect immediately; the buffer capacity
+    /// applies to subscriptions created afterward (existing ones keep their capacity).
+    pub fn set_changefeed_config(&self, config: ChangefeedConfig) {
+        self.changefeed.set_config(config);
+    }
+
+    /// The number of currently-live changefeed subscriptions (primarily for tests/metrics).
+    pub fn changefeed_subscription_count(&self) -> usize {
+        self.changefeed.subscription_count()
+    }
+}

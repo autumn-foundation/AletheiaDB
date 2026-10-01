@@ -7,6 +7,8 @@
 //! [`AletheiaDB::schema`] for the current-state summary and
 //! [`AletheiaDB::schema_as_of`] for the bi-temporal variant.
 
+use crate::core::changefeed::EntityKind;
+use crate::core::constraint::{ConstraintRegistry, PropertyConstraintDescriptor};
 use crate::core::error::Result;
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::property::PropertyMap;
@@ -38,8 +40,15 @@ pub struct LabelSchema {
     pub label: String,
     /// Number of nodes with this label.
     pub count: usize,
-    /// Union of property keys observed on nodes with this label, sorted.
+    /// Union of property keys **observed** on nodes with this label, sorted.
+    /// This is a discovered set — distinct from `declared_constraints`, which
+    /// reports keys with a *declared* schema constraint (Issue #3378). A key
+    /// can be declared but not yet observed, or observed but not declared.
     pub property_keys: Vec<String>,
+    /// Schema constraints **declared** on this label (Issue #3378), empty when
+    /// the label is schemaless. Lets a caller distinguish declared keys from
+    /// merely-observed ones.
+    pub declared_constraints: Vec<PropertyConstraintDescriptor>,
 }
 
 /// Schema summary for a single edge/relationship type.
@@ -49,8 +58,11 @@ pub struct EdgeTypeSchema {
     pub edge_type: String,
     /// Number of edges with this type.
     pub count: usize,
-    /// Union of property keys observed on edges of this type, sorted.
+    /// Union of property keys **observed** on edges of this type, sorted.
     pub property_keys: Vec<String>,
+    /// Schema constraints **declared** on this edge type (Issue #3378), empty
+    /// when schemaless.
+    pub declared_constraints: Vec<PropertyConstraintDescriptor>,
 }
 
 /// A structured summary of the graph's shape: distinct node labels and
@@ -79,6 +91,12 @@ pub struct GraphSchema {
     pub sampled: bool,
     /// The bi-temporal instant this schema reflects, or `None` for current state.
     pub as_of: Option<SchemaInstant>,
+    /// Per-namespace current node/edge counts (Issue #3349). Populated for the
+    /// current-state [`AletheiaDB::schema`]; **empty** for
+    /// [`AletheiaDB::schema_as_of`] (the namespace membership index is a
+    /// current-state acceleration structure, so a point-in-time namespace
+    /// breakdown is a deliberate follow-up).
+    pub namespaces: Vec<crate::db::namespace_query::NamespaceCount>,
 }
 
 /// Accumulates per-label/per-type counts and the union of property keys
@@ -142,7 +160,14 @@ impl AletheiaDB {
         self.current
             .visit_edges(|edge| edge_acc.record(edge.label, &edge.properties));
 
-        Ok(build_schema(node_acc, edge_acc, false, None))
+        Ok(build_schema(
+            node_acc,
+            edge_acc,
+            false,
+            None,
+            &self.constraint_registry,
+            self.namespace_counts(),
+        ))
     }
 
     /// Discover the graph's schema as it existed at a specific bi-temporal
@@ -213,7 +238,34 @@ impl AletheiaDB {
                 valid_time,
                 transaction_time,
             }),
+            &self.constraint_registry,
+            // Namespace breakdown is current-state only; empty for AS OF.
+            Vec::new(),
         ))
+    }
+}
+
+/// Resolve the declared schema constraints for `(kind, label)` into public
+/// descriptors, or an empty vec when the label is schemaless (Issue #3378).
+fn declared_for(
+    registry: &ConstraintRegistry,
+    kind: EntityKind,
+    label: InternedString,
+) -> Vec<PropertyConstraintDescriptor> {
+    match registry.schema_constraints_for(kind, label) {
+        None => Vec::new(),
+        Some(constraints) => constraints
+            .iter()
+            .filter_map(|c| {
+                let property = GLOBAL_INTERNER.resolve_with(c.property, |s| s.to_string())?;
+                Some(PropertyConstraintDescriptor {
+                    property,
+                    declared_type: c.declared_type,
+                    required: c.required,
+                    nullable: c.nullable,
+                })
+            })
+            .collect(),
     }
 }
 
@@ -243,6 +295,8 @@ fn build_schema(
     edge_acc: Accumulator,
     sampled: bool,
     as_of: Option<SchemaInstant>,
+    registry: &ConstraintRegistry,
+    namespaces: Vec<crate::db::namespace_query::NamespaceCount>,
 ) -> GraphSchema {
     let mut total_nodes = 0;
     let mut node_labels: Vec<LabelSchema> = node_acc
@@ -250,12 +304,20 @@ fn build_schema(
         .into_iter()
         .map(|(label, (count, keys))| {
             total_nodes += count;
-            let mut property_keys: Vec<String> = keys.into_iter().map(resolve_label).collect();
+            // Elide engine-reserved ride-along keys (the namespace marker,
+            // #3349, and crypto-shred markers): they are not user property keys
+            // and must never surface in the schema.
+            let mut property_keys: Vec<String> = keys
+                .into_iter()
+                .map(resolve_label)
+                .filter(|k| !crate::core::namespace::is_reserved_property_key(k))
+                .collect();
             property_keys.sort_unstable();
             LabelSchema {
                 label: resolve_label(label),
                 count,
                 property_keys,
+                declared_constraints: declared_for(registry, EntityKind::Node, label),
             }
         })
         .collect();
@@ -267,12 +329,18 @@ fn build_schema(
         .into_iter()
         .map(|(edge_type, (count, keys))| {
             total_edges += count;
-            let mut property_keys: Vec<String> = keys.into_iter().map(resolve_label).collect();
+            // Elide engine-reserved ride-along keys (see the node branch).
+            let mut property_keys: Vec<String> = keys
+                .into_iter()
+                .map(resolve_label)
+                .filter(|k| !crate::core::namespace::is_reserved_property_key(k))
+                .collect();
             property_keys.sort_unstable();
             EdgeTypeSchema {
                 edge_type: resolve_label(edge_type),
                 count,
                 property_keys,
+                declared_constraints: declared_for(registry, EntityKind::Edge, edge_type),
             }
         })
         .collect();
@@ -285,6 +353,7 @@ fn build_schema(
         total_edges,
         sampled,
         as_of,
+        namespaces,
     }
 }
 

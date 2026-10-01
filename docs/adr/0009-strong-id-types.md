@@ -168,7 +168,7 @@ self.counter.fetch_add(1, Ordering::Relaxed) // INCORRECT
 
 #### Implementation References
 
-See `src/core/id.rs:261` for the actual implementation with detailed safety comments. The decision to use `SeqCst` is also discussed in [issue #21](https://github.com/madmax983/AletheiaDB/issues/21).
+See `src/core/id.rs:261` for the actual implementation with detailed safety comments. The decision to use `SeqCst` is also discussed in [issue #21](https://github.com/autumn-foundation/AletheiaDB/issues/21).
 
 ### Type-Safe API
 

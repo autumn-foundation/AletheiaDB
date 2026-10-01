@@ -10,7 +10,8 @@ use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::temporal::Timestamp;
-use crate::index::current::CurrentIndexes;
+use crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig;
+use crate::index::current::{AdjacencyIndexStats, CurrentIndexes, ExportedCsrPair};
 use crate::index::vector::hnsw::{HnswConfig, HnswIndex};
 use crate::index::vector::temporal::{TemporalVectorConfig, TemporalVectorIndex};
 use crate::index::vector::{TemporalSearchResults, VectorIndex};
@@ -19,10 +20,13 @@ use dashmap::mapref::entry::Entry;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+mod apply_gate;
 mod iterators;
 mod stats;
 mod vector;
 
+use apply_gate::ApplyGate;
+pub(crate) use apply_gate::PublishGuard;
 pub use iterators::*;
 pub use stats::CurrentStats;
 use stats::FilterStats;
@@ -71,13 +75,31 @@ pub struct CurrentStorage {
     filter_stats: DashMap<String, Arc<FilterStats>>,
     /// Lock to synchronize snapshot creation with concurrent writes
     pub(crate) snapshot_lock: RwLock<()>,
+    /// Atomic-publish gate for replica batch application (Issue #3788).
+    ///
+    /// Disarmed (and free) on a primary; armed when the owning database enters
+    /// replica mode, at which point point lookups become atomic with respect to
+    /// the applier's batch replay. See [`apply_gate`].
+    apply_gate: ApplyGate,
 }
 
 impl CurrentStorage {
     /// Create a new empty current storage.
+    ///
+    /// Its adjacency indexes are enrolled in the shared background maintenance
+    /// worker (Issue #3810) with the default policy, so reads reach the
+    /// frozen-CSR fast path once writes go quiet. Use
+    /// [`with_adjacency_maintenance`](Self::with_adjacency_maintenance) to
+    /// choose a different policy (or none).
     pub fn new() -> Self {
+        Self::with_adjacency_maintenance(AdjacencyMaintenanceConfig::default())
+    }
+
+    /// Create a new empty current storage with an explicit background
+    /// adjacency-maintenance policy (Issue #3810).
+    pub fn with_adjacency_maintenance(maintenance: AdjacencyMaintenanceConfig) -> Self {
         CurrentStorage {
-            indexes: CurrentIndexes::new(),
+            indexes: CurrentIndexes::with_maintenance_config(maintenance),
             node_id_gen: IdGenerator::new(),
             edge_id_gen: IdGenerator::new(),
             version_id_gen: IdGenerator::new(),
@@ -85,7 +107,46 @@ impl CurrentStorage {
             temporal_vector_indexes: DashMap::new(),
             filter_stats: DashMap::new(),
             snapshot_lock: RwLock::new(()),
+            apply_gate: ApplyGate::new(),
         }
+    }
+
+    /// Arm the replica apply gate so current-state point lookups become atomic
+    /// with respect to [`Self::begin_apply_publish`] (Issue #3788).
+    ///
+    /// Called when the owning database enters replica mode, before the applier
+    /// thread is spawned. Idempotent.
+    pub(crate) fn arm_apply_gate(&self) {
+        self.apply_gate.arm();
+    }
+
+    /// Disarm the replica apply gate, restoring the ungated read fast path.
+    ///
+    /// Only valid once no applier can still publish -- `promote_to_primary`
+    /// stops and joins the applier thread first.
+    pub(crate) fn disarm_apply_gate(&self) {
+        self.apply_gate.disarm();
+    }
+
+    /// Whether current-state reads are currently gated (i.e. this storage backs
+    /// a replica). Exposed for tests and diagnostics.
+    #[cfg(test)]
+    pub(crate) fn apply_gate_armed(&self) -> bool {
+        self.apply_gate.is_armed()
+    }
+
+    /// Open an atomic publish window over current state.
+    ///
+    /// Every mutation applied until the returned guard is dropped becomes
+    /// visible to gated point lookups all at once, on drop. The replica applier
+    /// wraps a complete-frame batch replay in one of these so a concurrent read
+    /// can never observe a half-applied transaction (Issue #3788).
+    ///
+    /// Re-entrant for the publishing thread: the replay engine's idempotency
+    /// guards read current state from inside the window.
+    #[must_use = "the publish window closes when the guard is dropped"]
+    pub(crate) fn begin_apply_publish(&self) -> PublishGuard<'_> {
+        self.apply_gate.begin_publish()
     }
 
     /// Initialize the node ID generator with a specific starting value.
@@ -96,6 +157,7 @@ impl CurrentStorage {
     /// # Arguments
     ///
     /// * `start` - The next ID to generate (typically max_id + 1)
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn init_node_id_generator(&self, start: u64) {
         self.node_id_gen.reset_to(start);
     }
@@ -108,6 +170,7 @@ impl CurrentStorage {
     /// # Arguments
     ///
     /// * `start` - The next ID to generate (typically max_id + 1)
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn init_edge_id_generator(&self, start: u64) {
         self.edge_id_gen.reset_to(start);
     }
@@ -121,6 +184,7 @@ impl CurrentStorage {
     ///
     /// * `start` - The next ID to generate (typically max_id + 1)
     #[inline]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn init_version_id_generator(&self, start: u64) {
         self.version_id_gen.reset_to(start);
     }
@@ -135,6 +199,7 @@ impl CurrentStorage {
     ///
     /// * `min_value` - The minimum next version ID to generate
     #[inline]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn ensure_version_id_generator_at_least(&self, min_value: u64) {
         self.version_id_gen.ensure_at_least(min_value);
     }
@@ -144,6 +209,7 @@ impl CurrentStorage {
     /// This is used during recovery to determine the starting version ID for
     /// WAL replay.
     #[inline]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn get_version_id_generator_current(&self) -> u64 {
         self.version_id_gen.current()
     }
@@ -292,6 +358,7 @@ impl CurrentStorage {
     /// Register a vector index (used during index loading from disk).
     ///
     /// This directly inserts the index without any initialization logic.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn register_vector_index(
         &self,
         property_name: &str,
@@ -382,6 +449,7 @@ impl CurrentStorage {
     ///
     /// Used for persistence operations. Returns (index, config, vector_count, mappings).
     #[allow(clippy::type_complexity)]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn get_vector_index_for_persistence(
         &self,
         property_name: &str,
@@ -546,11 +614,17 @@ impl CurrentStorage {
     }
 
     /// Get a node by ID.
+    ///
+    /// On a replica this read is atomic with respect to the applier's batch
+    /// replay: it never observes a half-applied replicated transaction
+    /// (Issue #3788). On a primary the gate is disarmed and costs a branch.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node(&self, id: NodeId) -> Result<Node> {
-        self.indexes
-            .get_node(id)
-            .ok_or_else(|| StorageError::NodeNotFound(id).into())
+        self.apply_gate.read(|| {
+            self.indexes
+                .get_node(id)
+                .ok_or_else(|| StorageError::NodeNotFound(id).into())
+        })
     }
 
     /// Access a node without cloning, executing a closure on the node data.
@@ -576,17 +650,26 @@ impl CurrentStorage {
     where
         F: FnOnce(&Node) -> R,
     {
-        self.indexes
-            .with_node(id, f)
-            .ok_or_else(|| StorageError::NodeNotFound(id).into())
+        // `FnOnce` cannot be re-run, so on a replica this takes the apply
+        // gate's blocking fallback rather than its seqlock fast path
+        // (Issue #3788). Disarmed (primary) it is a branch, as before.
+        self.apply_gate.read_once(|| {
+            self.indexes
+                .with_node(id, f)
+                .ok_or_else(|| StorageError::NodeNotFound(id).into())
+        })
     }
 
     /// Get an edge by ID.
+    ///
+    /// Atomic with respect to a replica apply -- see [`Self::get_node`].
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge(&self, id: EdgeId) -> Result<Edge> {
-        self.indexes
-            .get_edge(id)
-            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        self.apply_gate.read(|| {
+            self.indexes
+                .get_edge(id)
+                .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        })
     }
 
     // ========================================================================
@@ -606,9 +689,11 @@ impl CurrentStorage {
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_target(&self, id: EdgeId) -> Result<NodeId> {
-        self.indexes
-            .get_edge_target(id)
-            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        self.apply_gate.read(|| {
+            self.indexes
+                .get_edge_target(id)
+                .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        })
     }
 
     /// Get the source node of an edge without cloning the entire edge.
@@ -620,9 +705,11 @@ impl CurrentStorage {
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_source(&self, id: EdgeId) -> Result<NodeId> {
-        self.indexes
-            .get_edge_source(id)
-            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        self.apply_gate.read(|| {
+            self.indexes
+                .get_edge_source(id)
+                .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        })
     }
 
     /// Get the endpoints (source, target) of an edge without cloning.
@@ -634,9 +721,11 @@ impl CurrentStorage {
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_endpoints(&self, id: EdgeId) -> Result<(NodeId, NodeId)> {
-        self.indexes
-            .get_edge_endpoints(id)
-            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        self.apply_gate.read(|| {
+            self.indexes
+                .get_edge_endpoints(id)
+                .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        })
     }
 
     /// Get the label of an edge without cloning the entire edge.
@@ -648,9 +737,11 @@ impl CurrentStorage {
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_label(&self, id: EdgeId) -> Result<InternedString> {
-        self.indexes
-            .get_edge_label(id)
-            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        self.apply_gate.read(|| {
+            self.indexes
+                .get_edge_label(id)
+                .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+        })
     }
 
     /// Get the label of a node without cloning the entire node.
@@ -662,9 +753,11 @@ impl CurrentStorage {
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node_label(&self, id: NodeId) -> Result<InternedString> {
-        self.indexes
-            .get_node_label(id)
-            .ok_or_else(|| StorageError::NodeNotFound(id).into())
+        self.apply_gate.read(|| {
+            self.indexes
+                .get_node_label(id)
+                .ok_or_else(|| StorageError::NodeNotFound(id).into())
+        })
     }
 
     /// Delete a node.
@@ -765,12 +858,23 @@ impl CurrentStorage {
         // NOTE: with multiple vector/temporal indexes enabled, a mid-fan-out
         // failure returns Err with indexes visited earlier already updated
         // (partial work); the node update itself is not applied.
+        // Update every enabled current-state AND temporal vector index using the
+        // old properties, so a removed/overwritten embedding is de-indexed (not
+        // just re-added) on both. Without the old props the node is not yet in
+        // current storage — e.g. WAL replay applying an `UpdateNode` against a
+        // lagging index snapshot that never saw the node's create (recovery.rs
+        // applies these idempotently to converge). In that case there is no
+        // prior vector to remove, so we ADD to both the current-state HNSW and
+        // the temporal index, exactly mirroring `insert_node_direct`; indexing
+        // only the temporal side would leave the vector invisible to
+        // current-state `find_similar`.
         if let Some(old_p) = old_props {
             self.update_vector_index(node.id, &node.properties, &old_p)?;
+            self.update_temporal_vector_index(node.id, &node.properties, &old_p, timestamp)?;
+        } else {
+            self.try_index_vector(node.id, &node.properties)?;
+            self.try_index_temporal_vector(node.id, &node.properties, timestamp)?;
         }
-
-        // Update every enabled temporal vector index
-        self.try_index_temporal_vector(node.id, &node.properties, timestamp)?;
 
         // Finally, insert node into main indexes. This avoids node.clone().
         self.indexes.insert_node(node);
@@ -858,7 +962,8 @@ impl CurrentStorage {
     ///
     /// - After bulk inserts (to move many edges from delta to frozen)
     /// - To reduce delta size before persistence
-    /// - Usually not needed if background compaction is enabled
+    /// - Rarely needed since Issue #3810: background maintenance compacts on
+    ///   its own once writes go quiet (unless it is disabled by config)
     ///
     /// # Performance
     ///
@@ -866,6 +971,14 @@ impl CurrentStorage {
     /// Typically much faster than the old O(E log E) rebuild where E is total edges.
     pub fn compact_adjacency(&self) {
         self.indexes.compact_adjacency();
+    }
+
+    /// Layer occupancy of both adjacency indexes (Issue #3810).
+    ///
+    /// `is_fully_compacted()` is true exactly when adjacency reads take the
+    /// frozen-CSR fast path.
+    pub fn adjacency_stats(&self) -> AdjacencyIndexStats {
+        self.indexes.adjacency_stats()
     }
 
     /// Get the current number of delta edges (test-only).
@@ -918,21 +1031,23 @@ impl CurrentStorage {
     /// Uses frozen view (~8-14ns) when available, falls back to merged guard (~16-17ns).
     #[inline]
     pub fn get_outgoing_edges(&self, source: NodeId) -> Vec<EdgeId> {
-        // HOT PATH: Use frozen view for direct slice access when no delta/tombstones
-        if let Some(frozen) = self.indexes.frozen_outgoing_view() {
-            return frozen
-                .get_adjacency(source)
-                .iter()
-                .map(|entry| entry.edge_id)
-                .collect();
-        }
+        self.apply_gate.read(|| {
+            // HOT PATH: Use frozen view for direct slice access when no delta/tombstones
+            if let Some(frozen) = self.indexes.frozen_outgoing_view() {
+                return frozen
+                    .get_adjacency(source)
+                    .iter()
+                    .map(|entry| entry.edge_id)
+                    .collect();
+            }
 
-        // SLOW PATH: Use merged guard when delta/tombstones exist.
-        // Pre-allocate using capacity hint to avoid multiple reallocations.
-        let guard = self.indexes.get_outgoing(source);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(guard.iter().map(|entry| entry.edge_id));
-        result
+            // SLOW PATH: Use merged guard when delta/tombstones exist.
+            // Pre-allocate using capacity hint to avoid multiple reallocations.
+            let guard = self.indexes.get_outgoing(source);
+            let mut result = Vec::with_capacity(guard.capacity_hint());
+            result.extend(guard.iter().map(|entry| entry.edge_id));
+            result
+        })
     }
 
     /// Get all incoming edges to a node.
@@ -940,21 +1055,23 @@ impl CurrentStorage {
     /// Uses frozen view (~8-14ns) when available, falls back to merged guard (~16-17ns).
     #[inline]
     pub fn get_incoming_edges(&self, target: NodeId) -> Vec<EdgeId> {
-        // HOT PATH: Use frozen view for direct slice access when no delta/tombstones
-        if let Some(frozen) = self.indexes.frozen_incoming_view() {
-            return frozen
-                .get_adjacency(target)
-                .iter()
-                .map(|entry| entry.edge_id)
-                .collect();
-        }
+        self.apply_gate.read(|| {
+            // HOT PATH: Use frozen view for direct slice access when no delta/tombstones
+            if let Some(frozen) = self.indexes.frozen_incoming_view() {
+                return frozen
+                    .get_adjacency(target)
+                    .iter()
+                    .map(|entry| entry.edge_id)
+                    .collect();
+            }
 
-        // SLOW PATH: Use merged guard when delta/tombstones exist.
-        // Pre-allocate using capacity hint to avoid multiple reallocations.
-        let guard = self.indexes.get_incoming(target);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(guard.iter().map(|entry| entry.edge_id));
-        result
+            // SLOW PATH: Use merged guard when delta/tombstones exist.
+            // Pre-allocate using capacity hint to avoid multiple reallocations.
+            let guard = self.indexes.get_incoming(target);
+            let mut result = Vec::with_capacity(guard.capacity_hint());
+            result.extend(guard.iter().map(|entry| entry.edge_id));
+            result
+        })
     }
 
     /// Get outgoing edges with a specific label.
@@ -966,15 +1083,17 @@ impl CurrentStorage {
         };
 
         // Optimized to avoid intermediate Vec allocation and pre-allocate result
-        let guard = self.indexes.get_outgoing(source);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(
-            guard
-                .iter()
-                .filter(|entry| entry.label == label_id)
-                .map(|entry| entry.edge_id),
-        );
-        result
+        self.apply_gate.read(|| {
+            let guard = self.indexes.get_outgoing(source);
+            let mut result = Vec::with_capacity(guard.capacity_hint());
+            result.extend(
+                guard
+                    .iter()
+                    .filter(|entry| entry.label == label_id)
+                    .map(|entry| entry.edge_id),
+            );
+            result
+        })
     }
 
     /// Get incoming edges with a specific label.
@@ -986,15 +1105,17 @@ impl CurrentStorage {
         };
 
         // Optimized to avoid intermediate Vec allocation and pre-allocate result
-        let guard = self.indexes.get_incoming(target);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(
-            guard
-                .iter()
-                .filter(|entry| entry.label == label_id)
-                .map(|entry| entry.edge_id),
-        );
-        result
+        self.apply_gate.read(|| {
+            let guard = self.indexes.get_incoming(target);
+            let mut result = Vec::with_capacity(guard.capacity_hint());
+            result.extend(
+                guard
+                    .iter()
+                    .filter(|entry| entry.label == label_id)
+                    .map(|entry| entry.edge_id),
+            );
+            result
+        })
     }
 
     /// Get all outgoing edges from a node as an iterator.
@@ -1074,6 +1195,13 @@ impl CurrentStorage {
         self.indexes.export_incoming_csr()
     }
 
+    /// Export both directions' frozen CSRs as one compaction-consistent pair
+    /// (Issue #3810). See
+    /// [`CurrentIndexes::export_csr_pair`](crate::index::CurrentIndexes::export_csr_pair).
+    pub fn export_csr_pair(&self) -> ExportedCsrPair {
+        self.indexes.export_csr_pair()
+    }
+
     /// Import CSR adjacency data from persistence.
     ///
     /// This bypasses the need to rebuild adjacency structures from scratch.
@@ -1100,6 +1228,87 @@ impl CurrentStorage {
     #[inline]
     pub fn node_count(&self) -> usize {
         self.indexes.node_count()
+    }
+
+    /// Node ids currently in `namespace`, from the secondary membership index
+    /// (Issue #3349). O(members), no property scan.
+    #[inline]
+    pub fn namespace_node_ids(&self, namespace: &crate::core::namespace::Namespace) -> Vec<NodeId> {
+        self.indexes.namespace_node_ids(namespace)
+    }
+
+    /// Edge ids currently in `namespace`, from the secondary membership index.
+    #[inline]
+    pub fn namespace_edge_ids(&self, namespace: &crate::core::namespace::Namespace) -> Vec<EdgeId> {
+        self.indexes.namespace_edge_ids(namespace)
+    }
+
+    /// Whether `node_id` currently lives in `namespace` (Issue #3349, PR2). O(1)
+    /// membership probe — no property load — for scoped-traversal boundary checks.
+    #[inline]
+    pub fn node_in_namespace(
+        &self,
+        node_id: NodeId,
+        namespace: &crate::core::namespace::Namespace,
+    ) -> bool {
+        self.indexes.node_in_namespace(node_id, namespace)
+    }
+
+    /// Whether `node_id` currently lives in the interned namespace `ns_id`
+    /// (Issue #3349, PR2 performance). The pre-interned hot-path form of
+    /// [`node_in_namespace`](Self::node_in_namespace) — no per-call string
+    /// hashing.
+    #[inline]
+    pub fn node_in_namespace_id(
+        &self,
+        node_id: NodeId,
+        ns_id: crate::core::namespace::NamespaceId,
+    ) -> bool {
+        self.indexes.node_in_namespace_id(node_id, ns_id)
+    }
+
+    /// Whether `edge_id` currently lives in `namespace` (Issue #3349, PR2). O(1)
+    /// membership probe — no property load. See
+    /// [`node_in_namespace`](Self::node_in_namespace).
+    #[inline]
+    pub fn edge_in_namespace(
+        &self,
+        edge_id: EdgeId,
+        namespace: &crate::core::namespace::Namespace,
+    ) -> bool {
+        self.indexes.edge_in_namespace(edge_id, namespace)
+    }
+
+    /// Whether `edge_id` currently lives in the interned namespace `ns_id`
+    /// (Issue #3349, PR2 performance). The pre-interned hot-path form of
+    /// [`edge_in_namespace`](Self::edge_in_namespace).
+    #[inline]
+    pub fn edge_in_namespace_id(
+        &self,
+        edge_id: EdgeId,
+        ns_id: crate::core::namespace::NamespaceId,
+    ) -> bool {
+        self.indexes.edge_in_namespace_id(edge_id, ns_id)
+    }
+
+    /// Number of nodes currently in `namespace` (O(1) membership-set read).
+    #[inline]
+    pub fn namespace_node_count(&self, namespace: &crate::core::namespace::Namespace) -> usize {
+        self.indexes.namespace_node_count(namespace)
+    }
+
+    /// Number of edges currently in `namespace` (O(1) membership-set read).
+    #[inline]
+    pub fn namespace_edge_count(&self, namespace: &crate::core::namespace::Namespace) -> usize {
+        self.indexes.namespace_edge_count(namespace)
+    }
+
+    /// Every namespace currently holding at least one node or edge.
+    #[inline]
+    pub fn populated_namespaces(
+        &self,
+    ) -> std::collections::BTreeSet<crate::core::namespace::Namespace> {
+        self.indexes.populated_namespaces()
     }
 
     /// Get an exclusive upper bound on node ids present in current storage.
@@ -1135,10 +1344,11 @@ impl CurrentStorage {
         label_id: crate::core::interning::InternedString,
     ) -> bool {
         match NodeId::new(node_id) {
-            Ok(id) => self
-                .indexes
-                .get_node_header(id)
-                .is_some_and(|header| header.label == label_id),
+            Ok(id) => self.apply_gate.read(|| {
+                self.indexes
+                    .get_node_header(id)
+                    .is_some_and(|header| header.label == label_id)
+            }),
             Err(_) => false,
         }
     }
@@ -1154,7 +1364,9 @@ impl CurrentStorage {
     #[inline]
     pub fn contains_node(&self, node_id: u64) -> bool {
         match NodeId::new(node_id) {
-            Ok(id) => self.indexes.get_node_header(id).is_some(),
+            Ok(id) => self
+                .apply_gate
+                .read(|| self.indexes.get_node_header(id).is_some()),
             Err(_) => false,
         }
     }
@@ -1168,13 +1380,13 @@ impl CurrentStorage {
     /// Get the out-degree of a node.
     #[inline]
     pub fn out_degree(&self, node: NodeId) -> usize {
-        self.indexes.out_degree(node)
+        self.apply_gate.read(|| self.indexes.out_degree(node))
     }
 
     /// Get the in-degree of a node.
     #[inline]
     pub fn in_degree(&self, node: NodeId) -> usize {
-        self.indexes.in_degree(node)
+        self.apply_gate.read(|| self.indexes.in_degree(node))
     }
 
     /// Get the default property name for vector indexing.
@@ -1455,6 +1667,59 @@ impl CurrentStorage {
         let (_, index, config) = self.get_vector_index_internal(Some(property_name))?;
         Self::validate_embedding_dimensions(query, &config)?;
         index.search_with_filter(query, k, predicate)
+    }
+
+    /// Filter-complete k-NN from an existing node's embedding on the **default**
+    /// vector index (Issue #3349, PR2 / test T6).
+    ///
+    /// Resolves the default vector property and the query node's embedding, then
+    /// delegates to the index's [`search_with_filter`](crate::index::VectorIndex::search_with_filter),
+    /// which **over-fetches** candidates until it has `k` results satisfying
+    /// `predicate` (or the index is exhausted) — so a namespace-scoped caller
+    /// never receives fewer than `k` in-scope results when that many exist. The
+    /// query node itself is always excluded (folded into the predicate), so
+    /// callers pass only their scope predicate.
+    ///
+    /// The predicate is deliberately **ignorant of why a vector is absent** from
+    /// the index: it is called only for candidates the index actually returns, so
+    /// a vector excluded from the index for any reason (e.g. a crypto-shredded
+    /// embedding) simply never reaches the predicate — this method makes no
+    /// assumption about vector presence.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn find_similar_by_node_with_predicate<F>(
+        &self,
+        query_node_id: NodeId,
+        k: usize,
+        predicate: F,
+    ) -> Result<Vec<(NodeId, f32)>>
+    where
+        F: Fn(&NodeId) -> bool + Send + Sync,
+    {
+        let (prop_name, index, _) = self.get_vector_index_internal(None)?;
+        let query_vector = self.get_node_vector(query_node_id, &prop_name)?;
+        index.search_with_filter(&query_vector, k, move |id| {
+            *id != query_node_id && predicate(id)
+        })
+    }
+
+    /// Filter-complete k-NN from a raw embedding on the **default** vector index
+    /// (Issue #3349, PR2 / test T6). Like
+    /// [`find_similar_by_node_with_predicate`](Self::find_similar_by_node_with_predicate)
+    /// but the query is an externally-supplied embedding (no node exclusion). See
+    /// that method for the filter-completeness and absent-vector guarantees.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn find_similar_by_embedding_with_predicate<F>(
+        &self,
+        embedding: &[f32],
+        k: usize,
+        predicate: F,
+    ) -> Result<Vec<(NodeId, f32)>>
+    where
+        F: Fn(&NodeId) -> bool + Send + Sync,
+    {
+        let (_, index, config) = self.get_vector_index_internal(None)?;
+        Self::validate_embedding_dimensions(embedding, &config)?;
+        index.search_with_filter(embedding, k, predicate)
     }
 
     // ========================================================================
@@ -1951,15 +2216,92 @@ impl CurrentStorage {
         Ok(())
     }
 
+    /// Update every enabled temporal vector index for a node whose properties
+    /// changed, mirroring [`update_vector_index`](Self::update_vector_index) for
+    /// the current-state HNSW.
+    ///
+    /// For each indexed property this diffs the old vs new vector and applies the
+    /// matching temporal operation:
+    ///
+    /// - `(None, None)` — property absent before and after: no-op.
+    /// - `(None, Some)` — vector added: [`TemporalVectorIndex::add`].
+    /// - `(Some, None)` — vector removed: [`TemporalVectorIndex::remove`], which
+    ///   drops the embedding from the live HNSW **and** from `current_state.vectors`
+    ///   so it no longer leaks into the next snapshot.
+    /// - `(Some, Some)` — vector overwritten: only re-`add` (an upsert) when the
+    ///   value actually changed, avoiding needless HNSW churn.
+    ///
+    /// # Bi-temporal tombstone semantics
+    ///
+    /// `remove`/overwrite CLOSE the vector's interval at `timestamp` — the change
+    /// is reflected in any snapshot taken **after** it — but they never erase
+    /// snapshots taken **before** it. History is therefore preserved: a
+    /// `find_similar_as_of` anchored before the change still returns the old
+    /// embedding (Issue #3621). The de-index is also applied to the live
+    /// current-state HNSW **immediately** (via `current_state.vectors`), so a
+    /// current-state `find_similar` stops returning the stale phantom right away.
+    /// The as-of-now temporal side, by contrast, is only as fresh as the last
+    /// snapshot: between this de-index and the next snapshot a
+    /// `find_similar_as_of(now)` still reads the prior snapshot and returns the
+    /// old embedding — inherent snapshot cadence, symmetric with how newly added
+    /// vectors only appear in an as-of-now query once the next snapshot is taken.
+    /// Once a snapshot is taken after the change, the as-of-now query no longer
+    /// returns the phantom. Because this is the exact method the WAL-replay
+    /// `update_node_direct` invokes, crash recovery reconstructs the same
+    /// corrected point-in-time state.
+    ///
+    /// Fan-out matches [`try_index_temporal_vector`](Self::try_index_temporal_vector):
+    /// on the first failing index this returns `Err` with earlier indexes already
+    /// updated (partial work); the node update itself is not applied by the caller.
+    fn update_temporal_vector_index(
+        &self,
+        node_id: NodeId,
+        new_props: &PropertyMap,
+        old_props: &PropertyMap,
+        timestamp: Timestamp,
+    ) -> Result<()> {
+        for (property_name, index) in self.collect_temporal_vector_indexes() {
+            let old_vec = old_props.get(&property_name).and_then(|v| v.as_vector());
+            let new_vec = new_props.get(&property_name).and_then(|v| v.as_vector());
+
+            match (old_vec, new_vec) {
+                (None, None) => {}
+                (None, Some(v)) => {
+                    index.add(node_id, v, timestamp)?;
+                }
+                (Some(_), None) => {
+                    // Propagate the error via `?` on purpose: unlike the
+                    // current-state `update_vector_index` (which swallows removal
+                    // errors with `let _ =`), a fault from the temporal index is a
+                    // real bi-temporal-bookkeeping failure the caller must see so
+                    // the node update aborts rather than committing a stale phantom.
+                    // Safe because `HnswIndex::remove` returns `Ok(())` for a
+                    // missing id — enabling an index after the node already exists
+                    // (so the id was never added) is a no-op, not a spurious abort.
+                    index.remove(node_id, timestamp)?;
+                }
+                (Some(o), Some(n)) => {
+                    if o != n {
+                        // add() is an upsert (remove + add) on the temporal index.
+                        index.add(node_id, n, timestamp)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Helper to remove a node's vectors from every enabled temporal vector index.
     ///
     /// Mirrors [`try_remove_from_index`](Self::try_remove_from_index): removal is
     /// attempted on ALL indexes even when one fails, so a per-index error never
     /// leaves stale entries behind in the remaining indexes. The first error
-    /// encountered is returned after every index has been attempted. Note that
-    /// `remove` may fail for an index that never contained the node; callers
-    /// treating removal as best-effort (e.g. `delete_node_direct`) ignore the
-    /// returned error for this reason.
+    /// encountered is returned after every index has been attempted. A missing
+    /// id is **not** an error — `HnswIndex::remove` returns `Ok(())` when the
+    /// node was never indexed — so an index that never contained the node does
+    /// not contribute a spurious failure here. Any error returned therefore
+    /// reflects a genuine index fault; callers treating removal as best-effort
+    /// (e.g. `delete_node_direct`) may still ignore it.
     fn try_remove_temporal_vector(&self, node_id: NodeId, timestamp: Timestamp) -> Result<()> {
         let mut first_err = None;
         for (_, index) in self.collect_temporal_vector_indexes() {
@@ -2217,6 +2559,18 @@ impl CurrentStorage {
             Some(id) => id,
             None => return Vec::new(),
         };
+        // Fast path: an equality index covering this (label, property) with an
+        // indexable value type (String/Int/Bool) — an O(matches) probe instead
+        // of the O(nodes-per-label) scan. Non-indexable value types (notably
+        // Float) and uncovered pairs fall through to the scan, returning
+        // byte-identical results. See `crate::index::property_index`.
+        let covered_value = crate::index::property_index::value_key(property_value)
+            .filter(|_| self.indexes.has_property_index(label_id, key_id));
+        if let Some(vk) = covered_value {
+            return self
+                .indexes
+                .find_nodes_by_property_indexed(label_id, key_id, &vk);
+        }
         self.indexes
             .iter_nodes()
             .filter(|n| n.label == label_id)
@@ -2227,6 +2581,89 @@ impl CurrentStorage {
             })
             .map(|n| n.id)
             .collect()
+    }
+
+    // ========================================================================
+    // Secondary property (equality) index — opt-in, node-only, current-state.
+    // See `crate::index::property_index` for the design and scope boundaries.
+    // ========================================================================
+
+    /// Enable a current-state equality index on `(label, property)` and backfill
+    /// it from current nodes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FailedPrecondition`](crate::core::error::Error::FailedPrecondition)
+    /// if an index is already enabled for this `(label, property)` pair.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn enable_property_index(&self, label: &str, property: &str) -> Result<()> {
+        let label_id = GLOBAL_INTERNER.intern(label)?;
+        let key_id = GLOBAL_INTERNER.intern(property)?;
+        // Exclude ALL concurrent writers (each holds `snapshot_lock.read()`) for
+        // the whole set-flag + backfill, so no create/update/delete can
+        // interleave and leave a node in the wrong bucket or no bucket. See
+        // `CurrentIndexes::enable_property_index` for the two racy interleavings
+        // this closes.
+        let _lock = self.snapshot_lock.write();
+        if !self.indexes.enable_property_index(label_id, key_id) {
+            return Err(crate::core::error::Error::FailedPrecondition(format!(
+                "property index already enabled for ({label}, {property})"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether an equality index is enabled for `(label, property)`.
+    pub fn has_property_index(&self, label: &str, property: &str) -> bool {
+        let (Some(label_id), Some(key_id)) = (
+            GLOBAL_INTERNER.get_id(label),
+            GLOBAL_INTERNER.get_id(property),
+        ) else {
+            return false;
+        };
+        self.indexes.has_property_index(label_id, key_id)
+    }
+
+    /// List all enabled property indexes.
+    pub fn list_property_indexes(&self) -> Vec<crate::index::property_index::PropertyIndexInfo> {
+        self.indexes
+            .property_index_pairs()
+            .into_iter()
+            .filter_map(|(label_id, key_id)| {
+                let label = GLOBAL_INTERNER.resolve_with(label_id, |s| s.to_string())?;
+                let property = GLOBAL_INTERNER.resolve_with(key_id, |s| s.to_string())?;
+                Some(crate::index::property_index::PropertyIndexInfo { label, property })
+            })
+            .collect()
+    }
+
+    /// Drop the equality index on `(label, property)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FailedPrecondition`](crate::core::error::Error::FailedPrecondition)
+    /// if no index is enabled for this `(label, property)` pair.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn drop_property_index(&self, label: &str, property: &str) -> Result<()> {
+        let not_enabled = || {
+            crate::core::error::Error::FailedPrecondition(format!(
+                "no property index enabled for ({label}, {property})"
+            ))
+        };
+        let (Some(label_id), Some(key_id)) = (
+            GLOBAL_INTERNER.get_id(label),
+            GLOBAL_INTERNER.get_id(property),
+        ) else {
+            return Err(not_enabled());
+        };
+        // Same exclusion as enable: hold the write lock so no concurrent writer's
+        // reindex can add a bucket after the purge (which a later re-enable would
+        // otherwise merge into fresh results — the #S3 race).
+        let _lock = self.snapshot_lock.write();
+        if !self.indexes.disable_property_index(label_id, key_id) {
+            return Err(not_enabled());
+        }
+        Ok(())
     }
 
     /// Get the name of the property used for vector indexing.
@@ -2276,10 +2713,12 @@ impl CurrentStorage {
     ///
     /// Returns the target node IDs of all outgoing edges from the source node.
     pub fn get_outgoing_targets(&self, source: NodeId) -> Vec<NodeId> {
-        let guard = self.indexes.get_outgoing(source);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(guard.iter().map(|entry| entry.target));
-        result
+        self.apply_gate.read(|| {
+            let guard = self.indexes.get_outgoing(source);
+            let mut result = Vec::with_capacity(guard.capacity_hint());
+            result.extend(guard.iter().map(|entry| entry.target));
+            result
+        })
     }
 
     /// Get target node IDs from outgoing edges with a specific label.
@@ -2289,15 +2728,17 @@ impl CurrentStorage {
             None => return Vec::new(),
         };
         // Optimized to avoid intermediate Vec allocation and pre-allocate result
-        let guard = self.indexes.get_outgoing(source);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(
-            guard
-                .iter()
-                .filter(|entry| entry.label == label_id)
-                .map(|entry| entry.target),
-        );
-        result
+        self.apply_gate.read(|| {
+            let guard = self.indexes.get_outgoing(source);
+            let mut result = Vec::with_capacity(guard.capacity_hint());
+            result.extend(
+                guard
+                    .iter()
+                    .filter(|entry| entry.label == label_id)
+                    .map(|entry| entry.target),
+            );
+            result
+        })
     }
 
     /// Get source node IDs from incoming edges (used for traversal iterators).
@@ -2306,10 +2747,12 @@ impl CurrentStorage {
     /// Note: For incoming edges, the "target" field in AdjacencyEntry represents
     /// the source node (the node the edge is coming from).
     pub fn get_incoming_sources(&self, target: NodeId) -> Vec<NodeId> {
-        let guard = self.indexes.get_incoming(target);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(guard.iter().map(|entry| entry.target));
-        result
+        self.apply_gate.read(|| {
+            let guard = self.indexes.get_incoming(target);
+            let mut result = Vec::with_capacity(guard.capacity_hint());
+            result.extend(guard.iter().map(|entry| entry.target));
+            result
+        })
     }
 
     /// Get source node IDs from incoming edges with a specific label.
@@ -2319,15 +2762,17 @@ impl CurrentStorage {
             None => return Vec::new(),
         };
         // Optimized to avoid intermediate Vec allocation and pre-allocate result
-        let guard = self.indexes.get_incoming(target);
-        let mut result = Vec::with_capacity(guard.capacity_hint());
-        result.extend(
-            guard
-                .iter()
-                .filter(|entry| entry.label == label_id)
-                .map(|entry| entry.target),
-        );
-        result
+        self.apply_gate.read(|| {
+            let guard = self.indexes.get_incoming(target);
+            let mut result = Vec::with_capacity(guard.capacity_hint());
+            result.extend(
+                guard
+                    .iter()
+                    .filter(|entry| entry.label == label_id)
+                    .map(|entry| entry.target),
+            );
+            result
+        })
     }
 
     /// Get the number of vectors in the HNSW index.
@@ -2358,6 +2803,7 @@ impl CurrentStorage {
     ///
     /// Returns an iterator to avoid allocating a Vec for large graphs,
     /// improving memory efficiency during persistence operations.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn all_edges(&self) -> impl Iterator<Item = Edge> + '_ {
         self.indexes.iter_edges().map(|e| e.clone())
     }
@@ -2630,6 +3076,121 @@ impl Default for CurrentStorage {
 #[cfg(test)]
 mod tests;
 
+/// Issue #3788: the replica apply gate, exercised through `CurrentStorage`'s
+/// own surface rather than the gate primitive in isolation.
+#[cfg(test)]
+mod apply_gate_tests {
+    use super::*;
+    use crate::core::property::PropertyMapBuilder;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn node(id: u64, label: &str) -> Node {
+        Node::new(
+            NodeId::new(id).unwrap(),
+            GLOBAL_INTERNER.intern(label).unwrap(),
+            PropertyMapBuilder::new().insert("n", id as i64).build(),
+            VersionId::new(id).unwrap(),
+        )
+    }
+
+    #[test]
+    fn gate_starts_disarmed_and_arms_on_demand() {
+        let storage = CurrentStorage::new();
+        assert!(
+            !storage.apply_gate_armed(),
+            "a primary's current storage must not pay the gate"
+        );
+        storage.arm_apply_gate();
+        assert!(storage.apply_gate_armed());
+        storage.disarm_apply_gate();
+        assert!(!storage.apply_gate_armed());
+    }
+
+    #[test]
+    fn reads_still_work_inside_a_publish_window_on_the_publishing_thread() {
+        // The replay engine's #3419 idempotency guards call `get_node` from
+        // inside the window; without re-entrancy this would deadlock.
+        let storage = CurrentStorage::new();
+        storage.arm_apply_gate();
+
+        let _publish = storage.begin_apply_publish();
+        let ts = crate::core::temporal::time::now();
+        storage.insert_node_direct(node(1, "Person"), ts).unwrap();
+        assert!(storage.get_node(NodeId::new(1).unwrap()).is_ok());
+        assert!(storage.contains_node(1));
+    }
+
+    /// The failure this issue reports: a two-node "transaction" applied one
+    /// operation at a time must never be observed half-present.
+    ///
+    /// Writes are append-only (each round publishes a fresh pair), so presence
+    /// is monotone and the pair's two reads can be taken independently -- the
+    /// same shape the `torn_frame_safety_*` integration tests observe. Seeing
+    /// the *later* node of a pair without its *earlier* one means the reader
+    /// caught the publish mid-flight.
+    #[test]
+    fn concurrent_reads_never_observe_half_of_a_published_batch() {
+        const ROUNDS: u64 = 400;
+
+        let storage = Arc::new(CurrentStorage::new());
+        storage.arm_apply_gate();
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let publisher = {
+            let (storage, stop) = (Arc::clone(&storage), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let ts = crate::core::temporal::time::now();
+                for k in 0..ROUNDS {
+                    let _publish = storage.begin_apply_publish();
+                    storage
+                        .insert_node_direct(node(2 * k + 1, "Person"), ts)
+                        .unwrap();
+                    std::thread::yield_now();
+                    storage
+                        .insert_node_direct(node(2 * k + 2, "Person"), ts)
+                        .unwrap();
+                }
+                stop.store(true, Ordering::SeqCst);
+            })
+        };
+
+        let readers: Vec<_> = (0..3)
+            .map(|_| {
+                let (storage, stop) = (Arc::clone(&storage), Arc::clone(&stop));
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::SeqCst) {
+                        for k in 0..ROUNDS {
+                            // Read in PUBLISH order. Ungated, a reader landing
+                            // between the two inserts sees (true, false). Gated,
+                            // `first` can only be true once the whole window has
+                            // closed -- at which point `second`, read strictly
+                            // later, must be true as well.
+                            let first = storage.contains_node(2 * k + 1);
+                            let second = storage.contains_node(2 * k + 2);
+                            assert!(
+                                !first || second,
+                                "a gated read observed half of an atomically published batch \
+                                 (round {k}: first present, second missing)"
+                            );
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        publisher.join().expect("publisher");
+        for reader in readers {
+            reader.join().expect("reader");
+        }
+
+        for k in 0..ROUNDS {
+            assert!(storage.contains_node(2 * k + 1));
+            assert!(storage.contains_node(2 * k + 2));
+        }
+    }
+}
+
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
@@ -2649,5 +3210,223 @@ mod coverage_tests {
         let result = storage.find_similar_in("embedding", node_id, 5);
         assert!(result.is_err());
         assert!(format!("{}", result.unwrap_err()).contains("Vector index not found"));
+    }
+}
+
+/// Issue #3621: WAL replay reruns `update_node_direct`, so the corrected
+/// temporal de-indexing must reconstruct the right point-in-time state after a
+/// crash-recovery replay. These tests drive `insert_node_direct` /
+/// `update_node_direct` — the exact entry points recovery calls at
+/// `storage/recovery.rs` (`current.insert_node_direct` / `current.update_node_direct`)
+/// — with a temporal vector index enabled, then trigger snapshots via
+/// `on_temporal_vector_transaction` (the same hook the commit path fires). A
+/// true open→reopen test cannot cover this: the temporal vector index is an
+/// in-memory index whose config is not persisted, so replay only repopulates it
+/// when it is re-enabled beforehand — which is precisely what exercising the
+/// replay entry points here simulates.
+#[cfg(test)]
+mod deindex_replay_tests {
+    use super::*;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::core::temporal::time;
+    use crate::index::vector::DistanceMetric;
+
+    fn temporal_config() -> TemporalVectorConfig {
+        use crate::index::vector::temporal::{RetentionPolicy, SnapshotStrategy};
+        TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(100),
+            max_snapshots: 100,
+            full_snapshot_interval: 5,
+            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+        }
+    }
+
+    fn node(id: u64, version: u64, props: PropertyMap) -> Node {
+        let label = GLOBAL_INTERNER.intern("Doc").unwrap();
+        Node::new(
+            NodeId::new(id).unwrap(),
+            label,
+            props,
+            VersionId::new(version).unwrap(),
+        )
+    }
+
+    fn advance() {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+
+    /// Replaying a create followed by a vector-property removal through the
+    /// direct (WAL-replay) methods leaves the temporal index de-indexed at the
+    /// current time while an earlier snapshot still finds the vector.
+    #[test]
+    fn replay_remove_vector_deindexes_current_but_preserves_history() {
+        let storage = CurrentStorage::new();
+        storage
+            .enable_temporal_vector_index("embedding", temporal_config())
+            .unwrap();
+
+        // Replay: create a node with an embedding (recovery.rs -> insert_node_direct).
+        let target_id = NodeId::new(1).unwrap();
+        let create_props = PropertyMapBuilder::new()
+            .insert("name", "target")
+            .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+            .build();
+        let t1 = time::now();
+        storage
+            .insert_node_direct(node(1, 1, create_props), t1)
+            .unwrap();
+        storage.on_temporal_vector_transaction().unwrap();
+
+        advance();
+        let t_before_remove = time::now();
+        advance();
+
+        // Replay: update the node, dropping the embedding (recovery.rs -> update_node_direct).
+        let removed_props = PropertyMapBuilder::new().insert("name", "target").build();
+        let t2 = time::now();
+        storage
+            .update_node_direct(node(1, 2, removed_props), t2)
+            .unwrap();
+        storage.on_temporal_vector_transaction().unwrap();
+
+        advance();
+        let t_after_remove = time::now();
+
+        let query = [1.0f32, 0.0, 0.0, 0.0];
+
+        // History preserved: the pre-removal snapshot still finds the target.
+        let historical = storage
+            .find_similar_as_of(&query, 10, t_before_remove)
+            .unwrap();
+        assert!(
+            historical.iter().any(|(id, _)| *id == target_id),
+            "replay must preserve the pre-removal snapshot, got {historical:?}"
+        );
+
+        // De-indexed now: the post-removal snapshot must NOT return the phantom.
+        let current = storage
+            .find_similar_as_of(&query, 10, t_after_remove)
+            .unwrap();
+        assert!(
+            !current.iter().any(|(id, _)| *id == target_id),
+            "replay through update_node_direct must de-index the removed vector, got {current:?}"
+        );
+    }
+
+    /// Replaying a create then an embedding overwrite reconstructs the new
+    /// vector at the current time and the old vector as-of the earlier snapshot.
+    ///
+    /// Regression lock, not a fix discriminator: this `Some -> Some` overwrite
+    /// already reconstructs correctly on trunk (the add-only temporal helper
+    /// upserted on overwrite). The fix-discriminating replay guard is
+    /// `replay_remove_vector_deindexes_current_but_preserves_history` above (the
+    /// `Some -> None` removal that trunk's add-only helper leaked).
+    #[test]
+    fn replay_overwrite_vector_reconstructs_corrected_state() {
+        let storage = CurrentStorage::new();
+        storage
+            .enable_temporal_vector_index("embedding", temporal_config())
+            .unwrap();
+
+        let target_id = NodeId::new(1).unwrap();
+        let create_props = PropertyMapBuilder::new()
+            .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+            .build();
+        storage
+            .insert_node_direct(node(1, 1, create_props), time::now())
+            .unwrap();
+        storage.on_temporal_vector_transaction().unwrap();
+
+        advance();
+        let t_before = time::now();
+        advance();
+
+        let overwrite_props = PropertyMapBuilder::new()
+            .insert_vector("embedding", &[0.0f32, 1.0, 0.0, 0.0])
+            .build();
+        storage
+            .update_node_direct(node(1, 2, overwrite_props), time::now())
+            .unwrap();
+        storage.on_temporal_vector_transaction().unwrap();
+
+        advance();
+        let t_after = time::now();
+
+        // As-of before: old embedding ~identical to old query.
+        let before = storage
+            .find_similar_as_of(&[1.0f32, 0.0, 0.0, 0.0], 10, t_before)
+            .unwrap();
+        assert!(
+            before
+                .iter()
+                .find(|(id, _)| *id == target_id)
+                .is_some_and(|(_, s)| *s > 0.99),
+            "replay must reconstruct the old embedding as-of before, got {before:?}"
+        );
+
+        // As-of after: new embedding ~identical to new query; old region no longer matches.
+        let after_new = storage
+            .find_similar_as_of(&[0.0f32, 1.0, 0.0, 0.0], 10, t_after)
+            .unwrap();
+        assert!(
+            after_new
+                .iter()
+                .find(|(id, _)| *id == target_id)
+                .is_some_and(|(_, s)| *s > 0.99),
+            "replay must reconstruct the new embedding as-of after, got {after_new:?}"
+        );
+        let after_old = storage
+            .find_similar_as_of(&[1.0f32, 0.0, 0.0, 0.0], 10, t_after)
+            .unwrap();
+        assert!(
+            after_old
+                .iter()
+                .find(|(id, _)| *id == target_id)
+                .is_none_or(|(_, s)| *s < 0.1),
+            "replay must drop the old embedding region after overwrite, got {after_old:?}"
+        );
+    }
+
+    /// Regression for the Gemini review on PR #3632: an `UpdateNode` replayed
+    /// against a node ABSENT from the (lagging) current-state index — the
+    /// `old_props == None` create-through-update branch of `update_node_direct`
+    /// — must index the vector into the current-state HNSW too, not only the
+    /// temporal index. Otherwise the vector is invisible to current-state
+    /// `find_similar` after recovery. Mirrors `insert_node_direct`, which
+    /// indexes both.
+    #[test]
+    fn update_create_path_indexes_current_state_hnsw() {
+        let storage = CurrentStorage::new();
+        // Current-state (non-temporal) vector index enabled; temporal one too,
+        // to exercise the exact fan-out the create-through-update branch runs.
+        storage
+            .enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+            .unwrap();
+        storage
+            .enable_temporal_vector_index("embedding", temporal_config())
+            .unwrap();
+
+        // Drive update_node_direct on a node that was NEVER inserted, so
+        // old_props resolves to None (the create-through-update / lagging-replay
+        // path). This is exactly `current.update_node_direct(...)` at
+        // recovery.rs when the create was already truncated past the snapshot.
+        let target_id = NodeId::new(1).unwrap();
+        let props = PropertyMapBuilder::new()
+            .insert("name", "target")
+            .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+            .build();
+        storage
+            .update_node_direct(node(1, 1, props), time::now())
+            .unwrap();
+
+        // The node must now be findable via the CURRENT-STATE HNSW.
+        let results = storage
+            .find_similar_by_embedding(&[1.0f32, 0.0, 0.0, 0.0], 10)
+            .unwrap();
+        assert!(
+            results.iter().any(|(id, _)| *id == target_id),
+            "create-through-update must index the current-state HNSW, got {results:?}"
+        );
     }
 }

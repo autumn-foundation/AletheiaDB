@@ -98,6 +98,7 @@ enabled = true
 data_dir = "data/production"
 load_on_startup = true
 use_mmap = true
+max_interned_strings = 10000000
 ```
 
 ```rust
@@ -181,6 +182,21 @@ max_batch_size = 1000
 | `segments_to_retain` | usize | 10 | Number of old segments to keep |
 | `flush_interval_ms` | u64 | 100 | Flush interval for async modes (ms) |
 | `durability_mode` | DurabilityMode | Synchronous | Durability mode (see above) |
+| `max_append_block_ms` | u64 | 30_000 | Bound on how long one append call blocks on a full ring buffer before failing with a diagnosable error; `0` = unbounded (legacy). Stall detection, not a latency SLA (Issue #3798) |
+| `acquire_timeout_ms` | u64 | 120_000 | Bound on acquiring the group-commit coordinator's state mutex; `0` = unbounded (legacy). Deadlock detection, not an SLA; only meaningful for `GroupCommit`/`AsyncBatched` (Issue #3798) |
+
+Both `max_append_block_ms` and `acquire_timeout_ms` are settable in TOML under
+`[wal]` and via `WalConfigBuilder::max_append_block_ms` /
+`WalConfigBuilder::acquire_timeout_ms`:
+
+```toml
+[wal]
+max_append_block_ms = 30000    # 0 = unbounded (legacy)
+acquire_timeout_ms = 120000    # 0 = unbounded (legacy)
+```
+
+See [WAL.md](WAL.md#stall-diagnosability-issue-3798) for what each bound
+detects and how the failures read.
 
 **Validation:**
 - `num_stripes` must be > 0 and a power of 2
@@ -217,7 +233,87 @@ max_batch_size = 1000
 | `data_dir` | PathBuf | "data" | Directory for index files (cwd-relative placeholder; always set explicitly when enabling) |
 | `load_on_startup` | bool | true | Load indexes on startup (only applies when enabled) |
 | `use_mmap` | bool | true | Use memory-mapped loading |
+| `max_interned_strings` | usize | 10000000 | Max unique interned strings (DoS bound); read at `open()`, so changing it requires a restart |
 | `policies` | PersistencePolicies | Default | Automatic persistence policies |
+
+> **String interner cap (`max_interned_strings`).** AletheiaDB interns every
+> distinct node/edge **label**, property **key**, and string property **value**
+> into a process-global table mapping each unique string to a compact `u32` id.
+> `max_interned_strings` bounds how many unique strings that table may hold —
+> a DoS guard against unbounded memory growth from adversarial or runaway
+> high-cardinality data.
+>
+> **It is a COUNT cap, not a memory cap.** It bounds the number of *entries*, not
+> bytes. Each entry costs roughly **~100 bytes** of map/pointer overhead **plus
+> the string's own bytes**, so for short identifiers the default of
+> **10,000,000** sits around **~1–1.6 GB** — but that is a *typical-case*
+> estimate, not a ceiling. Worst-case interner memory is
+> `count × (per-entry overhead + string bytes)`, and the string bytes are bounded
+> only by the per-string cap (`MAX_STRING_LENGTH`, 10 MB) and the persisted-file
+> size cap — so an adversarial worst case is `count × 10 MB`, far above ~1 GB.
+> The count cap is paired with those per-string and file-size caps; a precise
+> total-**byte** budget is a deliberate future alternative (deferred: it would add
+> a running-total atomic to the lock-free intern fast path).
+>
+> This one knob drives **both** the runtime intern cap and the persisted
+> interner's load-validation cap. Note the load-validation bound is a **floor**:
+> the effective load cap is `max(10M, max_interned_strings)`, so a configured cap
+> only ever **raises** the load bound above the 10M floor — a configured value
+> *below* 10M does not lower it (a grown database still reopens). It is read once
+> at **`open()`**, so **changing it requires a restart** (there is no hot-reload).
+> Valid range: at least **1** (a cap of `0` is rejected at `open()` — it would
+> refuse all interning and brick the database); values at or above `u32::MAX` are
+> clamped to `u32::MAX`, since interner ids are 32-bit and a higher cap is
+> unreachable.
+>
+> **Precedence.** The `ALETHEIADB_MAX_INTERNED_STRINGS` environment variable only
+> takes effect on the **embedded/ephemeral** path (`AletheiaDB::new()` or direct
+> `GLOBAL_INTERNER` use *without* opening a database): it seeds the process-global
+> interner at first access. On the `open()` / `with_unified_config` path the
+> **config field is authoritative** and effectively overrides the env var,
+> because the config field always carries a value (defaulting to 10M) and is
+> applied at `open()`. So the practical precedence is: on `open()`, config wins;
+> without `open()`, the env seed applies.
+>
+> **Multi-database semantics (process-global, Issue #3724).** The interner and its
+> cap are **process-global** — there is exactly one interner shared by every
+> database opened in the process, so there is exactly one effective cap. Rather
+> than last-open-wins (which would let a database opened *later* with a **lower**
+> cap refuse new interns on an **earlier**-opened database), the effective cap is a
+> **max-of-all-opens high-water mark**: the **first** `open()` establishes the
+> baseline (so a single database can still set a deliberately low DoS bound, even
+> below the 10M default), and each **subsequent** `open()` may only ever **raise**
+> the shared cap toward `max(current, requested)` — **never lower it**. A later,
+> lower requested cap is therefore **not applied** (a loud warning naming
+> `persistence.max_interned_strings` is emitted) so it can never shrink an
+> already-open database's write headroom. The honest tradeoff: in a multi-database
+> process the shared DoS bound is the **maximum** of the requested caps (weaker
+> isolation), never the minimum; writes are never broken, only the DoS ceiling
+> relaxes upward. Existing ids are never evicted or renumbered. Prefer a single
+> uniform cap across all databases in one process. (A truly per-database cap would
+> require a per-database interner and is out of scope.)
+>
+> This applies to **any** subsequent `open()` in the process, not only concurrent
+> multi-database use: even a **single** database opened, dropped, and reopened in
+> the same process with a *lower* cap keeps the higher established cap (and logs
+> the warning) — the high-water mark spans the whole process lifetime. To apply a
+> lower cap, use a fresh process.
+>
+> **When the cap is hit**, the write that would exceed it fails immediately with
+> a `FAILED_PRECONDITION` error (MCP and HTTP) whose message names
+> `persistence.max_interned_strings`; a background index-persist that hits it
+> logs one actionable line and **suspends** that index's background persistence
+> until restart. **No data is lost** in either case — the WAL is the source of
+> truth; only the on-disk index snapshot goes stale. To recover: raise
+> `persistence.max_interned_strings` above the reported limit and **restart**.
+>
+> ```toml
+> [persistence]
+> enabled = true
+> data_dir = "data/production"
+> # Raise the interner cap for a very large, high-cardinality dataset.
+> max_interned_strings = 50000000
+> ```
 
 > **Note (Issue #3388):** Index persistence is opt-in. Before this change,
 > `PersistenceConfig::default()` had `enabled: true` with the cwd-relative
@@ -257,6 +353,48 @@ PersistenceConfig {
     use_mmap: true,
 }
 ```
+
+### Cold Storage (Redb) Configuration
+
+The optional on-disk cold tier (`RedbColdStorage`, configured via `RedbConfig`)
+holds unlimited bi-temporal history. It is constructed directly rather than
+through the unified config (see the tiered-storage guide).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `compression` | CompressionAlgorithm | Zstd | Compression algorithm for stored values |
+| `enable_checksums` | bool | true | Application-level CRC32 checksums on compressed payloads (on top of Redb's own) |
+| `cache_size_bytes` | usize | 0 | Redb internal cache size in bytes (0 = Redb default) |
+| `reencrypt_batch_size` | usize | 4096 | Cold-tier rotation re-encrypt batch size: `(key, value)` pairs re-encrypted per redb write transaction during a key-rotation bulk pass (Issue #3617 PR3) |
+
+**`reencrypt_batch_size` trade-off:** the bulk re-encrypt pass that rewraps
+every cold value under a rotated key runs in bounded, cursor-resumable
+transactions of this many values each. A **larger** value amortizes commit cost
+(fewer, larger transactions → faster) at the price of longer write-transaction
+holds, more per-transaction memory, and a longer crash-replay window; a
+**smaller** value resumes at finer granularity and uses less memory but commits
+more often. A value of `0` would make no forward progress, so it is floored to
+`1` (both at the `RedbConfig::with_reencrypt_batch_size` setter and the read
+site). This is a **runtime knob only** — it does not affect the on-disk format.
+
+```rust
+use aletheiadb::storage::redb_cold_storage::RedbConfig;
+
+// Smaller batches: lower memory + finer-grained rotation resume.
+let config = RedbConfig::new().with_reencrypt_batch_size(512);
+```
+
+### Tiered Storage (Hot/Warm/Cold) Configuration
+
+`TieredStorageConfig` tunes the warm cache, version-chain prefetch, and the
+in-memory cold changefeed directory that backs the `list_changes` cold-tier
+pushdown (see the tiered-storage guide).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `warm_cache_size` | usize | 10,000 | Warm-cache entries retained per version type |
+| `prefetch_depth` | usize | 5 | Maximum versions prefetched along a version chain |
+| `cold_change_directory_max_entries` | usize | 1,000,000 | Memory budget (entry count) for the in-memory cold changefeed directory (each entry ≈ one `ChangeCursor`, ~5 machine words → ~40-50 MB at the default); `0` disables it so every cold `list_changes` scan degrades to the full scan (Issue #3677) |
 
 ## Configuration Presets
 
@@ -371,7 +509,7 @@ Enable TOML configuration file support:
 
 ```toml
 [dependencies]
-aletheiadb = "0.1.0"  # config-toml enabled by default
+aletheiadb = "0.2"  # config-toml enabled by default
 ```
 
 **Adds:**
@@ -388,7 +526,7 @@ aletheiadb = "0.1.0"  # config-toml enabled by default
 
 ```toml
 [dependencies]
-aletheiadb = { version = "0.1.0", default-features = false }
+aletheiadb = { version = "0.2.0", default-features = false }
 ```
 
 This reduces compile time and binary size when only using programmatic configuration.
@@ -463,8 +601,45 @@ HistoricalConfigBuilder::new()
     .reconstruction_cache_size(1000).unwrap()
 ```
 
+## MCP Server Resource Limits
+
+The MCP server (`AletheiaMcpServer`) exposes builder-style knobs that bound
+per-call resource usage, guarding the surface against denial-of-service from
+untrusted callers. All have safe defaults and are optional.
+
+| Knob | Default | Purpose |
+|------|---------|---------|
+| `with_max_batch_operations(n)` | 1000 | Max operations accepted by one `apply_batch` call (Issue #3231). |
+| `with_max_designate_targets(n)` | 1000 | Max targets accepted by one `designate_subject` call (Issue #3701). |
+| `with_cursor_config(ttl, max_live_cursors)` | 5 min, 128 | Continuation-cursor TTL and per-connection live-cursor cap (Issue #3360). |
+| `with_max_priority_properties(n)` | 1024 | Max entries in a token-budget `priority_properties` array (Issue #3583). |
+
+### `with_max_priority_properties` (Issue #3583)
+
+The token-budget parameter `priority_properties` (Issue #3353) names the
+property keys a budgeted read protects from elision. It is consulted for every
+property of every returned entity while the response is shaped. Left unbounded,
+a caller could pass an array with hundreds of thousands of entries, turning
+response shaping into multi-second blocking CPU. The per-key lookup is O(1)
+(backed by a `HashSet`), and an array longer than this cap is rejected up front
+with a structured `INVALID_ARGUMENT` error naming the cap and the given length
+(so re-issuing under the cap succeeds), keeping the one-time validation cost
+bounded as well.
+
+```rust
+use std::sync::Arc;
+use aletheiadb::AletheiaDB;
+use aletheiadb::mcp::AletheiaMcpServer;
+
+let db = Arc::new(AletheiaDB::new()?);
+// Tighten the priority_properties cap from the default 1024 to 64.
+let server = AletheiaMcpServer::new(db).with_max_priority_properties(64);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 ## References
 
 - [WAL Documentation](WAL.md) - Write-ahead log internals
 - [Index Persistence Guide](guides/index-persistence-guide.md) - Index persistence details
 - [Architecture Documentation](ARCHITECTURE.md) - System architecture
+- [MCP Query Tool Guide](guides/mcp-query-tool.md) - Token budgets, cursors, and MCP resource limits

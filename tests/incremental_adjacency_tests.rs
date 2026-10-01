@@ -6,6 +6,7 @@
 use aletheiadb::core::id::{EdgeId, NodeId};
 use aletheiadb::core::interning::GLOBAL_INTERNER;
 use aletheiadb::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
+use aletheiadb::index::adjacency_maintenance::AdjacencyMaintenanceConfig;
 use aletheiadb::index::incremental_adjacency::{
     CompactionScheduler, IncrementalAdjacencyIndex, IncrementalConfig,
 };
@@ -931,12 +932,29 @@ mod phase5_background_compaction {
             attempts += 1;
         }
 
-        // Should now compact
-        assert_eq!(index.delta_edge_count(), 0);
-        assert_eq!(index.frozen_edge_count(), 15);
+        // Loose lower-bound while the background thread may still be mid-compaction:
+        // frozen_edge_count and delta_edge_count are independent Relaxed atomics with no
+        // synchronization edge between them, so an exact assert here can observe a
+        // stale-nonzero delta while frozen has already reached 15. Passing it proves the
+        // resumed background thread compacted on its own BEFORE we quiesce it below.
+        // Note `>= 15` is effectively `== 15` here: exactly 15 distinct edges are inserted,
+        // so frozen can never exceed 15 -- the loose bound cannot pass while under-compacted.
+        assert!(
+            index.frozen_edge_count() >= 15,
+            "Compaction should have frozen all edges after resume within {} attempts",
+            attempts
+        );
 
+        // Join the background thread before the exact-count asserts. shutdown() forces a
+        // final drain and join() synchronizes-with thread termination, establishing the
+        // happens-before edge so delta/frozen are read as a consistent fully-drained
+        // snapshot instead of racing a mid-compaction store.
         scheduler.shutdown();
         handle.join().unwrap();
+
+        // Deterministic exact state, post-join (fully drained).
+        assert_eq!(index.delta_edge_count(), 0);
+        assert_eq!(index.frozen_edge_count(), 15);
     }
 
     // Step 5.7 GREEN: Test graceful shutdown
@@ -1045,15 +1063,33 @@ mod phase5_background_compaction {
             attempts += 1;
         }
 
-        // Verify normal compaction worked after panic
-        assert_eq!(index.delta_edge_count(), 0);
-        assert_eq!(index.frozen_edge_count(), 12);
+        // Loose lower-bound while the background thread may still be mid-compaction:
+        // frozen_edge_count and delta_edge_count are independent Relaxed atomics with no
+        // synchronization edge between them, so an exact assert here can observe a
+        // stale-nonzero delta while frozen has already reached 12. Passing it proves the
+        // recovered background thread compacted on its own BEFORE we quiesce it below.
+        // Note `>= 12` is effectively `== 12` here: exactly 12 distinct edges are inserted,
+        // so frozen can never exceed 12 -- the loose bound cannot pass while under-compacted.
+        assert!(
+            index.frozen_edge_count() >= 12,
+            "Background compaction should have recovered and frozen all edges after {} attempts",
+            attempts
+        );
 
-        // Panic count should still be 1 (no new panics)
+        // Panic count is a one-shot injected panic; it is coherent under the spin-poll
+        // above (the recovered thread never re-panics), so it can be checked here.
         assert_eq!(scheduler.panic_count(), 1);
 
+        // Join the background thread before the exact-count asserts. shutdown() forces a
+        // final drain and join() synchronizes-with thread termination, establishing the
+        // happens-before edge so delta/frozen are read as a consistent fully-drained
+        // snapshot instead of racing a mid-compaction store.
         scheduler.shutdown();
         handle.join().unwrap();
+
+        // Deterministic exact state, post-join (fully drained).
+        assert_eq!(index.delta_edge_count(), 0);
+        assert_eq!(index.frozen_edge_count(), 12);
     }
 
     // Step 5.11: Test shutdown triggers final compaction for remaining items
@@ -1325,7 +1361,11 @@ mod phase7_persistence_integration {
     // Step 7.1: Test delta reconstruction after import
     #[test]
     fn test_delta_reconstruction_after_import() {
-        let indexes = CurrentIndexes::new();
+        // Background maintenance disabled (Issue #3810): this test asserts on
+        // the exact frozen/delta split on both the exporting and the importing
+        // index, which a background compaction is entitled to change.
+        let indexes =
+            CurrentIndexes::with_maintenance_config(AdjacencyMaintenanceConfig::disabled());
         let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
         // Insert 10 edges
@@ -1362,7 +1402,8 @@ mod phase7_persistence_integration {
         let (in_nodes, in_offsets, in_edges) = indexes.export_incoming_csr();
 
         // Create new indexes and import
-        let new_indexes = CurrentIndexes::new();
+        let new_indexes =
+            CurrentIndexes::with_maintenance_config(AdjacencyMaintenanceConfig::disabled());
 
         // Copy edges to new indexes (simulating persistence loading)
         // In real persistence, edges would be loaded from disk
@@ -1430,7 +1471,8 @@ mod phase7_persistence_integration {
         let (out_nodes, out_offsets, out_edges) = indexes.export_outgoing_csr();
         let (in_nodes, in_offsets, in_edges) = indexes.export_incoming_csr();
 
-        let new_indexes = CurrentIndexes::new();
+        let new_indexes =
+            CurrentIndexes::with_maintenance_config(AdjacencyMaintenanceConfig::disabled());
         // Copy all edges using public API (simulating persistence loading)
         let max_edge_id = 100; // Large enough to cover all tests
         for i in 0..max_edge_id {
@@ -1467,7 +1509,11 @@ mod phase7_persistence_integration {
     // Step 7.5: Test delta reconstruction with multiple nodes
     #[test]
     fn test_delta_reconstruction_multiple_nodes() {
-        let indexes = CurrentIndexes::new();
+        // Background maintenance disabled (Issue #3810): this test asserts on
+        // the exact frozen/delta split on both the exporting and the importing
+        // index, which a background compaction is entitled to change.
+        let indexes =
+            CurrentIndexes::with_maintenance_config(AdjacencyMaintenanceConfig::disabled());
         let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
         // Insert edges for nodes 0, 1, 2
@@ -1509,7 +1555,8 @@ mod phase7_persistence_integration {
         let (out_nodes, out_offsets, out_edges) = indexes.export_outgoing_csr();
         let (in_nodes, in_offsets, in_edges) = indexes.export_incoming_csr();
 
-        let new_indexes = CurrentIndexes::new();
+        let new_indexes =
+            CurrentIndexes::with_maintenance_config(AdjacencyMaintenanceConfig::disabled());
         // Copy all edges using public API (simulating persistence loading)
         let max_edge_id = 100; // Large enough to cover all tests
         for i in 0..max_edge_id {
@@ -1575,7 +1622,8 @@ mod phase7_persistence_integration {
         let (out_nodes, out_offsets, out_edges) = indexes.export_outgoing_csr();
         let (in_nodes, in_offsets, in_edges) = indexes.export_incoming_csr();
 
-        let new_indexes = CurrentIndexes::new();
+        let new_indexes =
+            CurrentIndexes::with_maintenance_config(AdjacencyMaintenanceConfig::disabled());
         // Copy all edges using public API (simulating persistence loading)
         let max_edge_id = 100; // Large enough to cover all tests
         for i in 0..max_edge_id {

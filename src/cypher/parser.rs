@@ -168,6 +168,48 @@ impl CypherParser {
         }
     }
 
+    /// Whether the current token (case-insensitively) is the bare identifier
+    /// `kw`.
+    ///
+    /// Used for the namespace-clause contextual keywords (`USE` / `NAMESPACE` /
+    /// `NAMESPACES` / `ALL`, Issue #3349). Like `EXPLAIN` / `PROFILE`, these are
+    /// **not** reserved words: they lex as [`TokenKind::Identifier`] and must
+    /// stay usable as variables / labels / relationship types / property keys
+    /// everywhere else. They are interpreted as keywords only in the prefix
+    /// position, by inspecting the token *text* here. (`IN`, the synonym for the
+    /// leading `USE`, is a genuine reserved [`TokenKind::In`] and is matched by
+    /// kind, not text.)
+    fn check_contextual_kw(&self, kw: &str) -> bool {
+        let tok = self.peek();
+        tok.kind == TokenKind::Identifier && tok.text.eq_ignore_ascii_case(kw)
+    }
+
+    /// Assert that the current token is the contextual keyword `kw`, consume it,
+    /// and return `Ok(())`; otherwise a structured parse error.
+    fn expect_contextual_kw(&mut self, kw: &str) -> Result<(), CypherError> {
+        if self.check_contextual_kw(kw) {
+            self.advance();
+            Ok(())
+        } else {
+            Err(self.error(&format!("expected `{kw}`, found {:?}", self.peek().kind)))
+        }
+    }
+
+    /// Whether the current token starts a temporal prefix clause
+    /// (`AS OF` / `FOR VALID_TIME|SYSTEM_TIME` / `BETWEEN`).
+    fn at_temporal_start(&self) -> bool {
+        matches!(
+            self.peek().kind,
+            TokenKind::As | TokenKind::For | TokenKind::Between
+        )
+    }
+
+    /// Whether the current token starts a namespace prefix clause
+    /// (`USE ...` contextual, or the `IN ...` reserved synonym, Issue #3349).
+    fn at_namespace_start(&self) -> bool {
+        self.at(TokenKind::In) || self.check_contextual_kw("USE")
+    }
+
     /// Build a [`CypherError::ParseError`] at the current token position.
     fn error(&self, message: &str) -> CypherError {
         CypherError::ParseError {
@@ -215,11 +257,36 @@ impl CypherParser {
             });
         }
 
-        // Check for leading temporal clause (AS OF / FOR / BETWEEN).
-        let temporal = self.try_parse_temporal()?;
+        // Parse the cross-cutting prefix clauses (Issue #3349). The temporal
+        // (`AS OF` / `FOR` / `BETWEEN`) and namespace (`USE / IN NAMESPACE`)
+        // clauses are both prefixes and may appear in either order; at most one
+        // of each is allowed (a duplicate of either is a structured parse error
+        // rather than a silent last-wins). This mirrors the AQL prefix loop.
+        let mut temporal = None;
+        let mut namespace: Option<CypherNamespaceClause> = None;
+        loop {
+            if self.at_temporal_start() {
+                if temporal.is_some() {
+                    return Err(self.error(
+                        "duplicate temporal clause; only one AS OF / FOR / BETWEEN is allowed",
+                    ));
+                }
+                temporal = self.try_parse_temporal()?;
+            } else if self.at_namespace_start() {
+                if namespace.is_some() {
+                    return Err(self.error(
+                        "duplicate namespace clause; only one USE / IN NAMESPACE is allowed",
+                    ));
+                }
+                namespace = Some(self.parse_namespace_clause()?);
+            } else {
+                break;
+            }
+        }
 
         // A standalone `UNWIND ... AS ... RETURN ...` statement (Issue #559).
-        // A leading temporal clause has no meaning for a listless UNWIND, so
+        // Neither a temporal nor a namespace prefix has meaning for a listless
+        // UNWIND (it expands a scalar list, reading no graph entities), so
         // reject the combination rather than silently ignoring the qualifier.
         if self.at(TokenKind::Unwind) {
             if temporal.is_some() {
@@ -227,34 +294,49 @@ impl CypherParser {
                     "a temporal clause (AS OF / FOR / BETWEEN) cannot precede a standalone UNWIND",
                 ));
             }
+            if namespace.is_some() {
+                return Err(self.error(
+                    "a namespace clause (USE / IN NAMESPACE) cannot precede a standalone UNWIND; \
+                     UNWIND expands a scalar list and reads no namespaced graph entities",
+                ));
+            }
             return self.parse_unwind();
         }
 
-        // A statement that opens directly with `CREATE` is a write statement
-        // with no reading part (Issue #560). A leading temporal clause has no
-        // meaning for a write, so reject the combination rather than silently
-        // dropping the qualifier.
-        if self.at(TokenKind::Create) {
+        // A statement that opens directly with `CREATE` / `MERGE` is a write
+        // statement with no reading part (Issue #560). A temporal prefix has no
+        // meaning for a write; a *restricting* namespace read scope cannot be
+        // applied to a mutation (fail-closed, Issue #3349) -- both are rejected
+        // rather than silently dropped. A non-restricting `USE ALL NAMESPACES`
+        // imposes no filter, so it is a harmless no-op and is dropped.
+        if self.at(TokenKind::Create) || self.at(TokenKind::Merge) {
             if temporal.is_some() {
                 return Err(self.error(
-                    "a temporal clause (AS OF / FOR / BETWEEN) cannot precede a CREATE statement",
+                    "a temporal clause (AS OF / FOR / BETWEEN) cannot precede a CREATE or MERGE \
+                     statement",
                 ));
             }
+            self.reject_restricting_namespace_on_write(&namespace)?;
             return self.parse_write_statement(None);
         }
 
         // Now expect a MATCH (or OPTIONAL MATCH), which may turn out to be the
         // reading part of a write statement (`MATCH ... SET/DELETE/CREATE ...`).
-        let stmt = self.parse_match(temporal)?;
+        let stmt = self.parse_match(temporal, namespace)?;
         Ok(stmt)
     }
 
     /// Returns `true` if the current token starts a write clause
-    /// (`CREATE` / `SET` / `DELETE` / `DETACH DELETE`), Issue #560.
+    /// (`CREATE` / `MERGE` / `SET` / `DELETE` / `DETACH DELETE`),
+    /// Issues #560 and #3548.
     fn at_write_clause(&self) -> bool {
         matches!(
             self.peek().kind,
-            TokenKind::Create | TokenKind::Set | TokenKind::Delete | TokenKind::Detach
+            TokenKind::Create
+                | TokenKind::Merge
+                | TokenKind::Set
+                | TokenKind::Delete
+                | TokenKind::Detach
         )
     }
 
@@ -274,6 +356,16 @@ impl CypherParser {
                     self.advance();
                     let patterns = self.parse_pattern_list()?;
                     clauses.push(CypherWriteClause::Create(patterns));
+                }
+                TokenKind::Merge => {
+                    self.advance();
+                    let pattern = self.parse_pattern()?;
+                    let (on_create, on_match) = self.parse_merge_actions()?;
+                    clauses.push(CypherWriteClause::Merge {
+                        pattern,
+                        on_create,
+                        on_match,
+                    });
                 }
                 TokenKind::Set => {
                     self.advance();
@@ -302,7 +394,7 @@ impl CypherParser {
         }
 
         if clauses.is_empty() {
-            return Err(self.error("expected a write clause (CREATE / SET / DELETE)"));
+            return Err(self.error("expected a write clause (CREATE / MERGE / SET / DELETE)"));
         }
 
         let return_clause = if self.at(TokenKind::Return) {
@@ -359,6 +451,39 @@ impl CypherParser {
         Ok(items)
     }
 
+    /// Parse zero or more `ON CREATE SET <items>` / `ON MATCH SET <items>`
+    /// sub-clauses following a `MERGE` pattern (Issue #3548). Returns the
+    /// accumulated `(on_create, on_match)` set items in source order.
+    ///
+    /// Repeated `ON CREATE` / `ON MATCH` sub-clauses accumulate. A malformed
+    /// sub-clause (`ON` not followed by `CREATE`/`MATCH`, or a missing `SET`)
+    /// is a clean parse error.
+    fn parse_merge_actions(
+        &mut self,
+    ) -> Result<(Vec<CypherSetItem>, Vec<CypherSetItem>), CypherError> {
+        let mut on_create = Vec::new();
+        let mut on_match = Vec::new();
+        while self.at(TokenKind::On) {
+            self.advance();
+            match self.peek().kind {
+                TokenKind::Create => {
+                    self.advance();
+                    self.expect(TokenKind::Set)?;
+                    on_create.extend(self.parse_set_items()?);
+                }
+                TokenKind::Match => {
+                    self.advance();
+                    self.expect(TokenKind::Set)?;
+                    on_match.extend(self.parse_set_items()?);
+                }
+                _ => {
+                    return Err(self.error("expected CREATE or MATCH after ON in a MERGE clause"));
+                }
+            }
+        }
+        Ok((on_create, on_match))
+    }
+
     /// Parse the target variables of a `DELETE` / `DETACH DELETE` clause:
     /// `variable (',' variable)*`.
     fn parse_delete_targets(&mut self) -> Result<Vec<String>, CypherError> {
@@ -367,6 +492,81 @@ impl CypherParser {
             targets.push(self.expect(TokenKind::Identifier)?.text);
         }
         Ok(targets)
+    }
+
+    /// Parse a namespace read-scope prefix clause (`USE / IN NAMESPACE ...`,
+    /// Issue #3349). Mirrors the AQL `parse_namespace_clause`.
+    ///
+    /// ```text
+    /// namespace_clause := ("USE" | "IN") "ALL" "NAMESPACES"
+    ///                   | ("USE" | "IN") "NAMESPACE" ns_name ("," ns_name)*
+    /// ns_name          := string_literal | identifier
+    /// ```
+    ///
+    /// # Examples
+    /// - `USE NAMESPACE 'agent:planner'` (single)
+    /// - `USE NAMESPACE 'agent:planner', 'shared'` (union)
+    /// - `USE ALL NAMESPACES` (no filter)
+    /// - `IN NAMESPACE 'agent:planner'` (`IN` synonym for `USE`)
+    fn parse_namespace_clause(&mut self) -> Result<CypherNamespaceClause, CypherError> {
+        // Consume the leading keyword (reserved `IN`, or contextual `USE`).
+        if self.at(TokenKind::In) {
+            self.advance();
+        } else {
+            self.expect_contextual_kw("USE")?;
+        }
+
+        // `ALL NAMESPACES` -- the no-filter selector.
+        if self.check_contextual_kw("ALL") {
+            self.advance();
+            self.expect_contextual_kw("NAMESPACES")?;
+            return Ok(CypherNamespaceClause::All);
+        }
+
+        self.expect_contextual_kw("NAMESPACE")?;
+
+        let mut names = vec![self.parse_namespace_name()?];
+        while self.eat(TokenKind::Comma) {
+            names.push(self.parse_namespace_name()?);
+        }
+
+        Ok(CypherNamespaceClause::Names(names))
+    }
+
+    /// Parse a single namespace name: a string literal (the usual form, since
+    /// names carry `:` / `/` / `.` / `-`) or a bare identifier (for simple
+    /// names). Charset / length / reserved validation happens in the converter
+    /// via [`Namespace::new`](crate::core::namespace::Namespace::new).
+    fn parse_namespace_name(&mut self) -> Result<String, CypherError> {
+        match self.peek().kind {
+            TokenKind::StringLiteral | TokenKind::Identifier => Ok(self.advance().text.clone()),
+            _ => Err(self.error(
+                "expected a namespace name (a quoted string or identifier) after NAMESPACE",
+            )),
+        }
+    }
+
+    /// Reject a *restricting* namespace read scope that precedes a mutating
+    /// statement (fail-closed, Issue #3349). A restricting scope silently
+    /// dropped onto a write would widen the write's read set across namespaces
+    /// and leak other agents' facts, so it is a structured error. A
+    /// non-restricting `USE ALL NAMESPACES` (or the bare `all` selector) imposes
+    /// no filter and is a harmless no-op that is simply dropped.
+    fn reject_restricting_namespace_on_write(
+        &self,
+        namespace: &Option<CypherNamespaceClause>,
+    ) -> Result<(), CypherError> {
+        if namespace
+            .as_ref()
+            .is_some_and(CypherNamespaceClause::is_restricting)
+        {
+            return Err(CypherError::UnsupportedFeature(
+                "a namespace read scope cannot be applied to a mutating Cypher statement \
+                 (CREATE / MERGE / SET / DELETE); pass USE ALL NAMESPACES to run unscoped"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Parse a standalone `UNWIND <list> AS <var> RETURN ...` statement.
@@ -400,6 +600,7 @@ impl CypherParser {
     fn parse_match(
         &mut self,
         temporal: Option<CypherTemporal>,
+        namespace: Option<CypherNamespaceClause>,
     ) -> Result<CypherStatement, CypherError> {
         let optional = self.eat(TokenKind::OptionalMatch);
         self.expect(TokenKind::Match)?;
@@ -418,6 +619,12 @@ impl CypherParser {
         // qualifiers are not combinable with writes, so they fall through to the
         // read path (and a subsequent write clause would then be a parse error).
         if !optional && temporal.is_none() && self.at_write_clause() {
+            // A restricting namespace read scope cannot be applied to a mutation
+            // (fail-closed, Issue #3349); a non-restricting `USE ALL NAMESPACES`
+            // imposes no filter and is dropped. Rejected here (before the write
+            // clauses are parsed) rather than silently dropped, which would
+            // widen the write's read set and leak other namespaces.
+            self.reject_restricting_namespace_on_write(&namespace)?;
             let reading = CypherReadingClause {
                 pattern,
                 where_clause,
@@ -457,6 +664,7 @@ impl CypherParser {
             where_clause,
             return_clause,
             temporal,
+            namespace,
             with_clauses,
             optional_matches,
         })

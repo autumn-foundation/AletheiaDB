@@ -1,0 +1,13 @@
+[{:xt/id :alice
+  :history
+  [{:xtdb.api/valid-time #inst "2021-03-01T00:00:00Z" :xtdb.api/tx-time #inst "2021-03-01T09:00:00Z" :xtdb.api/tx-id 42
+    :xtdb.api/doc {:xt/id :alice :type "Person" :name "Alice" :title "Engineer" :employer :acme}}
+   {:xtdb.api/valid-time #inst "2023-01-01T00:00:00Z" :xtdb.api/tx-time #inst "2023-01-02T11:30:00Z" :xtdb.api/tx-id 99
+    :xtdb.api/doc {:xt/id :alice :type "Person" :name "Alice" :title "CEO" :employer :acme}}
+   {:xtdb.api/valid-time #inst "2024-06-01T00:00:00Z" :xtdb.api/tx-time #inst "2024-06-01T08:00:00Z" :xtdb.api/tx-id 150
+    :xtdb.api/doc nil}]}
+ {:xt/id :acme
+  :history
+  [{:xtdb.api/valid-time #inst "2020-01-01T00:00:00Z" :xtdb.api/tx-time #inst "2020-01-01T00:00:00Z" :xtdb.api/tx-id 1
+    :xtdb.api/content-hash #crux/id "deadbeef"
+    :xtdb.api/doc {:xt/id :acme :type "Company" :name "Acme Corp"}}]}]

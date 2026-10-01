@@ -4,6 +4,7 @@
 //! before acquiring the timestamp lock.  Returns an RAII `ReservationGuard`
 //! that auto-rolls back on drop if the commit fails later.
 
+use crate::core::changefeed::EntityKind;
 use crate::core::constraint::{ConstraintRegistry, ReservationGuard};
 use crate::core::error::ConstraintError;
 use crate::core::graph::Node;
@@ -25,6 +26,39 @@ pub(crate) fn check_constraints(
     tx: &WriteTransaction,
     registry: &Arc<ConstraintRegistry>,
 ) -> std::result::Result<ReservationGuard, ConstraintError> {
+    // Property type / required-key schema constraints (Issue #3378).
+    //
+    // Runs before the uniqueness reservation step and, like it, before the
+    // timestamp/WAL/apply phase, so a violation aborts the whole transaction
+    // with zero partial application. UpdateNode/UpdateEdge buffer the fully
+    // *merged* (effective) post-write property map (PATCH merge happens at
+    // buffer time), so the buffered map is exactly the state to validate — no
+    // re-merge with committed state is needed. Skipped entirely (zero cost)
+    // when no schema constraints are declared.
+    if !registry.schema_constraints_empty() {
+        for op in tx.buffer.operations() {
+            match op {
+                BufferedWrite::CreateNode {
+                    label, properties, ..
+                }
+                | BufferedWrite::UpdateNode {
+                    label, properties, ..
+                } => {
+                    registry.check_entity(EntityKind::Node, *label, properties)?;
+                }
+                BufferedWrite::CreateEdge {
+                    label, properties, ..
+                }
+                | BufferedWrite::UpdateEdge {
+                    label, properties, ..
+                } => {
+                    registry.check_entity(EntityKind::Edge, *label, properties)?;
+                }
+                _ => {}
+            }
+        }
+    }
+
     // Borrow property maps directly from the buffer to avoid cloning on the hot path.
     let mut added_refs: Vec<(InternedString, &PropertyMap, NodeId)> = Vec::new();
 
