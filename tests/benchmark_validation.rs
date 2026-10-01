@@ -56,15 +56,19 @@ fn test_anchor_creation_matches_benchmark_assumptions() {
 
     // Verify historical stats
     let stats = db.historical_stats().expect("Should get stats");
+    // Each update also stores a structural carry-forward of the superseded
+    // valid-time prefix (ADR-0061), and every stored version advances the
+    // anchor counter: 1 + 2 * 10 = 21 versions, anchors at chain positions
+    // 0, 10 and 20.
     assert_eq!(
-        stats.total_node_versions, 11,
-        "Should have 11 versions (initial + 10 updates)"
+        stats.total_node_versions, 21,
+        "Should have 21 versions (initial + 10 x (carry-forward + update))"
     );
     assert_eq!(
-        stats.node_anchor_count, 2,
-        "Should have 2 anchors (at updates 1 and 11)"
+        stats.node_anchor_count, 3,
+        "Should have 3 anchors (chain positions 0, 10, 20)"
     );
-    assert_eq!(stats.node_delta_count, 9, "Should have 9 deltas");
+    assert_eq!(stats.node_delta_count, 18, "Should have 18 deltas");
 
     // Query at anchor point using actual timestamp
     let at_10 = db
@@ -132,15 +136,17 @@ fn test_delta_reconstruction_produces_correct_state() {
 
     // Verify historical stats
     let stats = db.historical_stats().expect("Should get stats");
+    // 1 + 2 * 15 = 31 versions incl. structural carry-forwards (ADR-0061);
+    // anchors at chain positions 0, 10, 20, 30.
     assert_eq!(
-        stats.total_node_versions, 16,
-        "Should have 16 versions (initial + 15 updates)"
+        stats.total_node_versions, 31,
+        "Should have 31 versions (initial + 15 x (carry-forward + update))"
     );
     assert_eq!(
-        stats.node_anchor_count, 2,
-        "Should have 2 anchors (at updates 1 and 11)"
+        stats.node_anchor_count, 4,
+        "Should have 4 anchors (chain positions 0, 10, 20, 30)"
     );
-    assert_eq!(stats.node_delta_count, 14, "Should have 14 deltas");
+    assert_eq!(stats.node_delta_count, 27, "Should have 27 deltas");
 
     // Query at different time points using exact commit timestamps
     // This tests that temporal queries work correctly with the actual transaction_time
@@ -243,11 +249,14 @@ fn test_multiple_updates_same_transaction() {
     );
 
     // Verify historical stats
-    // Initial version (age absent) + 3 updates = 4 versions total
+    // Initial version (age absent) + 3 updates + ONE structural carry-forward
+    // (ADR-0061): the first update splits the initial version's valid
+    // interval; the later two share its valid_from (the tx start) and are
+    // degenerate replaces needing no carry-forward. 5 stored versions.
     let stats = db.historical_stats().expect("Should get stats");
     assert_eq!(
-        stats.total_node_versions, 4,
-        "Should have 4 versions (initial + 3 updates in same tx)"
+        stats.total_node_versions, 5,
+        "Should have 5 versions (initial + carry-forward + 3 updates in same tx)"
     );
 }
 

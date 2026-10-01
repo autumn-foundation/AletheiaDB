@@ -182,6 +182,21 @@ max_batch_size = 1000
 | `segments_to_retain` | usize | 10 | Number of old segments to keep |
 | `flush_interval_ms` | u64 | 100 | Flush interval for async modes (ms) |
 | `durability_mode` | DurabilityMode | Synchronous | Durability mode (see above) |
+| `max_append_block_ms` | u64 | 30_000 | Bound on how long one append call blocks on a full ring buffer before failing with a diagnosable error; `0` = unbounded (legacy). Stall detection, not a latency SLA (Issue #3798) |
+| `acquire_timeout_ms` | u64 | 120_000 | Bound on acquiring the group-commit coordinator's state mutex; `0` = unbounded (legacy). Deadlock detection, not an SLA; only meaningful for `GroupCommit`/`AsyncBatched` (Issue #3798) |
+
+Both `max_append_block_ms` and `acquire_timeout_ms` are settable in TOML under
+`[wal]` and via `WalConfigBuilder::max_append_block_ms` /
+`WalConfigBuilder::acquire_timeout_ms`:
+
+```toml
+[wal]
+max_append_block_ms = 30000    # 0 = unbounded (legacy)
+acquire_timeout_ms = 120000    # 0 = unbounded (legacy)
+```
+
+See [WAL.md](WAL.md#stall-diagnosability-issue-3798) for what each bound
+detects and how the failures read.
 
 **Validation:**
 - `num_stripes` must be > 0 and a power of 2

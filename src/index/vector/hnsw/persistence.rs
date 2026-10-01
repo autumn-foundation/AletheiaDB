@@ -312,7 +312,7 @@ pub(crate) fn load_mappings_with_integrity(
 
         hasher.update(slice);
 
-        for chunk in slice.chunks_exact(16) {
+        for chunk in slice.as_chunks::<16>().0 {
             let node_id_raw = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
             let key = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
 

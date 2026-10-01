@@ -78,7 +78,7 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
     }
     let mut out = Vec::with_capacity(s.len() / 2);
     let bytes = s.as_bytes();
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let hi = (pair[0] as char).to_digit(16)?;
         let lo = (pair[1] as char).to_digit(16)?;
         out.push(((hi << 4) | lo) as u8);

@@ -127,3 +127,33 @@ pub use entry::{LSN, WalEntry, WalOperation};
 
 // Re-export serialization helpers (needed by concurrent.rs via super::)
 pub(crate) use serialization::estimate_entry_capacity;
+
+/// Report a WAL diagnostic without ever panicking (Issue #3798).
+///
+/// Follows the module-local logging convention of [`segment_reader`]'s scan
+/// warnings, with one deliberate difference: the `std` stderr *print* macros
+/// PANIC when the write fails, and a daemonized / launchd-managed process
+/// whose stderr pipe has been closed hits exactly that (EPIPE).
+///
+/// Both callers are places where that panic would be catastrophic rather than
+/// merely noisy:
+///
+/// - the **background flush thread** ([`concurrent_system`]) — a panic there
+///   kills the only consumer of the ring buffers, which IS the #3798 stall the
+///   message exists to report; and
+/// - the **commit-path lock diagnostics** ([`group_commit`]) — a panic there
+///   turns a diagnostic about a stuck mutex into a second, worse failure, and
+///   would poison that very mutex on the way out.
+///
+/// So the fallback writes through `writeln!` and drops the result. Shared by
+/// both rather than duplicated, so the EPIPE rationale lives in exactly one
+/// place (Issue #3798 review round 2).
+pub(crate) fn log_wal_diagnostic(message: &str) {
+    #[cfg(feature = "observability")]
+    tracing::error!("{}", message);
+    #[cfg(not(feature = "observability"))]
+    {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr().lock(), "ERROR: {}", message);
+    }
+}

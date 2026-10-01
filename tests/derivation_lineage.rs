@@ -6,7 +6,7 @@
 //! retraction blast-radius report, and structured rejection of dangling
 //! references. Each test maps to one or more acceptance criteria.
 
-use aletheiadb::core::error::Error;
+use aletheiadb::core::error::{Error, TransactionError};
 use aletheiadb::core::id::{NodeId, VersionId};
 use aletheiadb::core::lineage::{LineageError, LineageQueryOptions, LineageRef};
 use aletheiadb::db::lineage::FactStatus;
@@ -370,12 +370,33 @@ fn concurrent_updates_bind_lineage_to_own_version() {
         let barrier = Arc::clone(&barrier);
         handles.push(std::thread::spawn(move || {
             barrier.wait();
-            db.update_node_with_lineage(
-                target,
-                PropertyMapBuilder::new().insert("thread", i as i64).build(),
-                &[src_ref],
-            )
-            .expect("concurrent update+lineage must succeed (no post-commit error)")
+            // Two transactions writing the SAME node at the same instant is a
+            // legitimate write-write conflict under snapshot isolation, and the
+            // loser is told so with the retriable `SerializationFailure`. That
+            // is a property of the isolation level, not of lineage, and it is
+            // not what this test is about -- so retry it. Every other error
+            // still fails the test immediately, including the post-commit
+            // `AlreadyRecorded` this test exists to catch.
+            const ATTEMPTS: usize = 32;
+            for attempt in 1..=ATTEMPTS {
+                match db.update_node_with_lineage(
+                    target,
+                    PropertyMapBuilder::new().insert("thread", i as i64).build(),
+                    &[src_ref],
+                ) {
+                    Ok(version) => return version,
+                    Err(Error::Transaction(TransactionError::SerializationFailure { .. }))
+                        if attempt < ATTEMPTS =>
+                    {
+                        std::thread::yield_now()
+                    }
+                    Err(e) => panic!(
+                        "concurrent update+lineage must succeed \
+                         (no post-commit error): {e:?}"
+                    ),
+                }
+            }
+            unreachable!("the loop above either returns or panics")
         }));
     }
 

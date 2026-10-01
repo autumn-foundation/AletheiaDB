@@ -62,7 +62,7 @@ pub(crate) struct ReplicaStorageHandles {
     pub(crate) edge_id_gen: Arc<IdGenerator>,
     pub(crate) version_id_gen: Arc<IdGenerator>,
     pub(crate) constraint_registry: Arc<ConstraintRegistry>,
-    pub(crate) current_timestamp: Arc<std::sync::Mutex<Timestamp>>,
+    pub(crate) current_timestamp: Arc<crate::core::commit_clock::CommitClock>,
     /// Index persistence, when configured on the replica database.
     pub(crate) persistence: Option<(Arc<IndexPersistenceManager>, Arc<PersistenceTracker>)>,
 }
@@ -191,11 +191,11 @@ pub(crate) fn apply_replica_batch(
 
     // HLC continuity (mirrors `seed_startup_current_timestamp`): never let a
     // post-promotion write's timestamp regress behind replicated history.
-    if let Some(ts) = max_ts
-        && let Ok(mut current_ts) = handles.current_timestamp.lock()
-        && ts > *current_ts
-    {
-        *current_ts = ts;
+    if let Some(ts) = max_ts {
+        // Raises the visibility frontier as well as the allocation frontier:
+        // this runs after the batch is applied, so the replicated history it
+        // covers is already readable.
+        let _ = handles.current_timestamp.raise_to(ts);
     }
 
     Ok(Some(AppliedBatch {
@@ -521,7 +521,7 @@ mod tests {
             edge_id_gen: Arc::new(IdGenerator::new()),
             version_id_gen: Arc::new(IdGenerator::new()),
             constraint_registry: Arc::new(ConstraintRegistry::new()),
-            current_timestamp: Arc::new(std::sync::Mutex::new(ts(1))),
+            current_timestamp: Arc::new(crate::core::commit_clock::CommitClock::new(ts(1))),
             persistence: None,
         };
         (dir, handles)

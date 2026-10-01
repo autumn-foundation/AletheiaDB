@@ -2785,7 +2785,11 @@ fn poison_mutex<T>(mutex: &std::sync::Arc<std::sync::Mutex<T>>) {
 fn test_create_node_transaction_error_counted_once_when_lock_poisoned() {
     let db = AletheiaDB::new().unwrap();
 
-    poison_mutex(&db.current_timestamp);
+    // The commit clock's serialization mutex is internal to `CommitClock`, so
+    // it exposes its own test-only poisoner rather than being poisoned from
+    // outside. (`poison_mutex` below is still used for the plain `Mutex` at
+    // `commit_clock_observed_at`.)
+    db.current_timestamp.poison_for_test();
 
     // Delta-based assertion (not absolute-count-after-`reset()`): the counter is
     // a process-global singleton shared by the whole test binary, so an absolute
@@ -3164,8 +3168,9 @@ fn test_stats_populated_matches_underlying_counters() {
         stats.historical.total_node_versions,
         hist.total_node_versions
     );
-    // 2 creates + 1 update = exactly 3 node versions.
-    assert_eq!(stats.historical.total_node_versions, 3);
+    // 2 creates + 1 update + its structural carry-forward (ADR-0061) =
+    // exactly 4 stored node versions.
+    assert_eq!(stats.historical.total_node_versions, 4);
     assert_eq!(stats.historical.unique_nodes, hist.unique_nodes);
     assert_eq!(
         stats.historical.anchor_count,

@@ -513,6 +513,51 @@ impl AletheiaDB {
             .record_error_metric()
     }
 
+    /// The node's current belief over valid time (ADR-0061).
+    ///
+    /// Returns every still-recorded version — the current head plus the
+    /// carry-forward slices earlier updates left behind — sorted by valid
+    /// start. For a live node they partition `[creation, ∞)` with no gaps or
+    /// overlaps, so each entry says "as of now, the node held these properties
+    /// over this valid interval". Unlike [`get_node_history`](Self::get_node_history)
+    /// (one entry per write), this includes structural versions
+    /// ([`VersionId::is_structural`](crate::core::id::VersionId::is_structural)).
+    /// A deleted node has no slices.
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let id = NodeId::new(1)?;
+    /// for slice in db.get_node_valid_time_slices(id)? {
+    ///     let valid = slice.temporal.valid_time();
+    ///     println!("[{}, {}): {:?}", valid.start(), valid.end(), slice.properties);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn get_node_valid_time_slices(
+        &self,
+        node_id: NodeId,
+    ) -> Result<Vec<crate::core::history::VersionInfo>> {
+        self.historical
+            .read()
+            .get_node_valid_time_slices(node_id)
+            .record_error_metric()
+    }
+
+    /// Edge counterpart of [`get_node_valid_time_slices`](Self::get_node_valid_time_slices).
+    pub fn get_edge_valid_time_slices(
+        &self,
+        edge_id: EdgeId,
+    ) -> Result<Vec<crate::core::history::VersionInfo>> {
+        self.historical
+            .read()
+            .get_edge_valid_time_slices(edge_id)
+            .record_error_metric()
+    }
+
     /// Compute the difference between two versions of an edge.
     ///
     /// Shows which properties were added, removed, or modified.
@@ -1601,6 +1646,11 @@ mod changefeed_pushdown_tests {
                         prev_is_none: bool,
                         namespace: Namespace|
          -> Option<ChangeRecord> {
+            // Structural (carry-forward / re-assertion) versions carry the
+            // reserved tag bit 62 and are never changes.
+            if version_id & (1u64 << 62) != 0 {
+                return None;
+            }
             let tx_range = temporal.transaction_time();
             // Half-open transaction-time window [t1, t2).
             if !tx_window.contains(tx_range.start()) {

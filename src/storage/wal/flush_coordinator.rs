@@ -524,12 +524,12 @@ impl FlushCoordinator {
                     break (segment_id, path, current_len);
                 }
                 _ => {
-                    eprintln!(
+                    super::log_wal_diagnostic(&format!(
                         "WAL: not appending to existing segment {} (header version/key_version \
                          differs from writer version {} or is unreadable); rolling to next segment",
                         path.display(),
                         write_version
-                    );
+                    ));
                 }
             }
         };
@@ -1041,11 +1041,11 @@ impl FlushCoordinator {
                         // but we must try to rollback the phantom data.
                         if let Err(trunc_err) = file.set_len(start_size) {
                             // We can't do much if truncation fails, but we log it critically.
-                            eprintln!(
+                            super::log_wal_diagnostic(&format!(
                                 "CRITICAL: Failed to truncate WAL segment after sync failure. \
                                  Data consistency may be compromised. Error: {}",
                                 trunc_err
-                            );
+                            ));
                         } else {
                             // Truncation succeeded. We successfully prevented a phantom commit.
                             // The file size is now restored to start_size.
@@ -1054,11 +1054,11 @@ impl FlushCoordinator {
                             // set_len() truncates the file but leaves the cursor at the end of the failed write.
                             // If we don't seek, the next write will start after the hole, creating a sparse file.
                             if let Err(seek_err) = file.seek(SeekFrom::Start(start_size)) {
-                                eprintln!(
+                                super::log_wal_diagnostic(&format!(
                                     "CRITICAL: Failed to seek WAL segment after sync failure. \
                                      Data consistency may be compromised. Error: {}",
                                     seek_err
-                                );
+                                ));
                             }
 
                             // Reset in-memory size to match file state (defensive, though flush updates it later)
@@ -1364,7 +1364,7 @@ impl FlushThread {
                 // Drain and flush
                 let entries = drain_fn();
                 if let Err(e) = coordinator.flush(entries, true) {
-                    eprintln!("WAL flush error: {:?}", e);
+                    super::log_wal_diagnostic(&format!("WAL flush error: {:?}", e));
                 }
             }
 
@@ -2543,5 +2543,57 @@ mod tests {
             LSN(21),
             "min available after truncating [10, 20] must be 21"
         );
+    }
+
+    /// No stderr `print` macro may remain in this module's production code.
+    ///
+    /// The deepest error paths here -- a segment header mismatch, a failed
+    /// post-sync truncate, a failed post-sync seek, and the legacy
+    /// [`FlushThread`] drain loop -- all execute on a background flush/drain
+    /// thread. The `std` print macros PANIC when the write fails, and a
+    /// daemonized process whose stderr pipe has been closed hits exactly that
+    /// (EPIPE), so a panic fires precisely while the never-drop-an-outcome
+    /// machinery is handling a flush failure: the flusher dies mid-recovery
+    /// and nothing drains the ring buffers afterwards, which IS the #3798
+    /// stall (Issue #3798 review round 3).
+    ///
+    /// Unlike the marker-scoped scan in `concurrent_system`, this one is
+    /// file-wide up to the test module: every production path in this file is
+    /// either the flush thread's own or background maintenance sharing its
+    /// hazard, so there is no region here where a print macro would be safe.
+    /// Route diagnostics through `super::log_wal_diagnostic` instead.
+    #[test]
+    fn test_no_panicking_print_macros_in_flush_coordinator() {
+        const SOURCE: &str = include_str!("flush_coordinator.rs");
+
+        // The boundary and the needles are assembled at runtime so this
+        // test's own source can never match itself.
+        let boundary = format!("{}{}", "mod te", "sts {");
+        let production = match SOURCE.find(boundary.as_str()) {
+            Some(at) => &SOURCE[..at],
+            None => panic!("the test module declaration moved; this guard scans the wrong range"),
+        };
+
+        // Coverage anchor: a boundary that slid to the top of the file would
+        // keep the scan green while guarding no code at all.
+        assert!(
+            production.contains("pub fn flush(&self"),
+            "the scanned range no longer covers `FlushCoordinator::flush`: the guard is \
+             watching the wrong code"
+        );
+
+        for needle in [
+            format!("{}{}", "eprint", "ln!"),
+            format!("{}{}", "print", "ln!"),
+        ] {
+            let hits = production.matches(needle.as_str()).count();
+            assert_eq!(
+                hits, 0,
+                "found {} `{}` in flush-coordinator production code: logging on the flush \
+                 thread must go through the non-panicking `super::log_wal_diagnostic` helper \
+                 (the print macros panic on EPIPE, killing the only drainer)",
+                hits, needle
+            );
+        }
     }
 }

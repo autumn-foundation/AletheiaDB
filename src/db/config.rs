@@ -3,6 +3,7 @@
 //! Provides AletheiaDB initialization methods, including AletheiaDB::new() and AletheiaDB::with_unified_config().
 use crate::api::transaction::TxVisibilityManager;
 use crate::config::AletheiaDBConfig;
+use crate::core::commit_clock::CommitClock;
 use crate::core::error::{Result, ResultExt, StorageError};
 use crate::core::id::{IdGenerator, TxIdGenerator};
 use crate::core::temporal::time;
@@ -312,12 +313,7 @@ fn bootstrap_timestamp(
 
 pub(crate) fn seed_startup_current_timestamp(db: &AletheiaDB) -> Result<()> {
     let startup_timestamp = bootstrap_timestamp(&db.current, &db.historical);
-    let mut current_timestamp = db.current_timestamp.lock().map_err(|_| {
-        crate::core::error::Error::Storage(StorageError::LockPoisoned {
-            resource: "current_timestamp".to_string(),
-        })
-    })?;
-    *current_timestamp = startup_timestamp;
+    db.current_timestamp.reset_to(startup_timestamp)?;
     Ok(())
 }
 
@@ -367,6 +363,39 @@ fn flush_interval_from_durability(mode: DurabilityMode, default_ms: u64) -> u64 
         DurabilityMode::GroupCommit { max_delay_ms, .. } => max_delay_ms,
         DurabilityMode::AsyncBatched { max_delay_ms, .. } => max_delay_ms,
         _ => default_ms,
+    }
+}
+
+/// Translate a user-facing [`crate::config::WalConfig`] into the WAL system's
+/// own config.
+///
+/// One function for both construction paths (`with_unified_config` and
+/// `with_full_config`) and no `..Default::default()` spread: every field is
+/// named, so a knob added to `ConcurrentWalSystemConfig` cannot silently keep
+/// its default here — which is exactly how the #3798 bounds ended up
+/// unreachable from any `AletheiaDB` entry point.
+fn wal_system_config_from(
+    wal: crate::config::WalConfig,
+    wal_cipher: Option<Arc<dyn crate::encryption::cipher::Cipher>>,
+    wal_key_version: Option<u32>,
+) -> ConcurrentWalSystemConfig {
+    let durability_mode = wal.durability_mode;
+    ConcurrentWalSystemConfig {
+        wal_dir: wal.wal_dir,
+        num_stripes: wal.num_stripes,
+        stripe_capacity: wal.stripe_capacity,
+        segment_size: wal.segment_size,
+        segments_to_retain: wal.segments_to_retain,
+        flush_interval_ms: flush_interval_from_durability(durability_mode, wal.flush_interval_ms),
+        durability_mode,
+        write_buffer_size: wal.write_buffer_size,
+        wal_cipher,
+        wal_key_version,
+        tolerate_torn_tail: wal.tolerate_torn_tail,
+        // Issue #3798: both stall bounds, reachable from TOML and from the
+        // builder (`0` on either restores the legacy unbounded behavior).
+        max_append_block_ms: wal.max_append_block_ms,
+        acquire_timeout_ms: wal.acquire_timeout_ms,
     }
 }
 
@@ -847,22 +876,8 @@ impl AletheiaDB {
             #[cfg(target_arch = "wasm32")]
             let provisioned_key_version: Option<u32> = None;
 
-            let wal_system_config = ConcurrentWalSystemConfig {
-                wal_dir: config.wal.wal_dir,
-                num_stripes: config.wal.num_stripes,
-                stripe_capacity: config.wal.stripe_capacity,
-                segment_size: config.wal.segment_size,
-                segments_to_retain: config.wal.segments_to_retain,
-                flush_interval_ms: flush_interval_from_durability(
-                    durability_mode,
-                    config.wal.flush_interval_ms,
-                ),
-                durability_mode,
-                write_buffer_size: config.wal.write_buffer_size,
-                wal_cipher: wal_cipher.clone(),
-                wal_key_version: provisioned_key_version,
-                tolerate_torn_tail: config.wal.tolerate_torn_tail,
-            };
+            let wal_system_config =
+                wal_system_config_from(config.wal, wal_cipher.clone(), provisioned_key_version);
 
             let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
 
@@ -1063,7 +1078,12 @@ impl AletheiaDB {
             };
 
             let mut db = AletheiaDB {
-                current: Arc::new(CurrentStorage::new()),
+                // Issue #3810: enroll this database's adjacency indexes in the
+                // shared background maintenance worker, so reads reach the
+                // ADR-0026 frozen-CSR fast path once writes go quiet.
+                current: Arc::new(CurrentStorage::with_adjacency_maintenance(
+                    config.adjacency.clone(),
+                )),
                 role: crate::db::replication_role::new_role_cell(),
                 historical: Arc::new(RwLock::new(HistoricalStorage::from_unified_config(
                     config.historical,
@@ -1071,10 +1091,11 @@ impl AletheiaDB {
                 temporal_indexes: Arc::new(TemporalIndexes::new()),
                 wal,
                 in_flight: Arc::new(crate::api::transaction::write::InFlightLsns::new()),
-                current_timestamp: Arc::new(Mutex::new(time::now())),
+                current_timestamp: Arc::new(CommitClock::new(time::now())),
                 commit_clock_observed_at: Arc::new(Mutex::new(Instant::now())),
                 tx_id_gen: Arc::new(TxIdGenerator::new()),
                 visibility_manager: Arc::new(TxVisibilityManager::new()),
+                read_handles: std::sync::OnceLock::new(),
                 node_id_gen: Arc::new(IdGenerator::new()),
                 edge_id_gen: Arc::new(IdGenerator::new()),
                 version_id_gen: Arc::new(IdGenerator::new()),
@@ -1784,6 +1805,12 @@ impl AletheiaDB {
     /// This maintains backward compatibility with the old API.
     /// For new code, prefer using [`with_unified_config`](Self::with_unified_config).
     ///
+    /// Background adjacency maintenance (Issue #3810) uses the default policy
+    /// here, since this signature carries no place to configure it; use
+    /// [`with_unified_config`](Self::with_unified_config) with
+    /// [`AdjacencyMaintenanceConfig::disabled`](crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig::disabled)
+    /// to opt out.
+    ///
     /// # Errors
     ///
     /// Returns an error if WAL initialization fails (e.g., cannot create WAL directory).
@@ -1795,22 +1822,8 @@ impl AletheiaDB {
         let result = (|| {
             let durability_mode = wal_config.durability_mode;
 
-            let wal_system_config = ConcurrentWalSystemConfig {
-                wal_dir: wal_config.wal_dir,
-                num_stripes: wal_config.num_stripes,
-                stripe_capacity: wal_config.stripe_capacity,
-                segment_size: wal_config.segment_size,
-                segments_to_retain: wal_config.segments_to_retain,
-                flush_interval_ms: flush_interval_from_durability(
-                    durability_mode,
-                    wal_config.flush_interval_ms,
-                ),
-                durability_mode,
-                write_buffer_size: wal_config.write_buffer_size,
-                wal_cipher: None,
-                wal_key_version: None,
-                tolerate_torn_tail: wal_config.tolerate_torn_tail,
-            };
+            // This construction path never configures a WAL cipher.
+            let wal_system_config = wal_system_config_from(wal_config, None, None);
 
             let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
 
@@ -1827,10 +1840,11 @@ impl AletheiaDB {
                 temporal_indexes: Arc::new(TemporalIndexes::new()),
                 wal,
                 in_flight: Arc::new(crate::api::transaction::write::InFlightLsns::new()),
-                current_timestamp: Arc::new(Mutex::new(time::now())),
+                current_timestamp: Arc::new(CommitClock::new(time::now())),
                 commit_clock_observed_at: Arc::new(Mutex::new(Instant::now())),
                 tx_id_gen: Arc::new(TxIdGenerator::new()),
                 visibility_manager: Arc::new(TxVisibilityManager::new()),
+                read_handles: std::sync::OnceLock::new(),
                 node_id_gen: Arc::new(IdGenerator::new()),
                 edge_id_gen: Arc::new(IdGenerator::new()),
                 version_id_gen: Arc::new(IdGenerator::new()),
@@ -2940,6 +2954,91 @@ mod ephemeral_tests {
             seed, edge_end,
             "seed must be the max over restored tx starts AND closed tx ends \
              (here the edge's closed end, incl. its logical component)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod wal_stall_bound_plumbing_tests {
+    //! Issue #3798 review round: both stall bounds must be reachable from an
+    //! `AletheiaDB` configuration.
+    //!
+    //! The bounds ship with a documented `0 = restore the legacy unbounded
+    //! behavior` escape hatch. An escape hatch no `AletheiaDB::open` /
+    //! `with_unified_config` / TOML user can reach is not an escape hatch, so
+    //! these tests pin the whole path: `WalConfig` -> `ConcurrentWalSystemConfig`
+    //! -> the live WAL system and its group-commit coordinator.
+
+    use super::*;
+    use crate::config::WalConfigBuilder;
+
+    #[test]
+    fn wal_config_carries_both_stall_bounds_into_the_wal_system_config() {
+        let wal = WalConfigBuilder::new()
+            .max_append_block_ms(1_234)
+            .acquire_timeout_ms(5_678)
+            .build();
+
+        let system_config = wal_system_config_from(wal, None, None);
+
+        assert_eq!(
+            system_config.max_append_block_ms, 1_234,
+            "the append bound must survive the translation into the WAL system config"
+        );
+        assert_eq!(
+            system_config.acquire_timeout_ms, 5_678,
+            "the acquisition bound must survive the translation into the WAL system config"
+        );
+    }
+
+    #[test]
+    fn zero_is_preserved_as_the_documented_unbounded_escape_hatch() {
+        let wal = WalConfigBuilder::new()
+            .max_append_block_ms(0)
+            .acquire_timeout_ms(0)
+            .build();
+
+        let system_config = wal_system_config_from(wal, None, None);
+
+        assert_eq!(system_config.max_append_block_ms, 0);
+        assert_eq!(system_config.acquire_timeout_ms, 0);
+    }
+
+    /// End to end: the values a user sets must be the values the running WAL
+    /// and its coordinator actually enforce.
+    #[test]
+    fn configured_bounds_reach_the_live_wal_and_coordinator() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(dir.path().join("wal"))
+                    .durability_mode(DurabilityMode::GroupCommit {
+                        max_batch_size: 8,
+                        max_delay_ms: 5,
+                    })
+                    .max_append_block_ms(4_321)
+                    .acquire_timeout_ms(9_876)
+                    .build(),
+            )
+            .build();
+
+        let db = AletheiaDB::with_unified_config(config).expect("database construction");
+
+        assert_eq!(
+            db.wal.max_append_block_ms(),
+            4_321,
+            "the configured append bound never reached the WAL"
+        );
+        let coordinator = db
+            .wal
+            .group_commit_coordinator()
+            .expect("GroupCommit mode builds a coordinator");
+        assert_eq!(
+            coordinator.acquire_timeout_ms(),
+            9_876,
+            "the configured acquisition bound never reached the group-commit coordinator \
+             (it was discarded by `GroupCommitCoordinator::new`)"
         );
     }
 }

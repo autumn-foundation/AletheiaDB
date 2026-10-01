@@ -1207,6 +1207,59 @@ impl AletheiaDB {
         self.current.get_edge_source(edge_id).record_error_metric()
     }
 
+    /// Layer occupancy of the two current-state adjacency indexes (Issue #3810).
+    ///
+    /// Adjacency reads (`get_outgoing_edges`, `get_incoming_edges`, traversal)
+    /// take the frozen-CSR fast path only while both indexes are compacted --
+    /// i.e. while `stats.is_fully_compacted()` holds. Background maintenance
+    /// restores that state on its own shortly after writes go quiet; this is
+    /// how you observe it.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use aletheiadb::AletheiaDB;
+    /// let db = AletheiaDB::new()?;
+    /// let stats = db.adjacency_stats();
+    /// assert_eq!(stats.outgoing.frozen_edges, 0);
+    /// assert!(stats.is_fully_compacted());
+    /// # Ok::<(), aletheiadb::Error>(())
+    /// ```
+    #[must_use = "the statistics snapshot should be used"]
+    pub fn adjacency_stats(&self) -> crate::index::current::AdjacencyIndexStats {
+        self.current.adjacency_stats()
+    }
+
+    /// Merge the adjacency delta buffers into the frozen CSR now (Issue #3810).
+    ///
+    /// Background maintenance does this automatically once writes go quiet, so
+    /// an application normally never needs to call it. It is useful to force a
+    /// deterministic state: right after a bulk load, before benchmarking reads,
+    /// or when background maintenance is disabled via
+    /// [`AdjacencyMaintenanceConfig::disabled`](crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig::disabled).
+    ///
+    /// Cost is O(E log E) in the number of edges. Reads stay correct and never
+    /// block on it: they keep using the previous frozen CSR until the new one is
+    /// published atomically, and the entries the two layers briefly share are
+    /// de-duplicated. Compacting an already-compacted index is a cheap no-op.
+    ///
+    /// # Deadlock
+    ///
+    /// Retiring the merged delta entries takes the same per-shard locks a live
+    /// adjacency guard holds, so do not call this while holding an adjacency
+    /// iterator from the *same* thread:
+    ///
+    /// ```ignore
+    /// let edges = db.get_outgoing_edges_iter(node); // holds a shard guard
+    /// db.compact_adjacency();                       // deadlocks: same shard
+    /// ```
+    ///
+    /// Collect the iterator (or drop it) first. Other threads are unaffected --
+    /// they never wait on compaction, compaction waits on them.
+    pub fn compact_adjacency(&self) {
+        self.current.compact_adjacency();
+    }
+
     /// Get outgoing edges from a node (current state).
     pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         self.current.get_outgoing_edges(node_id)
@@ -1710,14 +1763,11 @@ mod tests {
             );
         }
 
-        // NOTE: Updating/deleting closes the *transaction time* of the previous
-        // version at commit (standard MVCC on the transaction-time axis), so a
-        // valid-time probe strictly between the old and new `valid_from` is not
-        // reachable via `get_node_at_valid_time(id, probe)` (which always queries
-        // as of the *current* transaction time). This is pre-existing, unmodified
-        // `WriteOps` behavior -- verified the same way the transaction-level tests
-        // in `api::transaction::write::tests` do: by reading the recorded
-        // `valid_from` back from historical storage directly.
+        // NOTE: An update closes the *transaction time* of the superseded
+        // version and appends a structural carry-forward recording it over
+        // `[old_valid_from, new_valid_from)` (ADR-0061), so a valid-time probe
+        // strictly between the old and new `valid_from` resolves to the old
+        // state via `get_node_at_valid_time` (asserted below).
         #[test]
         fn update_node_with_valid_time_backdated_round_trip() {
             let (_tmp, db) = create_test_db().unwrap();
@@ -1744,6 +1794,14 @@ mod tests {
             let version = historical.get_node_version(version_id).unwrap();
             assert_eq!(version.temporal.valid_time().start(), t_update);
             drop(historical);
+
+            // The prior state is still the current belief before t_update.
+            let between = HybridTimestamp::new(now - 90 * 60_000_000, 0).unwrap();
+            let old_state = db.get_node_at_valid_time(id, between).unwrap();
+            assert_eq!(
+                old_state.properties.get("city"),
+                Some(&PropertyValue::from("Paris"))
+            );
 
             // Updated properties are visible from their own valid_from onward.
             let new_state = db.get_node_at_valid_time(id, t_update).unwrap();
@@ -1791,6 +1849,13 @@ mod tests {
             let version = historical.get_edge_version(version_id).unwrap();
             assert_eq!(version.temporal.valid_time().start(), t_update);
             drop(historical);
+
+            let between = HybridTimestamp::new(now - 90 * 60_000_000, 0).unwrap();
+            let old_state = db.get_edge_at_valid_time(edge_id, between).unwrap();
+            assert_eq!(
+                old_state.properties.get("strength"),
+                Some(&PropertyValue::from(1i64))
+            );
 
             let new_state = db.get_edge_at_valid_time(edge_id, t_update).unwrap();
             assert_eq!(
@@ -2074,6 +2139,14 @@ mod tests {
                 3,
                 "create + update + retraction = 3 versions, zero loss"
             );
+
+            // The update's structural carry-forward (omitted from history)
+            // keeps v1 as current belief over [t_create, t_update) (ADR-0061).
+            let slices = db.get_node_valid_time_slices(id).unwrap();
+            assert_eq!(slices.len(), 2);
+            assert!(slices[0].version_id.is_structural());
+            assert_eq!(slices[0].temporal.valid_time().start(), t_create);
+            assert_eq!(slices[0].temporal.valid_time().end(), t_update);
 
             // v1: [t_create, open). #3504: the update supersedes v1 on the
             // transaction-time dimension only; v1's valid interval stays
@@ -3197,10 +3270,7 @@ mod tests {
         /// These tests are single-threaded, so no commit can slip between
         /// the two phases.
         fn anchor_after_commits(db: &AletheiaDB) -> crate::core::temporal::Timestamp {
-            let committed = *db
-                .current_timestamp
-                .lock()
-                .expect("current_timestamp mutex poisoned");
+            let committed = db.current_timestamp.load();
             // Phase 1: anchor strictly after every committed stamp.
             let mut anchor = time::now();
             while anchor <= committed {

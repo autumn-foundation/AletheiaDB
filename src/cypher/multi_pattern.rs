@@ -54,6 +54,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::core::error::Result as CoreResult;
 use crate::core::graph::{Edge, Node};
+use crate::core::hasher::IdHashBuilder;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::PropertyValue;
 use crate::db::AletheiaDB;
@@ -96,7 +97,7 @@ type KeyedRow = (SortKey, ProjectedRow);
 #[derive(Clone, Default)]
 struct PartialBinding {
     vars: Binding,
-    used_edges: HashSet<EdgeId>,
+    used_edges: HashSet<EdgeId, IdHashBuilder>,
 }
 
 /// Kleene three-valued truth for `WHERE` predicate evaluation.
@@ -239,7 +240,8 @@ pub fn evaluate(
     // deterministic candidate enumeration and stable output order).
     let mut nodes: Vec<Node> = db.current.all_nodes().collect();
     nodes.sort_by_key(|n| n.id);
-    let mut node_by_id: HashMap<NodeId, usize> = HashMap::with_capacity(nodes.len());
+    let mut node_by_id: HashMap<NodeId, usize, IdHashBuilder> =
+        HashMap::with_capacity_and_hasher(nodes.len(), IdHashBuilder::default());
     for (idx, node) in nodes.iter().enumerate() {
         node_by_id.insert(node.id, idx);
     }
@@ -356,7 +358,8 @@ pub(crate) fn match_bindings(
     // `evaluate`.
     let mut nodes: Vec<Node> = db.current.all_nodes().collect();
     nodes.sort_by_key(|n| n.id);
-    let mut node_by_id: HashMap<NodeId, usize> = HashMap::with_capacity(nodes.len());
+    let mut node_by_id: HashMap<NodeId, usize, IdHashBuilder> =
+        HashMap::with_capacity_and_hasher(nodes.len(), IdHashBuilder::default());
     for (idx, node) in nodes.iter().enumerate() {
         node_by_id.insert(node.id, idx);
     }
@@ -446,7 +449,7 @@ struct MultiEval<'a> {
     db: &'a AletheiaDB,
     params: &'a HashMap<String, CypherParameterValue>,
     nodes: Vec<Node>,
-    node_by_id: HashMap<NodeId, usize>,
+    node_by_id: HashMap<NodeId, usize, IdHashBuilder>,
 }
 
 impl MultiEval<'_> {
@@ -629,7 +632,7 @@ impl MultiEval<'_> {
             CypherDirection::Incoming | CypherDirection::Both
         );
         let mut result = Vec::new();
-        let mut seen: HashSet<u64> = HashSet::new();
+        let mut seen: HashSet<u64, IdHashBuilder> = HashSet::default();
 
         if want_out {
             for edge_id in self.db.get_outgoing_edges(node_id) {

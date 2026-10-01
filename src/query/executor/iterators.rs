@@ -1518,7 +1518,11 @@ pub struct TraversalIterator {
     resolved_scope: ResolvedScope,
     // BFS state - reset for each input node (see doc comment above)
     frontier: VecDeque<(NodeId, Vec<EntityId>, usize)>,
-    visited: HashSet<NodeId>,
+    // `NodeId` is an internal sequential id, not untrusted input -- see
+    // `IdHashBuilder`'s docs. This set is rebuilt/cleared once per traversed
+    // start node and probed once per candidate neighbor, so it is on the hot
+    // path of every `MATCH ... -[...]-> ...` traversal.
+    visited: HashSet<NodeId, crate::core::hasher::IdHashBuilder>,
     input_exhausted: bool,
 }
 
@@ -1553,7 +1557,7 @@ impl TraversalIterator {
             scope: None,
             resolved_scope: ResolvedScope::All,
             frontier: VecDeque::new(),
-            visited: HashSet::new(),
+            visited: HashSet::default(),
             input_exhausted: false,
         }
     }

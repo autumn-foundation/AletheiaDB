@@ -51,9 +51,11 @@ use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
 
-use super::concurrent::{ConcurrentWal, ConcurrentWalConfig};
+use super::concurrent::{
+    AppendDrainer, ConcurrentWal, ConcurrentWalConfig, DEFAULT_MAX_APPEND_BLOCK_MS,
+};
 use super::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig, FlushStats};
-use super::group_commit::GroupCommitCoordinator;
+use super::group_commit::{DEFAULT_ACQUIRE_TIMEOUT_MS, GroupCommitConfig, GroupCommitCoordinator};
 use super::{LSN, WalOperation};
 use crate::core::error::{Error, Result, StorageError};
 use crate::storage::wal::DurabilityMode;
@@ -98,6 +100,21 @@ pub struct ConcurrentWalSystemConfig {
     /// when `false`, any parse failure hard-errors (fail-stop recovery). See
     /// [`crate::config::WalConfig::tolerate_torn_tail`].
     pub tolerate_torn_tail: bool,
+    /// Maximum time (milliseconds) a writer blocks on a full ring buffer
+    /// before failing with a diagnosable error (Issue #3798).
+    ///
+    /// `0` means unbounded (legacy behavior: block forever). Plumbed straight
+    /// through to [`ConcurrentWalConfig::max_append_block_ms`]; default
+    /// [`DEFAULT_MAX_APPEND_BLOCK_MS`].
+    pub max_append_block_ms: u64,
+    /// Bound (milliseconds) on acquiring the group-commit coordinator's state
+    /// mutex (Issue #3798).
+    ///
+    /// `0` means unbounded (legacy `Mutex::lock`). Plumbed through to
+    /// [`GroupCommitConfig::acquire_timeout_ms`]; only consulted by the
+    /// durability modes that build a coordinator (GroupCommit, AsyncBatched).
+    /// Default [`DEFAULT_ACQUIRE_TIMEOUT_MS`].
+    pub acquire_timeout_ms: u64,
 }
 
 impl std::fmt::Debug for ConcurrentWalSystemConfig {
@@ -117,6 +134,8 @@ impl std::fmt::Debug for ConcurrentWalSystemConfig {
             )
             .field("wal_key_version", &self.wal_key_version)
             .field("tolerate_torn_tail", &self.tolerate_torn_tail)
+            .field("max_append_block_ms", &self.max_append_block_ms)
+            .field("acquire_timeout_ms", &self.acquire_timeout_ms)
             .finish()
     }
 }
@@ -135,6 +154,8 @@ impl Default for ConcurrentWalSystemConfig {
             wal_cipher: None,
             wal_key_version: None,
             tolerate_torn_tail: true,
+            max_append_block_ms: DEFAULT_MAX_APPEND_BLOCK_MS,
+            acquire_timeout_ms: DEFAULT_ACQUIRE_TIMEOUT_MS,
         }
     }
 }
@@ -163,6 +184,23 @@ impl ConcurrentWalSystemConfig {
     /// Set the flush interval in milliseconds.
     pub fn with_flush_interval_ms(mut self, ms: u64) -> Self {
         self.flush_interval_ms = ms;
+        self
+    }
+
+    /// Set the bound on blocking appends in milliseconds (Issue #3798).
+    ///
+    /// `0` disables the bound (legacy unbounded blocking).
+    pub fn with_max_append_block_ms(mut self, ms: u64) -> Self {
+        self.max_append_block_ms = ms;
+        self
+    }
+
+    /// Set the bound on acquiring the group-commit state mutex, in
+    /// milliseconds (Issue #3798).
+    ///
+    /// `0` disables the bound (legacy unbounded acquisition).
+    pub fn with_acquire_timeout_ms(mut self, ms: u64) -> Self {
+        self.acquire_timeout_ms = ms;
         self
     }
 }
@@ -216,6 +254,63 @@ impl FlushNotifier {
 /// Threshold for consecutive flush errors before logging a critical warning.
 const FLUSH_ERROR_WARNING_THRESHOLD: u64 = 3;
 
+/// Floor for the heartbeat staleness threshold (Issue #3798). Even a very
+/// short flush interval gets at least this much slack before the flush thread
+/// is judged stalled, so a scheduling hiccup never reads as a dead flusher.
+///
+/// Five seconds, not one: at the default 10ms interval the floor IS the
+/// threshold, and a single slow fsync, a heavily oversubscribed CI runner, or
+/// a `cargo llvm-cov` run can starve a background thread for well over a
+/// second. A stalled flusher stays stalled, so waiting a few seconds longer to
+/// say so costs nothing, while a false "unhealthy" costs an operator a page.
+const MIN_HEARTBEAT_STALENESS: Duration = Duration::from_secs(5);
+
+/// How long the flush heartbeat may go unchanged before the WAL is considered
+/// unhealthy (Issue #3798): ten flush intervals, floored at
+/// [`MIN_HEARTBEAT_STALENESS`].
+///
+/// Pure function of the configured interval so it can be reasoned about (and
+/// tested) without spawning a flush thread.
+fn heartbeat_staleness_threshold(flush_interval: Duration) -> Duration {
+    (flush_interval * 10).max(MIN_HEARTBEAT_STALENESS)
+}
+
+// ---- flush-thread path: begin ----
+//
+// Everything between this marker and the matching end marker runs ON the
+// background flush thread. A panic here kills the only consumer of the ring
+// buffers, which is the #3798 stall itself, so the source guard
+// `test_no_panicking_constructs_on_flush_thread_path` scans these regions for
+// panicking constructs. Move the markers only together with the code.
+
+/// Report a flush-thread error without ever panicking (Issue #3798).
+///
+/// A thin alias for the shared [`super::log_wal_diagnostic`], which carries
+/// the EPIPE rationale for both this path and the group-commit lock
+/// diagnostics (Issue #3798 review round 2). It stays a named function so the
+/// call sites below read as flush-thread reporting rather than as generic
+/// logging.
+fn log_flush_error(message: &str) {
+    super::log_wal_diagnostic(message);
+}
+
+/// Microseconds since a process-start baseline, on the MONOTONIC clock.
+/// Used to timestamp flusher heartbeats (Issue #3798).
+///
+/// Deliberately not the wallclock: heartbeat staleness is a duration measured
+/// across a window that an NTP step or a VM suspend/resume can move. A step
+/// forward would report a perfectly healthy flusher as dead; a step backward
+/// would make the elapsed time read as zero and mask a genuinely dead one --
+/// exactly the case the heartbeat exists to catch. `Instant` cannot go
+/// backwards, so neither can this.
+fn monotonic_micros() -> u64 {
+    static BASELINE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    BASELINE
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_micros() as u64
+}
+
 /// Helper struct to encapsulate background flush logic.
 struct BackgroundFlusher {
     wal: Arc<ConcurrentWal>,
@@ -226,33 +321,287 @@ struct BackgroundFlusher {
     error_counter: Arc<AtomicU64>,
     interval: Duration,
     sync_on_flush: bool,
+    /// Completed loop iterations, published so callers can prove this thread
+    /// is still alive (Issue #3798).
+    flush_heartbeat: Arc<AtomicU64>,
+    /// Monotonic micros of the most recent heartbeat (Issue #3798).
+    last_beat_micros: Arc<AtomicU64>,
+    /// Non-poison coordinator errors survived instead of dying (Issue #3798).
+    flush_cycle_errors: Arc<AtomicU64>,
+    /// Test-only error injection for the flush cycle (Issue #3798). Held
+    /// unconditionally so construction is cfg-uniform; only consulted under
+    /// `#[cfg(test)]`.
+    #[allow(dead_code)]
+    test_inject_cycle_error: Arc<AtomicBool>,
+    /// Epochs that `start_flush` opened but `finish_flush` could not close,
+    /// oldest first, retried at the top of every subsequent cycle
+    /// (Issue #3798 review round).
+    ///
+    /// Dropping such an epoch freezes the coordinator's durability frontier
+    /// PERMANENTLY: `finish_flush` advances `flushed_epoch` only over a
+    /// contiguous run of completed epochs, so an epoch that never completes is
+    /// a wall no later flush can climb, and every committer then waits out its
+    /// full deadlock-detection timeout, forever. The outcome is stored as
+    /// `None` = success / `Some(message)` = the flush error to deliver, since
+    /// `Error` is not `Clone`.
+    ///
+    /// A QUEUE, not a single slot (Issue #3798 review round 2): a slot forced
+    /// `mark_group_commit_flushed` to refuse to open a new epoch while one was
+    /// outstanding, which DISCARDED that cycle's outcome — including a FAILED
+    /// disk flush. The failure then reached nobody, and a later cycle
+    /// published a clean success for the very epoch whose entries never
+    /// reached disk: an acknowledged-but-lost commit. An outcome is never
+    /// dropped now; at worst it is deferred.
+    ///
+    /// `RefCell` rather than a lock: the flusher is owned by one thread and
+    /// never shared.
+    pending_finishes: std::cell::RefCell<std::collections::VecDeque<(u64, Option<String>)>>,
+    /// A FAILING outcome whose epoch could not even be OPENED, carried into
+    /// the next epoch that does open (Issue #3798 review round 2).
+    ///
+    /// A refused `start_flush` advances nothing, so `current_epoch` still
+    /// covers exactly the transactions whose data was just lost — the next
+    /// successfully opened epoch IS their epoch, and must report the failure
+    /// rather than a clean success. Stored as a message for the same
+    /// `Error: !Clone` reason as above; the FIRST such failure wins, since it
+    /// is the original loss.
+    carried_failure: std::cell::RefCell<Option<String>>,
 }
+
+/// How many un-finished epochs the flusher will hold before it stops trying
+/// (Issue #3798 review round 2).
+///
+/// Reaching this depth means `finish_flush` has been refused on ~1024
+/// consecutive cycles — the coordinator lock has been unusable for minutes and
+/// no waiter has been released in all that time. Neither of the alternatives
+/// is defensible: dropping the oldest entry silently destroys the durability
+/// outcome this queue exists to preserve, and growing without bound converts a
+/// wedged lock into an OOM. So the flusher fails fast the same way a poisoned
+/// coordinator lock does, with a message that names the real fault.
+const MAX_PENDING_FINISHES: usize = 1024;
 
 impl BackgroundFlusher {
     fn run(&self) {
         while !self.shutdown.load(Ordering::Relaxed) {
             self.perform_flush_cycle();
+            // Publish liveness once per COMPLETED cycle, before parking
+            // (Issue #3798). Bumping here and not after the wait is what makes
+            // a wedged flusher observable: a thread asleep in `wait_timeout`
+            // for an hour stops publishing, so its heartbeat goes stale while
+            // a healthy flusher's advances every interval.
+            self.flush_heartbeat.fetch_add(1, Ordering::Relaxed);
+            self.last_beat_micros
+                .store(monotonic_micros(), Ordering::Relaxed);
             // Wait for flush interval OR immediate signal (batch full)
             self.flush_notifier.wait_timeout(self.interval);
         }
         self.perform_final_flush();
     }
 
+    /// React to a `GroupCommitCoordinator` error raised on the flush thread
+    /// (Issue #3798).
+    ///
+    /// LOCK POISONING: a poisoned coordinator lock means a thread died holding
+    /// it and the system is unrecoverable; failing fast is correct, because
+    /// continuing would leave waiting transactions hanging indefinitely.
+    ///
+    /// EVERY OTHER ERROR is transient. Tearing the flush thread down over one
+    /// is what converts a momentary coordinator hiccup into a permanent stall:
+    /// nothing drains the ring buffers afterwards, so writers pile up behind a
+    /// full buffer forever. Count it, log it, skip this cycle, and let the next
+    /// interval retry; waiters remain protected by `wait_for_flush`'s own
+    /// timeout.
+    ///
+    /// "Let the next interval retry" is only true because the errors that are
+    /// NOT self-healing are retained rather than skipped: a `finish_flush`
+    /// that leaves an epoch open is queued and re-driven by
+    /// [`Self::drain_pending_finishes`] (skipping it would freeze the
+    /// durability frontier for the life of the process), and a failing
+    /// *outcome* whose `start_flush` was refused is carried to the next epoch
+    /// that opens (skipping it would report a lost transaction as durable).
+    fn note_cycle_error(&self, what: &str, err: &Error) {
+        if let Error::Storage(StorageError::LockPoisoned { .. }) = err {
+            panic!(
+                "GroupCommitCoordinator lock poisoned - flush thread cannot continue \
+                 (while {}: {})",
+                what, err
+            );
+        }
+
+        self.flush_cycle_errors.fetch_add(1, Ordering::Relaxed);
+        log_flush_error(&format!(
+            "WAL flush cycle skipped: {} failed ({}); retrying next interval",
+            what, err
+        ));
+    }
+
+    /// Retry every `finish_flush` a previous cycle could not deliver, oldest
+    /// first.
+    ///
+    /// Runs FIRST in every cycle: the coordinator advances its durability
+    /// frontier only over a contiguous epoch run, so a stranded epoch must
+    /// land before the frontier can climb past it. Draining stops at the first
+    /// entry that still fails, which preserves FIFO order — a later epoch must
+    /// never be delivered while an older one is still queued behind it, or the
+    /// queue would reorder outcomes relative to the epochs they belong to.
+    ///
+    /// WHY THIS IS SOUND (verified by reading `GroupCommitCoordinator::
+    /// finish_flush`, not assumed):
+    ///
+    /// 1. **Late/out-of-order completion is already handled.** `finish_flush`
+    ///    inserts the epoch into a `completed_epochs` `BTreeSet` and then
+    ///    advances `flushed_epoch` only over the contiguous run starting at
+    ///    `flushed_epoch + 1`. Finishing 6 before 5 therefore parks 6 in the
+    ///    set until 5 lands, at which point both are released in one sweep.
+    /// 2. **An error is recorded against ITS OWN epoch.** `finish_flush`
+    ///    pushes `(epoch, message)` onto `recent_errors`, and `wait_for_flush`
+    ///    scans that list for its own epoch number. Arrival order does not
+    ///    enter into either side, so deferring delivery never misattributes an
+    ///    outcome to a different epoch than the one it came from.
+    ///
+    /// SCOPE OF THAT GUARANTEE — it is about *epoch* attribution, not about
+    /// which transactions an epoch's entries belong to. A transaction is a
+    /// member of the epoch it REGISTERS into, and it appends its frame to the
+    /// ring buffer strictly before it registers (`log_operations_to_wal` runs
+    /// ahead of `commit()` in `api::transaction::write`). A flush cycle that
+    /// lands inside that append→register window drains the frame into epoch
+    /// `X` while the transaction goes on to register into `X + 1`, so if that
+    /// cycle FAILS the error is recorded — correctly, per the above — against
+    /// `X`, which the transaction is not waiting on. Epoch membership is
+    /// therefore not the same relation as flush membership, and the deferral
+    /// machinery here neither creates nor closes that window; see
+    /// `ConcurrentWalSystem::commit`'s "Race Condition Handling" for the full
+    /// statement of what remains unguarded.
+    ///
+    /// The flusher is the only caller of `start_flush` / `finish_flush`, so
+    /// retrying here cannot race anyone.
+    ///
+    /// Returns `true` when nothing is outstanding any more.
+    fn drain_pending_finishes(&self) -> bool {
+        let Some(gc) = self.group_commit.as_ref() else {
+            return true;
+        };
+
+        loop {
+            // Cloned out in its own scope so the borrow ends before anything
+            // else runs: `note_cycle_error` below can panic, and a `RefCell`
+            // borrow held across it (or across any future re-entry into this
+            // flusher) is how a clean fail-fast becomes a confusing
+            // already-borrowed panic instead.
+            let next = { self.pending_finishes.borrow().front().cloned() };
+            let Some((epoch, stored)) = next else {
+                return true;
+            };
+
+            let outcome = match &stored {
+                None => Ok(()),
+                Some(message) => Err(crate::core::error::Error::other(message.clone())),
+            };
+            match gc.finish_flush(epoch, outcome) {
+                Ok(()) => {
+                    self.pending_finishes.borrow_mut().pop_front();
+                }
+                Err(err) => {
+                    self.note_cycle_error("retrying the deferred group-commit finish_flush", &err);
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// Advance the group-commit epoch for this cycle and hand `outcome` to its
+    /// waiters.
+    ///
+    /// Split into explicit `start_flush` / `finish_flush` (rather than the
+    /// fused `mark_flushed`) precisely so the two failures can be told apart:
+    /// a failed `start_flush` opened no epoch, while a failed `finish_flush`
+    /// has already advanced `current_epoch` and MUST be retried or the
+    /// frontier never moves again.
+    ///
+    /// THE ONE INVARIANT HERE: an outcome is never dropped. This method always
+    /// tries to open an epoch and always tries to deliver `outcome` to it,
+    /// even with older epochs still queued — a queued epoch defers *delivery*,
+    /// it must not suppress the *outcome*. Suppressing it is what turned a
+    /// failed disk flush into a silent success for those transactions
+    /// (Issue #3798 review round 2).
+    fn mark_group_commit_flushed(&self, outcome: Result<()>) {
+        let Some(gc) = self.group_commit.as_ref() else {
+            return;
+        };
+
+        let epoch = match gc.start_flush() {
+            Ok(epoch) => epoch,
+            Err(err) => {
+                // No epoch was opened, so nothing is stranded and no waiter
+                // was woken -- but a FAILING outcome still has nowhere to go,
+                // and `current_epoch` did not move, so the epoch this cycle
+                // would have flushed is the same one the next cycle will open.
+                // Carry the failure to it rather than losing it.
+                if let Err(e) = &outcome {
+                    let mut carried = self.carried_failure.borrow_mut();
+                    if carried.is_none() {
+                        *carried = Some(e.to_string());
+                    }
+                }
+                self.note_cycle_error("starting the group-commit flush epoch", &err);
+                return;
+            }
+        };
+
+        // Fold in any failure carried from a cycle whose `start_flush` was
+        // refused: those transactions are covered by THIS epoch.
+        let carried = self.carried_failure.borrow_mut().take();
+        let outcome = match (carried, outcome) {
+            (None, outcome) => outcome,
+            (Some(earlier), Ok(())) => Err(crate::core::error::Error::other(earlier)),
+            (Some(earlier), Err(current)) => Err(crate::core::error::Error::other(format!(
+                "{earlier}; and then {current}"
+            ))),
+        };
+
+        let stored = outcome.as_ref().err().map(|e| e.to_string());
+        if let Err(err) = gc.finish_flush(epoch, outcome) {
+            let depth = {
+                let mut queue = self.pending_finishes.borrow_mut();
+                queue.push_back((epoch, stored));
+                queue.len()
+            };
+            self.note_cycle_error("finishing the group-commit flush epoch", &err);
+            if depth > MAX_PENDING_FINISHES {
+                // Same fail-fast reasoning as a poisoned coordinator lock: see
+                // `MAX_PENDING_FINISHES` for why neither dropping nor growing
+                // is an acceptable alternative.
+                panic!(
+                    "GroupCommitCoordinator has refused finish_flush for {} consecutive \
+                     epochs (queue depth {}) - the state mutex is unusable and no \
+                     transaction has reached durability in that time; flush thread cannot \
+                     continue",
+                    MAX_PENDING_FINISHES, depth
+                );
+            }
+        }
+    }
+
     fn perform_flush_cycle(&self) {
+        self.drain_pending_finishes();
+
         let entries = self.wal.drain_all();
 
         // Always try to advance the epoch when there are entries OR when
-        // group commit has pending transactions.
-        //
-        // LOCK POISONING: If current_batch_size() fails, the coordinator lock is
-        // poisoned and the system is in an unrecoverable state. Panicking is correct
-        // here - continuing would leave waiting transactions hanging indefinitely.
+        // group commit has pending transactions. A non-poison failure to read
+        // the pending batch size is treated as "nothing pending" for THIS
+        // cycle only (see `note_cycle_error`).
         let should_mark_flushed = !entries.is_empty()
-            || self.group_commit.as_ref().is_some_and(|gc| {
-                gc.current_batch_size()
-                    .expect("GroupCommitCoordinator lock poisoned - flush thread cannot continue")
-                    > 0
-            });
+            || self
+                .group_commit
+                .as_ref()
+                .is_some_and(|gc| match self.current_batch_size(gc) {
+                    Ok(pending) => pending > 0,
+                    Err(err) => {
+                        self.note_cycle_error("reading the group-commit batch size", &err);
+                        false
+                    }
+                });
 
         if !entries.is_empty() {
             // Flush to coordinator
@@ -264,7 +613,26 @@ impl BackgroundFlusher {
         }
     }
 
+    /// Read the group-commit coordinator's pending batch size.
+    ///
+    /// Test builds can inject a synthetic (non-poison) error here, which flows
+    /// through exactly the same downstream handling a real coordinator error
+    /// would take — the point being to prove the flush thread survives it
+    /// (Issue #3798) without having to poison a real lock.
+    fn current_batch_size(&self, gc: &GroupCommitCoordinator) -> Result<usize> {
+        #[cfg(test)]
+        if self.test_inject_cycle_error.swap(false, Ordering::Relaxed) {
+            return Err(Error::Storage(StorageError::WalError {
+                reason: "injected test error".into(),
+            }));
+        }
+        gc.current_batch_size()
+    }
+
     fn perform_final_flush(&self) {
+        // Last chance to land a stranded epoch before this thread is gone.
+        self.drain_pending_finishes();
+
         let entries = self.wal.drain_all();
         if !entries.is_empty() {
             let result = self.coordinator.flush(entries, true);
@@ -277,36 +645,33 @@ impl BackgroundFlusher {
             Ok(_) => {
                 // Reset error counter on success
                 self.error_counter.store(0, Ordering::Relaxed);
-                if let Some(ref gc) = self.group_commit {
-                    gc.mark_flushed(Ok(())).expect(
-                        "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
-                    );
-                }
+                self.mark_group_commit_flushed(Ok(()));
             }
             Err(e) => {
                 // Track consecutive errors for health monitoring
                 let errors = self.error_counter.fetch_add(1, Ordering::Relaxed) + 1;
                 if errors == FLUSH_ERROR_WARNING_THRESHOLD {
-                    eprintln!(
+                    log_flush_error(&format!(
                         "CRITICAL: WAL flush failed {} consecutive times. \
                          Data durability may be compromised. Last error: {}",
                         errors, e
-                    );
+                    ));
                 } else {
-                    eprintln!("WAL flush error: {}", e);
+                    log_flush_error(&format!("WAL flush error: {}", e));
                 }
 
-                if let Some(ref gc) = self.group_commit {
-                    // Create a new error from the string representation
-                    gc.mark_flushed(Err(crate::core::error::Error::other(e.to_string())))
-                        .expect(
-                            "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
-                        );
-                }
+                // The failure still has to reach this epoch's waiters, so it
+                // travels the same start/finish path a success does (as a new
+                // error built from the string representation).
+                self.mark_group_commit_flushed(Err(crate::core::error::Error::other(
+                    e.to_string(),
+                )));
             }
         }
     }
 }
+
+// ---- flush-thread path: end ----
 
 /// Unified concurrent WAL system.
 ///
@@ -329,6 +694,34 @@ pub struct ConcurrentWalSystem {
     group_commit: Option<Arc<GroupCommitCoordinator>>,
     /// Counter for consecutive flush errors (for health monitoring).
     consecutive_flush_errors: Arc<AtomicU64>,
+    /// Completed background-flusher loop iterations (Issue #3798). A strictly
+    /// increasing value proves the flush thread is alive; a frozen one is the
+    /// signal that writers are about to pile up behind a full ring buffer.
+    flush_heartbeat: Arc<AtomicU64>,
+    /// MONOTONIC micros of the most recent heartbeat — the [`monotonic_micros`]
+    /// process-start `Instant` baseline, never the wallclock — seeded at
+    /// construction so startup is a grace period rather than an instant
+    /// staleness trip (Issue #3798).
+    ///
+    /// It must never become a wallclock reading: staleness is a duration
+    /// measured across a window an NTP step or a VM suspend/resume can move.
+    /// A step forward would report a healthy flusher as dead; a step backward
+    /// would read the elapsed time as zero and mask a genuinely dead one —
+    /// exactly the case the heartbeat exists to catch.
+    last_beat_micros: Arc<AtomicU64>,
+    /// Non-poison flush-cycle errors the flusher skipped instead of dying
+    /// (Issue #3798).
+    flush_cycle_errors: Arc<AtomicU64>,
+    /// Configured background-flush interval, retained so the heartbeat
+    /// staleness threshold scales with it (Issue #3798).
+    flush_interval: Duration,
+    /// Test-only staleness override in micros (`0` = use the computed
+    /// threshold), so liveness tests need not wait real seconds.
+    health_staleness_override_micros: AtomicU64,
+    /// Test-only flush-cycle error injection, shared with the
+    /// [`BackgroundFlusher`] (Issue #3798).
+    #[allow(dead_code)] // Written by tests, read by the flusher under cfg(test).
+    test_inject_cycle_error: Arc<AtomicBool>,
     /// Crash-torn-tail recovery policy applied by [`Self::read_from`]
     /// (Issue #3433).
     tolerate_torn_tail: bool,
@@ -375,6 +768,7 @@ impl ConcurrentWalSystem {
             stripe_capacity: config.stripe_capacity,
             segment_size: config.segment_size,
             segments_to_retain: config.segments_to_retain,
+            max_append_block_ms: config.max_append_block_ms,
         };
 
         // Build the WAL DEK keyring from the configured cipher (Issue #3617). A
@@ -415,7 +809,19 @@ impl ConcurrentWalSystem {
             wal_keyring: Arc::clone(&wal_keyring),
         };
 
-        let wal = Arc::new(ConcurrentWal::new(wal_config)?);
+        // Who drains the handle-less append paths depends on the durability
+        // mode, and this is the only place that knows it (Issue #3798 review
+        // round 2). The real write-transaction path uses the async batch
+        // append in EVERY mode, and `Synchronous` starts no flush thread, so
+        // without this a Synchronous-mode stall blamed a flusher that does not
+        // exist and pointed at `is_healthy()`, which that mode reports as
+        // `true` by construction.
+        let mut wal_inner = ConcurrentWal::new(wal_config)?;
+        wal_inner.set_async_drainer(match config.durability_mode {
+            DurabilityMode::Synchronous => AppendDrainer::CallingThread,
+            _ => AppendDrainer::BackgroundFlusher,
+        });
+        let wal = Arc::new(wal_inner);
         let coordinator = Arc::new(FlushCoordinator::new(coordinator_config)?);
         let shutdown_signal = Arc::new(AtomicBool::new(false));
 
@@ -424,17 +830,28 @@ impl ConcurrentWalSystem {
             DurabilityMode::GroupCommit {
                 max_batch_size,
                 max_delay_ms,
-            } => Some(Arc::new(GroupCommitCoordinator::new(
-                max_delay_ms,
-                max_batch_size,
+            } => Some(Arc::new(GroupCommitCoordinator::with_config(
+                // `with_config`, not `new`: `new` discards everything but the
+                // two batching knobs, which is what made the #3798
+                // acquisition bound unreachable from any user config.
+                GroupCommitConfig {
+                    max_delay_ms,
+                    max_batch_size,
+                    acquire_timeout_ms: config.acquire_timeout_ms,
+                    ..GroupCommitConfig::default()
+                },
             ))),
             DurabilityMode::AsyncBatched {
                 max_batch_size,
                 max_delay_ms,
                 ..
-            } => Some(Arc::new(GroupCommitCoordinator::new(
-                max_delay_ms,
-                max_batch_size,
+            } => Some(Arc::new(GroupCommitCoordinator::with_config(
+                GroupCommitConfig {
+                    max_delay_ms,
+                    max_batch_size,
+                    acquire_timeout_ms: config.acquire_timeout_ms,
+                    ..GroupCommitConfig::default()
+                },
             ))),
             _ => None,
         };
@@ -445,7 +862,17 @@ impl ConcurrentWalSystem {
         // Create error counter for health monitoring
         let consecutive_flush_errors = Arc::new(AtomicU64::new(0));
 
+        // Flusher liveness signals (Issue #3798). `last_beat_micros` starts at
+        // construction time so a freshly started system has a full staleness
+        // window of grace before it can be judged stalled.
+        let flush_heartbeat = Arc::new(AtomicU64::new(0));
+        let last_beat_micros = Arc::new(AtomicU64::new(monotonic_micros()));
+        let flush_cycle_errors = Arc::new(AtomicU64::new(0));
+        let test_inject_cycle_error = Arc::new(AtomicBool::new(false));
+        let flush_interval = Duration::from_millis(config.flush_interval_ms);
+
         // Start background flush thread for async/group-commit modes
+        // ---- flush-thread path: begin ----
         let flush_thread = if matches!(
             config.durability_mode,
             DurabilityMode::Async { .. }
@@ -458,7 +885,10 @@ impl ConcurrentWalSystem {
             let flush_notifier_clone = Arc::clone(&flush_notifier);
             let group_commit_clone = group_commit.clone();
             let error_counter_clone = Arc::clone(&consecutive_flush_errors);
-            let flush_interval = Duration::from_millis(config.flush_interval_ms);
+            let heartbeat_clone = Arc::clone(&flush_heartbeat);
+            let last_beat_clone = Arc::clone(&last_beat_micros);
+            let cycle_errors_clone = Arc::clone(&flush_cycle_errors);
+            let inject_clone = Arc::clone(&test_inject_cycle_error);
             let sync_on_flush =
                 matches!(config.durability_mode, DurabilityMode::GroupCommit { .. });
 
@@ -472,11 +902,16 @@ impl ConcurrentWalSystem {
                     error_counter_clone,
                     flush_interval,
                     sync_on_flush,
+                    heartbeat_clone,
+                    last_beat_clone,
+                    cycle_errors_clone,
+                    inject_clone,
                 );
             }))
         } else {
             None
         };
+        // ---- flush-thread path: end ----
 
         Ok(Self {
             wal,
@@ -487,6 +922,12 @@ impl ConcurrentWalSystem {
             durability_mode: config.durability_mode,
             group_commit,
             consecutive_flush_errors,
+            flush_heartbeat,
+            last_beat_micros,
+            flush_cycle_errors,
+            flush_interval,
+            health_staleness_override_micros: AtomicU64::new(0),
+            test_inject_cycle_error,
             tolerate_torn_tail: config.tolerate_torn_tail,
             wal_keyring,
             #[cfg(not(target_arch = "wasm32"))]
@@ -494,6 +935,7 @@ impl ConcurrentWalSystem {
         })
     }
 
+    // ---- flush-thread path: begin ----
     /// Background flush loop.
     ///
     /// Wakes up either when:
@@ -510,6 +952,10 @@ impl ConcurrentWalSystem {
         error_counter: Arc<AtomicU64>,
         interval: Duration,
         sync_on_flush: bool,
+        flush_heartbeat: Arc<AtomicU64>,
+        last_beat_micros: Arc<AtomicU64>,
+        flush_cycle_errors: Arc<AtomicU64>,
+        test_inject_cycle_error: Arc<AtomicBool>,
     ) {
         let flusher = BackgroundFlusher {
             wal,
@@ -520,9 +966,16 @@ impl ConcurrentWalSystem {
             error_counter,
             interval,
             sync_on_flush,
+            flush_heartbeat,
+            last_beat_micros,
+            flush_cycle_errors,
+            test_inject_cycle_error,
+            pending_finishes: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            carried_failure: std::cell::RefCell::new(None),
         };
         flusher.run();
     }
+    // ---- flush-thread path: end ----
 
     /// Append an operation asynchronously (fire and forget).
     ///
@@ -715,10 +1168,36 @@ impl ConcurrentWalSystem {
     /// 1. The flush thread draining entries
     /// 2. Transactions calling `register_transaction()`
     ///
-    /// This is handled safely: if entries are drained before registration,
-    /// the epoch will still advance (with no entries), ensuring waiters
-    /// are notified. The data durability is guaranteed because entries
-    /// must be in the ring buffer before this method is called.
+    /// A caller appends its frames to the ring buffer strictly BEFORE it calls
+    /// this method, so a flush cycle can drain those frames into an earlier
+    /// epoch than the one the caller then registers into. On the SUCCESS path
+    /// that is harmless: the drained epoch advances (possibly with no
+    /// registered members), the caller's own epoch completes behind it, and by
+    /// the time `wait_for_flush` returns the frames really are on disk —
+    /// entries must be in the ring buffer before this method is called, and a
+    /// later epoch cannot complete before an earlier one (`flushed_epoch`
+    /// advances only over a contiguous run).
+    ///
+    /// KNOWN GAP — a FAILING flush inside that window is NOT attributed to the
+    /// caller (Issue #3798 review round 3, tracked separately). If the cycle
+    /// that drained the frames fails, its entries are dropped rather than
+    /// re-queued and the error is recorded against the epoch that drained them
+    /// — not against the epoch the transaction subsequently registers into,
+    /// whose own (entry-free) flush then succeeds. Such a transaction can
+    /// therefore see `wait_for_flush` return `Ok` for frames that never reached
+    /// disk. The window is exactly append→register: once a transaction is
+    /// registered, every outcome for its epoch reaches it (see
+    /// `drain_pending_finishes`). Closing it needs the epoch to be claimed
+    /// before the frames are appended, or the flush to re-queue what it could
+    /// not write; neither is done here.
+    ///
+    /// `FlushCoordinator::get_max_flushed_lsn` cannot be used to detect this
+    /// after the fact: it is a telemetry approximation, not a durability
+    /// watermark. It is advanced by `fetch_max` BEFORE the fsync and is not
+    /// rolled back when that fsync fails and the segment is truncated, and
+    /// because LSNs are allocated before their entries are placed into a
+    /// stripe, a drained batch may skip a lower LSN still in flight — so the
+    /// value is monotonic but neither durability-gated nor contiguous.
     pub fn commit(&self) -> Result<Option<u64>> {
         match self.durability_mode {
             DurabilityMode::Synchronous => {
@@ -836,17 +1315,91 @@ impl ConcurrentWalSystem {
         self.consecutive_flush_errors.load(Ordering::Relaxed)
     }
 
-    /// Check if the WAL is healthy (no consecutive flush errors).
+    /// Completed background-flusher loop iterations (Issue #3798).
     ///
-    /// Returns `true` if the last flush succeeded, `false` if there are
-    /// outstanding errors that haven't been cleared by a successful flush.
+    /// Strictly increasing while the flush thread is alive and scheduling; a
+    /// value that stops advancing is the observable signal that the flusher
+    /// died or wedged, and therefore that writers will soon block on full ring
+    /// buffers. Always `0` for durability modes that run no flush thread
+    /// (e.g. [`DurabilityMode::Synchronous`]).
+    pub fn flush_heartbeat(&self) -> u64 {
+        self.flush_heartbeat.load(Ordering::Relaxed)
+    }
+
+    /// Non-poison flush-cycle errors the background flusher survived
+    /// (Issue #3798).
+    ///
+    /// Unlike [`Self::consecutive_flush_errors`] this never resets: it counts,
+    /// over the process lifetime, how many times a cycle was skipped instead
+    /// of taking down the flush thread.
+    pub fn flush_cycle_errors(&self) -> u64 {
+        self.flush_cycle_errors.load(Ordering::Relaxed)
+    }
+
+    /// Override the heartbeat staleness threshold (micros; `0` = use the
+    /// computed one). Test-only, so liveness assertions need not wait seconds.
+    #[cfg(test)]
+    pub(crate) fn set_health_staleness_override_micros(&self, micros: u64) {
+        self.health_staleness_override_micros
+            .store(micros, Ordering::Relaxed);
+    }
+
+    /// Whether the background flusher's heartbeat has gone stale
+    /// (Issue #3798).
+    ///
+    /// Two deliberate non-alarms:
+    ///
+    /// - **No flush thread** (e.g. [`DurabilityMode::Synchronous`]): there is
+    ///   no heartbeat that *could* advance, because the write path flushes
+    ///   inline. Such a WAL is never stale.
+    /// - **Startup**: `last_beat_micros` is seeded at construction time, so a
+    ///   system that has not completed its first cycle yet still gets a full
+    ///   staleness window of grace instead of tripping instantly.
+    ///
+    /// Both ends of the comparison come from [`monotonic_micros`], so a clock
+    /// step or a suspend/resume can neither invent staleness nor hide it.
+    fn heartbeat_stale(&self) -> bool {
+        if self.flush_thread.is_none() {
+            return false;
+        }
+
+        let threshold_micros = match self
+            .health_staleness_override_micros
+            .load(Ordering::Relaxed)
+        {
+            0 => heartbeat_staleness_threshold(self.flush_interval).as_micros() as u64,
+            overridden => overridden,
+        };
+
+        let last_beat = self.last_beat_micros.load(Ordering::Relaxed);
+        monotonic_micros().saturating_sub(last_beat) > threshold_micros
+    }
+
+    /// Check if the WAL is healthy.
+    ///
+    /// Returns `true` when the last flush succeeded **and** the background
+    /// flusher is still publishing its heartbeat. A frozen heartbeat
+    /// (Issue #3798) is reported as unhealthy even though no flush has
+    /// errored: a flusher that died or wedged raises no error at all, it just
+    /// stops draining, and the first visible symptom would otherwise be
+    /// writers blocking on full ring buffers.
     pub fn is_healthy(&self) -> bool {
-        self.consecutive_flush_errors() == 0
+        self.consecutive_flush_errors() == 0 && !self.heartbeat_stale()
     }
 
     /// Get the WAL directory path.
     pub fn wal_dir(&self) -> &std::path::Path {
         self.coordinator.wal_dir()
+    }
+
+    /// The bound on blocking appends currently in force, in milliseconds
+    /// (`0` = unbounded, Issue #3798).
+    ///
+    /// Exposed so an operator -- or a configuration test -- can confirm which
+    /// value actually reached the WAL rather than inferring it from the config
+    /// that was handed in.
+    pub fn max_append_block_ms(&self) -> u64 {
+        self.wal.config().max_append_block_ms
     }
 
     /// Whether this WAL is encrypted at rest (a WAL cipher is configured).
@@ -2227,5 +2780,518 @@ mod tests {
             "Batch should be flushed immediately"
         );
         assert_eq!(lsns.len(), 2);
+    }
+
+    // ── Issue #3798: background flusher liveness ─────────────────────────
+    //
+    // A flush thread that dies (or wedges) is currently invisible: writers
+    // simply block forever on full ring buffers and the health check keeps
+    // reporting "healthy". These tests pin the observable contract —
+    // a heartbeat, a survivable error path, and a health check that reads it.
+
+    /// Watchdog for every bounded poll below. No assertion here may depend on
+    /// timing luck: each one either observes its condition inside this window
+    /// or fails with an explicit message.
+    const LIVENESS_WATCHDOG: Duration = Duration::from_secs(5);
+
+    /// Poll `cond` every 10ms until it holds or the watchdog elapses.
+    fn poll_until(mut cond: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + LIVENESS_WATCHDOG;
+        while std::time::Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        cond()
+    }
+
+    fn group_commit_config(
+        dir: &std::path::Path,
+        flush_interval_ms: u64,
+    ) -> ConcurrentWalSystemConfig {
+        ConcurrentWalSystemConfig::new(dir)
+            .with_durability_mode(DurabilityMode::GroupCommit {
+                max_batch_size: 8,
+                max_delay_ms: 5,
+            })
+            .with_flush_interval_ms(flush_interval_ms)
+    }
+
+    /// The system's own coordinator, for tests that drive flush cycles by hand.
+    fn coordinator_of(system: &ConcurrentWalSystem) -> Arc<GroupCommitCoordinator> {
+        Arc::clone(
+            system
+                .group_commit_coordinator()
+                .expect("GroupCommit mode has a coordinator"),
+        )
+    }
+
+    /// A [`BackgroundFlusher`] over `system`'s own parts, driven synchronously
+    /// on the calling thread.
+    ///
+    /// Every flush-outcome test below needs one, and the struct is private, so
+    /// building it lives here rather than being copied per test.
+    fn test_flusher(
+        system: &ConcurrentWalSystem,
+        gc: &Arc<GroupCommitCoordinator>,
+    ) -> BackgroundFlusher {
+        BackgroundFlusher {
+            wal: Arc::clone(&system.wal),
+            coordinator: Arc::clone(&system.coordinator),
+            shutdown: Arc::clone(&system.shutdown_signal),
+            flush_notifier: Arc::clone(&system.flush_notifier),
+            group_commit: Some(Arc::clone(gc)),
+            error_counter: Arc::clone(&system.consecutive_flush_errors),
+            interval: Duration::from_millis(10),
+            sync_on_flush: false,
+            flush_heartbeat: Arc::clone(&system.flush_heartbeat),
+            last_beat_micros: Arc::clone(&system.last_beat_micros),
+            flush_cycle_errors: Arc::clone(&system.flush_cycle_errors),
+            test_inject_cycle_error: Arc::clone(&system.test_inject_cycle_error),
+            pending_finishes: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            carried_failure: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// A system whose own flusher has run its startup cycle and then parked
+    /// for an hour, so the cycles a test drives by hand are the only ones.
+    fn quiesced_group_commit_system(dir: &std::path::Path) -> ConcurrentWalSystem {
+        let system = ConcurrentWalSystem::new(group_commit_config(dir, 3_600_000)).unwrap();
+        assert!(
+            poll_until(|| system.flush_heartbeat() >= 1),
+            "the startup flush cycle never completed, so this test cannot own the timeline"
+        );
+        system
+    }
+
+    /// A `finish_flush` the coordinator refuses must NOT strand its epoch.
+    ///
+    /// `start_flush` has already advanced `current_epoch` by then, and the
+    /// frontier only moves over a contiguous run, so an abandoned epoch is a
+    /// permanent wall: every later commit would wait out its full
+    /// deadlock-detection timeout and fail, forever, on a WAL that is in fact
+    /// healthy. The flusher must hold the un-finished epoch and land it later.
+    ///
+    /// Deterministic by construction: the cycles are driven synchronously on
+    /// this thread and the single acquisition failure is injected rather than
+    /// raced (the window between `start_flush` and `finish_flush` is
+    /// microseconds wide, so racing a real acquisition timeout into it is not
+    /// reproducible).
+    #[test]
+    fn test_stranded_finish_flush_is_retried_and_unwedges_the_frontier() {
+        let dir = tempdir().unwrap();
+        let system = quiesced_group_commit_system(dir.path());
+        let gc = coordinator_of(&system);
+        let flusher = test_flusher(&system, &gc);
+
+        // A transaction waiting on the epoch the next cycle will flush.
+        let (epoch, _) = gc.register_transaction().expect("registration succeeds");
+        let errors_before = system.flush_cycle_errors();
+
+        // Cycle 1: start_flush opens `epoch`, finish_flush is refused.
+        gc.fail_next_acquisition_at_for_test(
+            crate::storage::wal::group_commit::LockSite::FinishFlush,
+        );
+        flusher.perform_flush_cycle();
+
+        assert_eq!(
+            system.flush_cycle_errors(),
+            errors_before + 1,
+            "the refused finish_flush must be counted, not swallowed silently"
+        );
+        assert!(
+            gc.flushed_epoch().expect("frontier readable") < epoch,
+            "precondition: the frontier is frozen behind the stranded epoch"
+        );
+
+        // Cycle 2: the retained epoch is retried and lands.
+        flusher.perform_flush_cycle();
+        assert!(
+            gc.flushed_epoch().expect("frontier readable") >= epoch,
+            "the durability frontier never recovered: epoch {} was stranded for good \
+             (flushed_epoch = {})",
+            epoch,
+            gc.flushed_epoch().unwrap_or(0)
+        );
+        gc.wait_for_flush(epoch)
+            .expect("the transaction waiting on the stranded epoch must be released");
+
+        // ...and the coordinator keeps working for transactions registered
+        // afterwards, which is what "unwedged" has to mean.
+        let (next_epoch, _) = gc.register_transaction().expect("registration succeeds");
+        flusher.perform_flush_cycle();
+        assert!(
+            gc.flushed_epoch().expect("frontier readable") >= next_epoch,
+            "a transaction registered after the strand must still reach durability"
+        );
+        gc.wait_for_flush(next_epoch)
+            .expect("post-recovery commit must not wait out its deadlock-detection timeout");
+    }
+
+    /// The `LockSite` the flush-outcome tests inject failures at, spelled once.
+    const FINISH_FLUSH: crate::storage::wal::group_commit::LockSite =
+        crate::storage::wal::group_commit::LockSite::FinishFlush;
+    const START_FLUSH: crate::storage::wal::group_commit::LockSite =
+        crate::storage::wal::group_commit::LockSite::StartFlush;
+
+    /// A synthetic disk-flush failure, exactly as `perform_flush_cycle` would
+    /// hand one to `handle_flush_result` when `coordinator.flush()` fails.
+    ///
+    /// Driven through that seam rather than by breaking the real coordinator:
+    /// the sequence under test needs the failure to land on a *specific* cycle
+    /// while a stranded epoch is outstanding, which no I/O-level fault
+    /// injection can schedule deterministically.
+    fn flush_failure(what: &str) -> Result<()> {
+        Err(crate::core::error::Error::other(what.to_string()))
+    }
+
+    /// A FAILED disk flush must never be silently discarded because an earlier
+    /// epoch is still stranded.
+    ///
+    /// The exact #3798-round-2 sequence: epoch A's `finish_flush` is refused
+    /// and strands; the next cycle's `coordinator.flush()` FAILS for epoch B;
+    /// a later cycle lands A and then advances the frontier past B. If the
+    /// failing outcome was dropped on the way in (because a pending finish was
+    /// outstanding), B's waiters are told their transaction is durable when it
+    /// never reached disk -- an acknowledged-but-lost commit, the worst failure
+    /// this subsystem can produce.
+    #[test]
+    fn test_failed_flush_outcome_survives_an_outstanding_pending_finish() {
+        let dir = tempdir().unwrap();
+        let system = quiesced_group_commit_system(dir.path());
+        let gc = coordinator_of(&system);
+        let flusher = test_flusher(&system, &gc);
+
+        // Epoch A: opened, then stranded by a refused finish_flush.
+        let (epoch_a, _) = gc.register_transaction().expect("registration succeeds");
+        gc.fail_next_acquisition_at_for_test(FINISH_FLUSH);
+        flusher.perform_flush_cycle();
+        assert!(
+            gc.flushed_epoch().expect("frontier readable") < epoch_a,
+            "precondition: epoch {epoch_a} must be stranded before the failing flush"
+        );
+
+        // Epoch B: a transaction registered behind the strand, whose flush
+        // then fails on disk.
+        let (epoch_b, _) = gc.register_transaction().expect("registration succeeds");
+        assert!(epoch_b > epoch_a, "B must be the epoch after A");
+        flusher.handle_flush_result(flush_failure("injected disk flush failure"));
+
+        // Recovery: A lands, then the frontier is free to move past B.
+        flusher.perform_flush_cycle();
+        flusher.perform_flush_cycle();
+        assert!(
+            gc.flushed_epoch().expect("frontier readable") >= epoch_b,
+            "the frontier never recovered past epoch {epoch_b}"
+        );
+
+        gc.wait_for_flush(epoch_a)
+            .expect("epoch A's flush succeeded, so its waiters must be released cleanly");
+
+        let err = gc.wait_for_flush(epoch_b).expect_err(
+            "epoch B's flush FAILED, but its waiters were told the transaction is durable: \
+             the failing outcome was discarded because a pending finish was outstanding",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("injected disk flush failure"),
+            "the epoch's own flush error must reach its waiters, got: {msg}"
+        );
+    }
+
+    /// Two stranded finishes must drain in order and each deliver its OWN
+    /// outcome.
+    ///
+    /// A queue that coalesced them, reordered them, or reused one outcome for
+    /// both would either wedge the contiguous-advance logic or hand a
+    /// successful epoch someone else's error (and vice versa).
+    #[test]
+    fn test_queued_finishes_drain_fifo_with_their_own_outcomes() {
+        let dir = tempdir().unwrap();
+        let system = quiesced_group_commit_system(dir.path());
+        let gc = coordinator_of(&system);
+        let flusher = test_flusher(&system, &gc);
+
+        // Strand A with a SUCCESSFUL outcome.
+        let (epoch_a, _) = gc.register_transaction().expect("registration succeeds");
+        gc.fail_next_acquisition_at_for_test(FINISH_FLUSH);
+        flusher.perform_flush_cycle();
+
+        // Strand B, behind A, with a FAILING outcome.
+        let (epoch_b, _) = gc.register_transaction().expect("registration succeeds");
+        gc.fail_next_acquisition_at_for_test(FINISH_FLUSH);
+        flusher.handle_flush_result(flush_failure("epoch B never reached disk"));
+
+        // One cycle drains both, oldest first.
+        flusher.perform_flush_cycle();
+        assert!(
+            gc.flushed_epoch().expect("frontier readable") >= epoch_b,
+            "both queued finishes must land, frontier is at {}",
+            gc.flushed_epoch().unwrap_or(0)
+        );
+
+        gc.wait_for_flush(epoch_a)
+            .expect("epoch A succeeded and must resolve as a success");
+        let msg = gc
+            .wait_for_flush(epoch_b)
+            .expect_err("epoch B failed and must resolve as a failure")
+            .to_string();
+        assert!(
+            msg.contains("epoch B never reached disk"),
+            "each queued epoch must carry its own outcome, got: {msg}"
+        );
+    }
+
+    /// A failing outcome whose epoch could not even be OPENED must still reach
+    /// the epoch those transactions land in.
+    ///
+    /// A refused `start_flush` advances nothing, so `current_epoch` still
+    /// covers exactly the same registered transactions -- the ones whose data
+    /// was just lost. Letting the next cycle open that epoch and report a
+    /// clean success would be the same acknowledged-but-lost commit by another
+    /// route.
+    #[test]
+    fn test_failed_flush_outcome_survives_a_refused_start_flush() {
+        let dir = tempdir().unwrap();
+        let system = quiesced_group_commit_system(dir.path());
+        let gc = coordinator_of(&system);
+        let flusher = test_flusher(&system, &gc);
+
+        let (epoch, _) = gc.register_transaction().expect("registration succeeds");
+
+        // The disk flush fails AND the epoch cannot be opened to report it.
+        gc.fail_next_acquisition_at_for_test(START_FLUSH);
+        flusher.handle_flush_result(flush_failure("disk exploded before the epoch opened"));
+
+        // The next cycle opens that same epoch (nothing advanced).
+        flusher.perform_flush_cycle();
+        assert!(
+            gc.flushed_epoch().expect("frontier readable") >= epoch,
+            "the frontier must still advance once the coordinator recovers"
+        );
+
+        let msg = gc
+            .wait_for_flush(epoch)
+            .expect_err(
+                "the lost flush was reported as a clean success: a failure whose start_flush \
+                 was refused must still reach the epoch covering those transactions",
+            )
+            .to_string();
+        assert!(
+            msg.contains("disk exploded before the epoch opened"),
+            "the carried failure must name the original error, got: {msg}"
+        );
+    }
+
+    /// A transient (non-poison) coordinator error must NOT take down the flush
+    /// thread: it should be counted, the cycle skipped, and flushing resumed.
+    #[test]
+    fn test_flush_thread_survives_injected_cycle_error() {
+        let dir = tempdir().unwrap();
+        let wal = ConcurrentWalSystem::new(group_commit_config(dir.path(), 20)).unwrap();
+
+        // Make the next flush cycle observe a non-poison error, exactly as a
+        // transient coordinator failure would.
+        wal.test_inject_cycle_error.store(true, Ordering::Relaxed);
+
+        assert!(
+            poll_until(|| wal.flush_cycle_errors() >= 1),
+            "flush thread died on non-poison error (current .expect() behavior): \
+             flush_cycle_errors stayed at {} for {:?}, so no cycle was ever skipped-and-counted",
+            wal.flush_cycle_errors(),
+            LIVENESS_WATCHDOG
+        );
+
+        // Surviving means the heartbeat keeps advancing AFTER the error.
+        let beat_after_error = wal.flush_heartbeat();
+        assert!(
+            poll_until(|| wal.flush_heartbeat() > beat_after_error),
+            "flush heartbeat frozen at {} after the injected error: the flush thread \
+             did not survive it",
+            beat_after_error
+        );
+
+        // ...and the WAL still round-trips real work.
+        wal.append(create_test_operation(1))
+            .expect("append after an injected flush-cycle error must succeed");
+        wal.flush()
+            .expect("flush after an injected flush-cycle error must succeed");
+        assert!(
+            wal.total_flushed() >= 1,
+            "the post-error append must reach disk"
+        );
+    }
+
+    /// The flusher must publish a strictly increasing heartbeat so its
+    /// liveness is observable from outside the thread.
+    #[test]
+    fn test_flush_heartbeat_advances() {
+        let dir = tempdir().unwrap();
+        let wal = ConcurrentWalSystem::new(group_commit_config(dir.path(), 10)).unwrap();
+
+        assert!(
+            poll_until(|| wal.flush_heartbeat() >= 1),
+            "flush_heartbeat() never reached 1 within {:?} with a 10ms flush interval: \
+             the flusher publishes no liveness signal",
+            LIVENESS_WATCHDOG
+        );
+
+        let first = wal.flush_heartbeat();
+        assert!(
+            poll_until(|| wal.flush_heartbeat() > first),
+            "flush_heartbeat() stuck at {} within {:?}: the signal does not advance per cycle",
+            first,
+            LIVENESS_WATCHDOG
+        );
+    }
+
+    /// A flusher that runs its startup cycle and then sleeps ~forever is a
+    /// wedged flusher; the health check must say so even though no flush has
+    /// actually errored.
+    #[test]
+    fn test_is_healthy_detects_stale_heartbeat() {
+        let dir = tempdir().unwrap();
+        // One startup cycle, then a ~1h sleep: a heartbeat that cannot advance
+        // again on its own -- wedged by configuration.
+        let wal = ConcurrentWalSystem::new(group_commit_config(dir.path(), 3_600_000)).unwrap();
+        wal.set_health_staleness_override_micros(50_000); // 50ms
+
+        assert!(
+            poll_until(|| !wal.is_healthy()),
+            "is_healthy() stayed true for {:?} with the heartbeat frozen far beyond the \
+             50ms staleness override: a wedged flusher is invisible to health checks",
+            LIVENESS_WATCHDOG
+        );
+        assert_eq!(
+            wal.consecutive_flush_errors(),
+            0,
+            "no flush actually failed here; only the heartbeat is stale"
+        );
+    }
+
+    /// Edge pin (passes before AND after the liveness fix): a durability mode
+    /// with no flush thread has no heartbeat to go stale, so it must stay
+    /// healthy no matter how strict the staleness threshold is.
+    #[test]
+    fn test_is_healthy_true_without_flush_thread() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path())
+            .with_durability_mode(DurabilityMode::Synchronous);
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        assert_eq!(
+            wal.flush_heartbeat(),
+            0,
+            "Synchronous mode runs no background flusher"
+        );
+        wal.set_health_staleness_override_micros(1); // absurdly strict
+        thread::sleep(Duration::from_millis(20));
+
+        assert!(
+            wal.is_healthy(),
+            "a WAL with no flush thread has no heartbeat that can go stale"
+        );
+        wal.append(create_test_operation(1)).unwrap();
+        assert!(
+            wal.is_healthy(),
+            "synchronous appends keep the WAL healthy regardless of heartbeat staleness"
+        );
+    }
+
+    /// Pure formula: ten flush intervals, floored at five seconds.
+    ///
+    /// The floor is what the default 10ms interval actually gets, and it is
+    /// deliberately far above a plausible scheduling or fsync hiccup: a
+    /// stalled flusher stays stalled, so the only thing a tight floor buys is
+    /// false alarms.
+    #[test]
+    fn test_staleness_threshold_formula() {
+        assert_eq!(
+            heartbeat_staleness_threshold(Duration::from_millis(10)),
+            Duration::from_secs(5),
+            "short intervals are floored at 5s"
+        );
+        assert_eq!(
+            heartbeat_staleness_threshold(Duration::from_millis(200)),
+            Duration::from_secs(5),
+            "2s of ten-intervals is still below the floor"
+        );
+        assert_eq!(
+            heartbeat_staleness_threshold(Duration::from_millis(1000)),
+            Duration::from_secs(10),
+            "above the floor the threshold is 10x the interval"
+        );
+        assert_eq!(
+            heartbeat_staleness_threshold(Duration::ZERO),
+            Duration::from_secs(5),
+            "a zero interval still gets the floor"
+        );
+    }
+
+    /// No panicking construct may remain on the flush-thread path.
+    ///
+    /// A panic on that thread kills the only consumer of the ring buffers,
+    /// which IS the #3798 stall: writers then pile up behind full buffers with
+    /// nothing left to drain them. The scan therefore covers every region the
+    /// flush thread executes -- the flusher itself, the spawn site, and the
+    /// loop entry point -- delimited by explicit marker comments so the guard
+    /// travels with the code instead of with a heading someone may rename.
+    ///
+    /// The poison arm's deliberate `panic!` stays allowed: a poisoned
+    /// coordinator means a thread died holding the lock, and continuing would
+    /// hang every waiter (see `note_cycle_error`).
+    #[test]
+    fn test_no_panicking_constructs_on_flush_thread_path() {
+        const SOURCE: &str = include_str!("concurrent_system.rs");
+
+        // Markers and needles are assembled at runtime so this test's own
+        // source can never match itself.
+        let begin = format!("// ---- flush-thread path: {} ----", "begin");
+        let end = format!("// ---- flush-thread path: {} ----", "end");
+
+        let mut regions: Vec<&str> = Vec::new();
+        let mut cursor = 0usize;
+        while let Some(rel) = SOURCE[cursor..].find(begin.as_str()) {
+            let start = cursor + rel + begin.len();
+            let rel_end = SOURCE[start..]
+                .find(end.as_str())
+                .expect("every flush-thread begin marker needs a matching end marker");
+            regions.push(&SOURCE[start..start + rel_end]);
+            cursor = start + rel_end + end.len();
+        }
+
+        assert_eq!(
+            regions.len(),
+            3,
+            "expected three marked flush-thread regions (the flusher, the spawn site, and \
+             flush_loop); markers were moved or dropped"
+        );
+        // Coverage anchors: a region pair collapsed around nothing would keep
+        // the scan green while guarding no code at all.
+        let all = regions.concat();
+        for anchor in ["impl BackgroundFlusher", "thread::spawn", "fn flush_loop"] {
+            assert!(
+                all.contains(anchor),
+                "the marked regions no longer cover `{anchor}`: the guard is watching the \
+                 wrong code"
+            );
+        }
+
+        for needle in [
+            format!("{}{}", ".expect", "("),
+            format!("{}{}", ".unwrap", "()"),
+            format!("{}{}", "print", "ln!"),
+            format!("{}{}", "eprint", "ln!"),
+        ] {
+            let hits: usize = regions.iter().map(|r| r.matches(&needle).count()).sum();
+            assert_eq!(
+                hits, 0,
+                "found {} `{}` on the flush-thread path: a non-poison error must be counted \
+                 and skipped, and logging must go through the non-panicking helper (the \
+                 print macros panic on EPIPE)",
+                hits, needle
+            );
+        }
     }
 }

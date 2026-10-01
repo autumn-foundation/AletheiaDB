@@ -59,10 +59,10 @@ impl AletheiaDB {
         // greater timestamp, so `baseline_after(frontier)` is a gap-free "resume from where I
         // subscribed" cursor even before the consumer drains its first event. Poison-recover
         // the guard so a panicked writer elsewhere can never make subscribe unwind.
-        let frontier = *self
-            .current_timestamp
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        // Lock-free frontier read: no guard to poison, so a panicking writer
+        // elsewhere can no longer make subscribe unwind (it previously had to
+        // recover the poisoned guard by hand).
+        let frontier = self.current_timestamp.load();
         let baseline = crate::core::changefeed::ChangeCursor::baseline_after(frontier);
         self.changefeed
             .subscribe_with_baseline(filter, Some(baseline))
@@ -92,10 +92,10 @@ impl AletheiaDB {
         principal_key: Option<&str>,
         filter: ChangeFilter,
     ) -> Result<Subscription> {
-        let frontier = *self
-            .current_timestamp
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        // Lock-free frontier read: no guard to poison, so a panicking writer
+        // elsewhere can no longer make subscribe unwind (it previously had to
+        // recover the poisoned guard by hand).
+        let frontier = self.current_timestamp.load();
         let baseline = crate::core::changefeed::ChangeCursor::baseline_after(frontier);
         self.changefeed.subscribe_with_baseline_and_principal(
             filter,

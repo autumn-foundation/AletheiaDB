@@ -462,13 +462,17 @@ fn test_temporal_edge_version_chain_integrity() {
             let version = hist_guard.get_edge_version(current_id).unwrap();
             version_count += 1;
 
-            // Verify timestamp ordering (newer versions have larger timestamps)
-            let current_timestamp = version.temporal.valid_time().start();
-            assert!(
-                current_timestamp < prev_timestamp || prev_timestamp == i64::MAX.into(),
-                "Version chain should be ordered by decreasing timestamp"
-            );
-            prev_timestamp = current_timestamp;
+            // Verify timestamp ordering (newer WRITES have larger valid_from).
+            // Structural carry-forwards (ADR-0061) re-record the predecessor's
+            // valid_from and are skipped by this ordering check.
+            if !current_id.is_structural() {
+                let current_timestamp = version.temporal.valid_time().start();
+                assert!(
+                    current_timestamp < prev_timestamp || prev_timestamp == i64::MAX.into(),
+                    "Version chain should be ordered by decreasing timestamp"
+                );
+                prev_timestamp = current_timestamp;
+            }
 
             // Verify version is either anchor or delta
             assert!(
@@ -491,8 +495,8 @@ fn test_temporal_edge_version_chain_integrity() {
         }
 
         assert_eq!(
-            version_count, 6,
-            "Should have 6 versions (1 create + 5 updates)"
+            version_count, 11,
+            "Should have 11 versions (1 create + 5 x (structural carry-forward + update))"
         );
         println!(
             "✓ Edge version chain integrity verified ({} versions)",
@@ -563,10 +567,14 @@ fn test_temporal_edge_anchor_delta_pattern() {
         // Reverse to get oldest to newest
         version_ids.reverse();
 
-        assert_eq!(version_ids.len(), 6, "Should have 6 versions");
+        // create + 5 x (structural carry-forward + update) (ADR-0061); every
+        // stored version advances the anchor counter (interval 3).
+        assert_eq!(version_ids.len(), 11, "Should have 11 versions");
 
-        // Check pattern
-        let expected_pattern = [true, false, false, true, false, false]; // A, D, D, A, D, D
+        // Check pattern: anchors at chain positions 0, 3, 6, 9
+        let expected_pattern = [
+            true, false, false, true, false, false, true, false, false, true, false,
+        ];
         for (i, &version_id) in version_ids.iter().enumerate() {
             let version = hist_guard.get_edge_version(version_id).unwrap();
             let is_anchor = version.is_anchor();
@@ -584,7 +592,7 @@ fn test_temporal_edge_anchor_delta_pattern() {
             );
         }
 
-        println!("✓ Edge anchor/delta pattern correct: A D D A D D");
+        println!("✓ Edge anchor/delta pattern correct: A D D A D D A D D A D");
     }
 }
 

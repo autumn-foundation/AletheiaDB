@@ -1,0 +1,463 @@
+//! Measures how AletheiaDB's read and write paths scale with concurrent threads.
+//!
+//! Run with:
+//! ```text
+//! cargo run --release --example concurrency_scaling
+//! ```
+//!
+//! Four workloads are swept across thread counts:
+//!
+//! - `write/group_commit` — full transaction commits under `GroupCommit`
+//! - `write/async`        — full transaction commits under `Async`
+//! - `read/snapshot`      — `read_transaction()` + `get_node` (takes a snapshot timestamp)
+//! - `read/current`       — `db.get_node()` (current-state fast path, no snapshot)
+//!
+//! The interesting number is the scaling factor: throughput at N threads divided
+//! by throughput at 1 thread. A path that serializes on a global lock stays flat
+//! (or degrades) as N rises; a path that genuinely parallelizes climbs with N.
+
+use aletheiadb::config::WalConfigBuilder;
+use aletheiadb::core::NodeId;
+use aletheiadb::storage::wal::DurabilityMode;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Barrier};
+use std::thread;
+use std::time::Instant;
+
+use aletheiadb::api::{ReadOps, WriteOps};
+
+const THREAD_COUNTS: &[usize] = &[1, 2, 4, 8];
+/// GroupCommit runs ~10ms/commit, so 100 ops/thread is already ~1s at 1 thread.
+const GROUP_COMMIT_OPS_PER_THREAD: usize = 100;
+/// Async commits are ~5µs, so this needs to be large enough that thread
+/// spawn/join overhead does not dominate the measured window.
+const ASYNC_OPS_PER_THREAD: usize = 100_000;
+/// Reads are ~20-60ns, so the op count has to be large or we are timing
+/// `thread::join`, not the database.
+const READ_OPS_PER_THREAD: usize = 2_000_000;
+const SEED_NODES: usize = 1_000;
+
+fn make_db(mode: DurabilityMode) -> (tempfile::TempDir, Arc<AletheiaDB>) {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let config = WalConfigBuilder::new()
+        .wal_dir(temp_dir.path().to_path_buf())
+        .segment_size(64 * 1024 * 1024)
+        .expect("segment size")
+        .segments_to_retain(3)
+        .expect("segments to retain")
+        .durability_mode(mode)
+        .build();
+    let db = AletheiaDB::with_wal_config(config).expect("db");
+    (temp_dir, Arc::new(db))
+}
+
+/// Run `body` on `threads` threads and return aggregate ops/sec.
+///
+/// A `Barrier` (which parks rather than spins) releases all workers at once, so
+/// on an oversubscribed box the synchronization does not steal cores from the
+/// work being measured. The timer starts after the barrier and stops after
+/// every worker has finished its loop.
+fn measure<F>(threads: usize, ops_per_thread: usize, body: F) -> f64
+where
+    F: Fn(usize, usize) + Send + Sync + 'static,
+{
+    let body = Arc::new(body);
+    let start_barrier = Arc::new(Barrier::new(threads + 1));
+    let done_barrier = Arc::new(Barrier::new(threads + 1));
+
+    let mut handles = Vec::with_capacity(threads);
+    for t in 0..threads {
+        let body = Arc::clone(&body);
+        let start_barrier = Arc::clone(&start_barrier);
+        let done_barrier = Arc::clone(&done_barrier);
+        handles.push(thread::spawn(move || {
+            start_barrier.wait();
+            for i in 0..ops_per_thread {
+                body(t, i);
+            }
+            done_barrier.wait();
+        }));
+    }
+
+    start_barrier.wait();
+    let start = Instant::now();
+    done_barrier.wait();
+    let elapsed = start.elapsed().as_secs_f64();
+
+    for h in handles {
+        h.join().expect("thread");
+    }
+    (threads * ops_per_thread) as f64 / elapsed
+}
+
+fn report(label: &str, results: &[(usize, f64)]) {
+    let base = results.first().map(|(_, v)| *v).unwrap_or(1.0);
+    println!("\n{label}");
+    println!(
+        "  {:>7}  {:>14}  {:>10}  {:>12}",
+        "threads", "ops/sec", "scaling", "µs/op"
+    );
+    for (threads, ops) in results {
+        println!(
+            "  {:>7}  {:>14.0}  {:>9.2}x  {:>12.2}",
+            threads,
+            ops,
+            ops / base,
+            1_000_000.0 * (*threads as f64) / ops
+        );
+    }
+}
+
+fn bench_writes(label: &str, mode: DurabilityMode, ops_per_thread: usize) {
+    let mut results = Vec::new();
+    for &threads in THREAD_COUNTS {
+        let (_guard, db) = make_db(mode);
+        let db_for_body = Arc::clone(&db);
+        let ops = measure(threads, ops_per_thread, move |t, i| {
+            db_for_body
+                .write(|tx| {
+                    tx.create_node(
+                        "Scaling",
+                        PropertyMapBuilder::new()
+                            .insert("thread", t as i64)
+                            .insert("i", i as i64)
+                            .build(),
+                    )
+                })
+                .expect("commit");
+        });
+        results.push((threads, ops));
+        drop(db);
+    }
+    report(label, &results);
+}
+
+fn bench_reads() {
+    let (_guard, db) = make_db(DurabilityMode::Async {
+        flush_interval_ms: 100,
+    });
+    let mut ids = Vec::with_capacity(SEED_NODES);
+    for i in 0..SEED_NODES {
+        let id = db
+            .create_node(
+                "Seed",
+                PropertyMapBuilder::new().insert("i", i as i64).build(),
+            )
+            .expect("seed");
+        ids.push(id);
+    }
+    let ids = Arc::new(ids);
+
+    let mut snapshot_results = Vec::new();
+    for &threads in THREAD_COUNTS {
+        let db = Arc::clone(&db);
+        let ids = Arc::clone(&ids);
+        let ops = measure(threads, READ_OPS_PER_THREAD, move |t, i| {
+            let id: NodeId = ids[(t * 7919 + i) % ids.len()];
+            let tx = db.read_transaction().expect("read tx");
+            let _ = tx.get_node(id).expect("get");
+        });
+        snapshot_results.push((threads, ops));
+    }
+    report(
+        "read/snapshot  (read_transaction + get_node)",
+        &snapshot_results,
+    );
+
+    // Diagnostic: transaction construction with no read at all. The delta
+    // against read/snapshot is what one get_node costs inside a transaction;
+    // the delta against read/current is what the transaction object costs.
+    let mut txn_only_results = Vec::new();
+    for &threads in THREAD_COUNTS {
+        let db = Arc::clone(&db);
+        let ops = measure(threads, READ_OPS_PER_THREAD, move |_t, _i| {
+            let _tx = db.read_transaction().expect("read tx");
+        });
+        txn_only_results.push((threads, ops));
+    }
+    report(
+        "read/txn-only  (read_transaction, no read)",
+        &txn_only_results,
+    );
+
+    let mut current_results = Vec::new();
+    for &threads in THREAD_COUNTS {
+        let db = Arc::clone(&db);
+        let ids = Arc::clone(&ids);
+        let ops = measure(threads, READ_OPS_PER_THREAD, move |t, i| {
+            let id: NodeId = ids[(t * 7919 + i) % ids.len()];
+            let _ = db.get_node(id).expect("get");
+        });
+        current_results.push((threads, ops));
+    }
+    report(
+        "read/current   (db.get_node -> clones Node + bumps PropertyMap Arc)",
+        &current_results,
+    );
+
+    // Same access pattern, but zero-copy: no Node clone, no PropertyMap Arc
+    // increment. Isolates "shared atomic refcount" from "shared lock".
+    let mut borrow_results = Vec::new();
+    for &threads in THREAD_COUNTS {
+        let db = Arc::clone(&db);
+        let ids = Arc::clone(&ids);
+        let ops = measure(threads, READ_OPS_PER_THREAD, move |t, i| {
+            let id: NodeId = ids[(t * 7919 + i) % ids.len()];
+            let _ = db.with_node(id, |n| n.id).expect("with_node");
+        });
+        borrow_results.push((threads, ops));
+    }
+    report(
+        "read/borrow    (db.with_node, zero-copy, shared hot set)",
+        &borrow_results,
+    );
+
+    // Zero-copy AND disjoint per-thread id ranges: no shared cache lines at all.
+    // This is the ceiling the read path can reach.
+    let mut disjoint_results = Vec::new();
+    for &threads in THREAD_COUNTS {
+        let db = Arc::clone(&db);
+        let ids = Arc::clone(&ids);
+        let ops = measure(threads, READ_OPS_PER_THREAD, move |t, i| {
+            let stride = ids.len() / 16;
+            let id: NodeId = ids[(t * stride + i) % ids.len()];
+            let _ = db.with_node(id, |n| n.id).expect("with_node");
+        });
+        disjoint_results.push((threads, ops));
+    }
+    report(
+        "read/disjoint  (db.with_node, zero-copy, disjoint id ranges)",
+        &disjoint_results,
+    );
+}
+
+/// Readers taking snapshots while a writer commits continuously.
+///
+/// The other read sweeps run with no writer at all, which hides the thing that
+/// actually costs a snapshot read: the commit clock used to be a mutex a
+/// committer held across its ENTIRE commit -- guards, WAL append, fsync, apply,
+/// finalize -- so a reader wanting a snapshot queued behind a whole group-commit
+/// flush. A read-only sweep never pays that, and a write-only sweep never
+/// observes it.
+///
+/// Reported number is reader throughput; the writer runs for the same window and
+/// its commit count is reported alongside so a change that simply starves the
+/// writer is visible rather than flattering.
+fn bench_reads_under_write(label: &str, mode: DurabilityMode) {
+    let (_guard, db) = make_db(mode);
+    let mut ids = Vec::with_capacity(SEED_NODES);
+    for i in 0..SEED_NODES {
+        let id = db
+            .create_node(
+                "Seed",
+                PropertyMapBuilder::new().insert("i", i as i64).build(),
+            )
+            .expect("seed");
+        ids.push(id);
+    }
+    let ids = Arc::new(ids);
+
+    let mut results = Vec::new();
+    let mut writer_commits = Vec::new();
+    for &threads in THREAD_COUNTS {
+        let stop = Arc::new(AtomicBool::new(false));
+        let commits = Arc::new(AtomicU64::new(0));
+
+        let writer = {
+            let db = Arc::clone(&db);
+            let stop = Arc::clone(&stop);
+            let commits = Arc::clone(&commits);
+            thread::spawn(move || {
+                let mut i = 0i64;
+                while !stop.load(AtomicOrdering::Relaxed) {
+                    db.write(|tx| {
+                        tx.create_node("Churn", PropertyMapBuilder::new().insert("i", i).build())
+                    })
+                    .expect("commit");
+                    commits.fetch_add(1, AtomicOrdering::Relaxed);
+                    i += 1;
+                }
+            })
+        };
+
+        let ops = {
+            let db = Arc::clone(&db);
+            let ids = Arc::clone(&ids);
+            measure(threads, READ_OPS_PER_THREAD, move |t, i| {
+                let id: NodeId = ids[(t * 7919 + i) % ids.len()];
+                let tx = db.read_transaction().expect("read tx");
+                let _ = tx.get_node(id).expect("get");
+            })
+        };
+
+        stop.store(true, AtomicOrdering::Relaxed);
+        writer.join().expect("writer");
+        writer_commits.push(commits.load(AtomicOrdering::Relaxed));
+        results.push((threads, ops));
+    }
+    report(label, &results);
+    println!(
+        "    writer commits during each window: {:?}",
+        writer_commits
+    );
+}
+
+/// Control: what four contended `Arc` clone+drop pairs cost on this box.
+///
+/// `read_transaction` clones an `Arc` for each storage handle it hands the
+/// transaction, plus one for the active-transaction set -- and drops them all
+/// again. Each pair is an atomic increment and decrement on a cache line every
+/// thread shares. This measures that alone, with no database involved, so the
+/// transaction-construction cost can be attributed rather than guessed at.
+fn bench_arc_control() {
+    let shared: Arc<Vec<u8>> = Arc::new(vec![0u8; 64]);
+    let a = Arc::new(1u64);
+    let b = Arc::new(2u64);
+    let c = Arc::new(3u64);
+    let handles = Arc::new((shared, a, b, c));
+
+    let mut results = Vec::new();
+    for &threads in THREAD_COUNTS {
+        let handles = Arc::clone(&handles);
+        let ops = measure(threads, READ_OPS_PER_THREAD, move |_t, _i| {
+            let (s, a, b, c) = &*handles;
+            let s = Arc::clone(s);
+            let a = Arc::clone(a);
+            let b = Arc::clone(b);
+            let c = Arc::clone(c);
+            std::hint::black_box((&s, &a, &b, &c));
+        });
+        results.push((threads, ops));
+    }
+    report(
+        "control/arc     (4 contended Arc clone+drop pairs)",
+        &results,
+    );
+}
+
+/// Does group commit actually batch?
+///
+/// The design doc claims it cannot: a committer holds the commit clock across
+/// its own fsync wait, so no second transaction can be registered-and-unflushed
+/// at the same time, and batch size is structurally pinned at one. That is a
+/// claim about the code, not a measurement. Two predictions fall out of it, and
+/// both are cheap to check:
+///
+/// 1. Throughput tracks `1 / max_delay_ms` -- every commit waits out the full
+///    window alone, so halving the window doubles throughput.
+/// 2. `Synchronous` BEATS `GroupCommit`, because a group of one gains nothing
+///    from batching and pays the whole window in latency.
+///
+/// If either fails, the diagnosis is wrong and Stage 3 needs rethinking.
+fn bench_durability_modes(threads: usize) {
+    println!("\nwrite/durability-modes  ({threads} concurrent writers)");
+    println!(
+        "  {:>34}  {:>14}  {:>12}",
+        "mode", "commits/sec", "ms/commit"
+    );
+
+    let modes: Vec<(String, DurabilityMode, usize)> = vec![
+        ("Synchronous".to_string(), DurabilityMode::Synchronous, 60),
+        (
+            "GroupCommit { max_delay_ms: 10 }".to_string(),
+            DurabilityMode::GroupCommit {
+                max_delay_ms: 10,
+                max_batch_size: 200,
+            },
+            40,
+        ),
+        (
+            "GroupCommit { max_delay_ms: 5 }".to_string(),
+            DurabilityMode::GroupCommit {
+                max_delay_ms: 5,
+                max_batch_size: 200,
+            },
+            40,
+        ),
+        (
+            "GroupCommit { max_delay_ms: 1 }".to_string(),
+            DurabilityMode::GroupCommit {
+                max_delay_ms: 1,
+                max_batch_size: 200,
+            },
+            60,
+        ),
+    ];
+
+    for (label, mode, ops) in modes {
+        let (_guard, db) = make_db(mode);
+        let db_for_body = Arc::clone(&db);
+        let rate = measure(threads, ops, move |t, i| {
+            db_for_body
+                .write(|tx| {
+                    tx.create_node(
+                        "Durability",
+                        PropertyMapBuilder::new()
+                            .insert("thread", t as i64)
+                            .insert("i", i as i64)
+                            .build(),
+                    )
+                })
+                .expect("commit");
+        });
+        println!(
+            "  {:>34}  {:>14.0}  {:>12.2}",
+            label,
+            rate,
+            1000.0 * (threads as f64) / rate
+        );
+        drop(db);
+    }
+}
+
+fn main() {
+    println!(
+        "AletheiaDB concurrency scaling — {} cores available",
+        thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(0)
+    );
+
+    bench_arc_control();
+
+    bench_durability_modes(8);
+    // Group commit's whole advantage is amortising one fsync over many waiting
+    // committers, so its standing against Synchronous depends on how many there
+    // are. Measure a second, higher concurrency to see where the crossover is.
+    bench_durability_modes(32);
+
+    bench_reads_under_write(
+        "read/snapshot+writer-async  (readers + 1 Async writer)",
+        DurabilityMode::Async {
+            flush_interval_ms: 1,
+        },
+    );
+    // The case Stage 2 is actually about: under GroupCommit a committer used to
+    // hold the commit clock across its fsync wait (~10ms), so a reader wanting a
+    // snapshot queued behind the whole flush.
+    bench_reads_under_write(
+        "read/snapshot+writer-gc     (readers + 1 GroupCommit writer)",
+        DurabilityMode::GroupCommit {
+            max_delay_ms: 10,
+            max_batch_size: 200,
+        },
+    );
+
+    bench_writes(
+        "write/group_commit  (GroupCommit { max_delay_ms: 10, max_batch_size: 200 })",
+        DurabilityMode::GroupCommit {
+            max_delay_ms: 10,
+            max_batch_size: 200,
+        },
+        GROUP_COMMIT_OPS_PER_THREAD,
+    );
+    bench_writes(
+        "write/async         (Async { flush_interval_ms: 1 })",
+        DurabilityMode::Async {
+            flush_interval_ms: 1,
+        },
+        ASYNC_OPS_PER_THREAD,
+    );
+    bench_reads();
+}

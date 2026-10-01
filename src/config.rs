@@ -126,6 +126,34 @@ pub struct WalConfig {
     /// so setting this to `false` does not re-brick the writer at seed time.
     /// Default: true
     pub tolerate_torn_tail: bool,
+
+    /// Maximum time (milliseconds) a writer blocks on a full WAL ring buffer
+    /// before failing with a diagnosable error (Issue #3798).
+    ///
+    /// Bounds one append CALL (a batch shares one budget, it is not re-armed
+    /// per operation). A writer that blocks forever behind a dead or wedged
+    /// flush thread is indistinguishable from a hung process, which is what
+    /// this bound exists to prevent — it is stall DETECTION, not a latency
+    /// SLA, so the default is generous enough that healthy backpressure never
+    /// trips it.
+    ///
+    /// `0` restores the legacy unbounded block.
+    /// Default: 30_000 (30s)
+    pub max_append_block_ms: u64,
+
+    /// Bound (milliseconds) on acquiring the group-commit coordinator's state
+    /// mutex (Issue #3798).
+    ///
+    /// Deadlock DETECTION, not a performance SLA: the default is deliberately
+    /// larger than the coordinator's own flush-wait timeout, so a stuck
+    /// *flusher* is always reported first and this bound only fires for a
+    /// genuinely stuck *mutex*. Only meaningful for the GroupCommit /
+    /// AsyncBatched durability modes, which are the ones that run a
+    /// coordinator.
+    ///
+    /// `0` restores the legacy unbounded `Mutex::lock`.
+    /// Default: 120_000 (2 min)
+    pub acquire_timeout_ms: u64,
 }
 
 impl Default for WalConfig {
@@ -140,6 +168,8 @@ impl Default for WalConfig {
             segments_to_retain: 10,
             durability_mode: crate::storage::wal::DurabilityMode::group_commit_default(),
             tolerate_torn_tail: true,
+            max_append_block_ms: crate::storage::wal::concurrent::DEFAULT_MAX_APPEND_BLOCK_MS,
+            acquire_timeout_ms: crate::storage::wal::group_commit::DEFAULT_ACQUIRE_TIMEOUT_MS,
         }
     }
 }
@@ -342,6 +372,26 @@ impl WalConfigBuilder {
     /// failure aborts startup). See [`WalConfig::tolerate_torn_tail`].
     pub fn tolerate_torn_tail(mut self, tolerate: bool) -> Self {
         self.config.tolerate_torn_tail = tolerate;
+        self
+    }
+
+    /// Set the bound on blocking WAL appends, in milliseconds (Issue #3798).
+    ///
+    /// `0` restores the legacy unbounded block. Deliberately not validated
+    /// against zero: that value IS the documented escape hatch. See
+    /// [`WalConfig::max_append_block_ms`].
+    pub fn max_append_block_ms(mut self, ms: u64) -> Self {
+        self.config.max_append_block_ms = ms;
+        self
+    }
+
+    /// Set the bound on acquiring the group-commit state mutex, in
+    /// milliseconds (Issue #3798).
+    ///
+    /// `0` restores legacy unbounded acquisition. See
+    /// [`WalConfig::acquire_timeout_ms`].
+    pub fn acquire_timeout_ms(mut self, ms: u64) -> Self {
+        self.config.acquire_timeout_ms = ms;
         self
     }
 
@@ -1016,6 +1066,13 @@ pub struct AletheiaDBConfig {
     /// unset), so a database's behavior is unchanged unless an operator opts
     /// in. See [`ReplicationConfig`] for what each field wires up.
     pub replication: ReplicationConfig,
+    /// Background adjacency-index maintenance (Issue #3810). **Enabled by
+    /// default**: a shared, process-wide worker compacts the delta buffer into
+    /// the frozen CSR once writes go quiet, which is the only way reads reach
+    /// the ADR-0026 frozen fast path. Disable with
+    /// [`AdjacencyMaintenanceConfig::disabled`] to keep compaction strictly
+    /// explicit (`AletheiaDB::compact_adjacency`).
+    pub adjacency: crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig,
 }
 
 /// Builder for unified database configuration.
@@ -1056,6 +1113,15 @@ impl AletheiaDBConfigBuilder {
     /// Set persistence configuration.
     pub fn persistence(mut self, persistence_config: PersistenceConfig) -> Self {
         self.config.persistence = persistence_config;
+        self
+    }
+
+    /// Set the background adjacency-maintenance policy (Issue #3810).
+    pub fn adjacency(
+        mut self,
+        adjacency_config: crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig,
+    ) -> Self {
+        self.config.adjacency = adjacency_config;
         self
     }
 
@@ -1551,6 +1617,50 @@ mod tests {
 
     #[test]
     #[cfg(feature = "config-toml")]
+    fn test_toml_adjacency_section_round_trips() {
+        use crate::index::adjacency_maintenance::AdjacencyMaintenanceConfig;
+
+        // Background adjacency maintenance (Issue #3810) must be tunable from
+        // an on-disk config, and -- because it is ON by default -- an existing
+        // config with no `[adjacency]` section must keep the default policy.
+        let toml_str = r#"
+[adjacency]
+enabled = false
+tick_interval_ms = 25
+quiet_ticks = 3
+duty_cycle_percent = 50
+quiescent_amortization = 0
+        "#;
+
+        let config = AletheiaDBConfig::from_toml_str(toml_str).unwrap();
+        assert!(!config.adjacency.enabled);
+        assert_eq!(config.adjacency.tick_interval_ms, 25);
+        assert_eq!(config.adjacency.quiet_ticks, 3);
+        assert_eq!(config.adjacency.duty_cycle_percent, 50);
+        assert_eq!(config.adjacency.quiescent_amortization, 0);
+        // Unspecified keys keep their defaults.
+        assert_eq!(
+            config.adjacency.min_compaction_interval_ms,
+            AdjacencyMaintenanceConfig::default().min_compaction_interval_ms
+        );
+
+        let rendered = config.to_toml_string().unwrap();
+        assert!(
+            rendered.contains("[adjacency]"),
+            "rendered TOML: {rendered}"
+        );
+        let reparsed = AletheiaDBConfig::from_toml_str(&rendered).unwrap();
+        assert_eq!(reparsed.adjacency, config.adjacency);
+
+        // Omitting the section leaves maintenance enabled: without it the
+        // frozen-CSR read fast path is unreachable (Issue #3810).
+        let bare = AletheiaDBConfig::from_toml_str("[wal]\nnum_stripes = 4\n").unwrap();
+        assert_eq!(bare.adjacency, AdjacencyMaintenanceConfig::default());
+        assert!(bare.adjacency.enabled);
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
     fn test_toml_chain_section_round_trips() {
         // The opt-in provenance hash chain (Issue #3351) must round-trip
         // through TOML via the `[chain]` section so `aletheia verify` can be
@@ -1694,6 +1804,36 @@ max_layer = 32
 
         // Should be equal
         assert_eq!(original, deserialized);
+    }
+
+    /// Issue #3798 review round: the two WAL stall bounds are documented with
+    /// a `0 = restore the legacy unbounded behavior` escape hatch, which is
+    /// only real if an operator can actually set them from a config file.
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn test_toml_carries_the_wal_stall_bounds() {
+        let toml_str = r#"
+[wal]
+max_append_block_ms = 0
+acquire_timeout_ms = 250
+        "#;
+
+        let config = AletheiaDBConfig::from_toml_str(toml_str).unwrap();
+        assert_eq!(
+            config.wal.max_append_block_ms, 0,
+            "`0` must survive as the documented unbounded escape hatch"
+        );
+        assert_eq!(config.wal.acquire_timeout_ms, 250);
+
+        // Omitting them keeps the shipped defaults...
+        let defaults = AletheiaDBConfig::from_toml_str("[wal]\nnum_stripes = 16\n").unwrap();
+        assert_eq!(defaults.wal.max_append_block_ms, 30_000);
+        assert_eq!(defaults.wal.acquire_timeout_ms, 120_000);
+
+        // ...and both survive a serialize/parse round trip.
+        let rendered = config.to_toml_string().unwrap();
+        let reparsed = AletheiaDBConfig::from_toml_str(&rendered).unwrap();
+        assert_eq!(reparsed.wal, config.wal);
     }
 
     #[test]
