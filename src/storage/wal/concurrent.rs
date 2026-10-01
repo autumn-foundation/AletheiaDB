@@ -2030,4 +2030,27 @@ mod sentry_tests {
         );
         assert_eq!(*drained.lock().unwrap(), 4, "expected the full batch");
     }
+
+    /// The progress-aware drain only waits while batches are in flight: an
+    /// idle WAL must shut down immediately rather than sit out the
+    /// no-progress grace window (1 s with an unbounded `max_append_block_ms`).
+    #[test]
+    fn test_shutdown_graceful_idle_returns_without_waiting_out_grace() {
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let wal = wedged_wal(dir.path(), 2, 0);
+        wal.append_batch(vec![test_operation()])
+            .expect("append on an open WAL succeeds");
+
+        let start = Instant::now();
+        let outcome = wal.shutdown_graceful();
+        let elapsed = start.elapsed();
+
+        assert_eq!(outcome, ShutdownOutcome::Completed);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "idle shutdown waited out the grace window (took {elapsed:?})"
+        );
+    }
 }
