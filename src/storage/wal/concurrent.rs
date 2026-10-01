@@ -169,6 +169,27 @@ thread_local! {
     static THREAD_ID_HASH: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
+/// Outcome of a graceful shutdown attempt (Issue #3801).
+///
+/// `shutdown_graceful` no longer spins indefinitely: it closes the ring
+/// buffers first (so a writer parked in a blocking append exits via the
+/// `Closed` path instead of deadlocking the shutdown), then waits for
+/// in-flight appenders with a bounded deadline derived from
+/// `max_append_block_ms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownOutcome {
+    /// All in-flight appenders drained within the deadline; buffers closed.
+    Completed,
+    /// The deadline expired with `active_batches` appenders still in
+    /// flight. Buffers are closed (blocked appenders will exit via the
+    /// `Closed` path), but the caller must not assume every append
+    /// completed — some may have been refused by the close.
+    TimedOut {
+        /// Number of appenders still in flight when the deadline expired.
+        active_batches: usize,
+    },
+}
+
 /// Concurrent Write-Ahead Log with striped architecture.
 ///
 /// Provides high-throughput, low-latency WAL operations by distributing
@@ -541,12 +562,16 @@ impl ConcurrentWal {
         match stripe.append_sync(lsn, data) {
             Ok(handle) => {
                 self.total_appends.fetch_add(1, Ordering::Relaxed);
-                // Wait for flush
-                handle.wait().map_err(|e| {
-                    Error::Storage(StorageError::WalError {
-                        reason: format!("WAL flush failed: {}", e),
-                    })
-                })?;
+                // Wait for flush, with a deadlock-detection timeout (Issue #3802).
+                // Aligned with the group-commit acquire timeout stance (120s):
+                // deadlock detection, not an SLA.
+                handle
+                    .wait_timeout(std::time::Duration::from_secs(120))
+                    .map_err(|e| {
+                        Error::Storage(StorageError::WalError {
+                            reason: format!("WAL flush failed: {}", e),
+                        })
+                    })?;
                 Ok(lsn)
             }
             Err(_entry) => Err(Error::Storage(StorageError::WalError {
@@ -890,24 +915,42 @@ impl ConcurrentWal {
     /// Gracefully shutdown the WAL.
     ///
     /// This signals that shutdown is requested (preventing new batches),
-    /// waits for all active batches to complete, and then closes the ring buffers.
-    pub fn shutdown_graceful(&self) {
-        // 1. Signal shutdown
+    /// closes the ring buffers FIRST (so a writer parked in a blocking append
+    /// exits via the `Closed` path instead of deadlocking this waiter — Issue
+    /// #3801), then waits for in-flight appenders with a bounded deadline.
+    ///
+    /// The deadline is `max_append_block_ms` (minimum 1 second): a blocked
+    /// appender gives up after that long on its own, or exits promptly via
+    /// `Closed` once the buffers are closed. An unbounded configuration
+    /// (`max_append_block_ms == 0`) still gets a deadline — the close is what
+    /// unblocks it, not the timeout.
+    pub fn shutdown_graceful(&self) -> ShutdownOutcome {
+        // 1. Signal shutdown (prevents new batches).
         self.shutdown_requested.store(true, Ordering::SeqCst);
 
-        // 2. Wait for active batches to complete
-        let mut spins = 0;
-        while self.active_batches.load(Ordering::SeqCst) > 0 {
-            if spins < 100 {
-                std::hint::spin_loop();
-            } else {
-                std::thread::yield_now();
-            }
-            spins += 1;
-        }
-
-        // 3. Close buffers
+        // 2. Close buffers BEFORE waiting (Issue #3801). A writer parked in a
+        //    blocking append waits for buffer space or close; closing first
+        //    lets it exit via the existing `Closed` path. Waiting first
+        //    deadlocks when `max_append_block_ms == 0` (unbounded): the
+        //    spinner waits for the appender, the appender waits for space or
+        //    close, and close never comes.
         self.close();
+
+        // 3. Wait for active batches with a bounded deadline.
+        let bound_ms = self.config.max_append_block_ms.max(1_000);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(bound_ms);
+        loop {
+            let active = self.active_batches.load(Ordering::SeqCst);
+            if active == 0 {
+                return ShutdownOutcome::Completed;
+            }
+            if std::time::Instant::now() >= deadline {
+                return ShutdownOutcome::TimedOut {
+                    active_batches: active,
+                };
+            }
+            std::thread::yield_now();
+        }
     }
 
     /// Check if the WAL is closed.
@@ -970,7 +1013,7 @@ mod tests {
     use std::thread;
     use tempfile::tempdir;
 
-    fn test_operation() -> WalOperation {
+    pub(super) fn test_operation() -> WalOperation {
         WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
@@ -1337,7 +1380,11 @@ mod tests {
 
     /// A one-stripe WAL whose ring buffer holds `capacity` entries and whose
     /// blocking appends give up after `bound_ms`.
-    fn wedged_wal(dir: &std::path::Path, capacity: usize, bound_ms: u64) -> Arc<ConcurrentWal> {
+    pub(super) fn wedged_wal(
+        dir: &std::path::Path,
+        capacity: usize,
+        bound_ms: u64,
+    ) -> Arc<ConcurrentWal> {
         let config = ConcurrentWalConfig::new(dir)
             .with_num_stripes(1)
             .with_stripe_capacity(capacity)
@@ -1681,12 +1728,15 @@ mod tests {
 
 #[cfg(test)]
 mod sentry_tests {
+    use super::tests::{test_operation, wedged_wal};
     use super::*;
     use crate::GLOBAL_INTERNER;
     use crate::core::id::NodeId;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::time;
     use crate::storage::wal::entry::MAX_WAL_ENTRY_SIZE;
+    use std::sync::Arc;
+    use std::thread;
     use tempfile::tempdir;
 
     /// 🎯 Target: MAX_WAL_ENTRY_SIZE boundary check
@@ -1840,5 +1890,64 @@ mod sentry_tests {
         for h in handles {
             h.join().unwrap();
         }
+    }
+
+    /// Issue #3801: `shutdown_graceful` must not deadlock on a wedged appender.
+    ///
+    /// A writer parked in a blocking append (unbounded when
+    /// `max_append_block_ms == 0`) used to deadlock shutdown: the spinner
+    /// waited for the appender, the appender waited for buffer space or close,
+    /// and close never came because it ran after the spin. Now buffers close
+    /// first (the appender exits via the `Closed` path) and the wait has a
+    /// deadline.
+    ///
+    /// Deterministic: the appender is wedged on a 2-slot buffer that is never
+    /// drained; the only way shutdown completes is via the close-first path.
+    #[test]
+    fn test_shutdown_graceful_unblocks_wedged_appender() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        // 2-slot buffer, unbounded append: the third append parks forever
+        // unless the buffers are closed.
+        let wal = wedged_wal(dir.path(), 2, 0);
+
+        // Fill the buffer.
+        wal.append_batch(vec![test_operation(), test_operation()])
+            .expect("initial fill succeeds");
+
+        // Wedge an appender: it blocks on the full buffer.
+        let (tx, rx) = mpsc::channel();
+        let worker = Arc::clone(&wal);
+        thread::spawn(move || {
+            let result = worker.append_batch(vec![test_operation()]);
+            let _ = tx.send(result.is_err());
+        });
+
+        // Give the worker time to park in the append.
+        thread::sleep(Duration::from_millis(100));
+
+        // Shutdown must complete within the bound, not hang forever.
+        let start = Instant::now();
+        let outcome = wal.shutdown_graceful();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "shutdown_graceful deadlocked on a wedged appender (took {elapsed:?})"
+        );
+        assert_eq!(
+            outcome,
+            ShutdownOutcome::Completed,
+            "the close should have unblocked the appender via the Closed path"
+        );
+
+        // The wedged appender must have exited with an error (via Closed).
+        assert!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("appender thread alive"),
+            "the wedged appender should have been unblocked by the close"
+        );
     }
 }

@@ -366,6 +366,12 @@ struct BackgroundFlusher {
     /// `Error: !Clone` reason as above; the FIRST such failure wins, since it
     /// is the original loss.
     carried_failure: std::cell::RefCell<Option<String>>,
+    /// Membership lock shared with [`ConcurrentWalSystem`] (Issue #3805).
+    ///
+    /// Held across `drain_all` + `start_flush` in every flush cycle, so a
+    /// transaction's append→register cannot land between the drain and the
+    /// epoch attribution. The I/O and `finish_flush` stay outside the lock.
+    commit_membership: Arc<Mutex<()>>,
 }
 
 /// How many un-finished epochs the flusher will hold before it stops trying
@@ -461,17 +467,15 @@ impl BackgroundFlusher {
     ///
     /// SCOPE OF THAT GUARANTEE — it is about *epoch* attribution, not about
     /// which transactions an epoch's entries belong to. A transaction is a
-    /// member of the epoch it REGISTERS into, and it appends its frame to the
-    /// ring buffer strictly before it registers (`log_operations_to_wal` runs
-    /// ahead of `commit()` in `api::transaction::write`). A flush cycle that
-    /// lands inside that append→register window drains the frame into epoch
-    /// `X` while the transaction goes on to register into `X + 1`, so if that
-    /// cycle FAILS the error is recorded — correctly, per the above — against
-    /// `X`, which the transaction is not waiting on. Epoch membership is
-    /// therefore not the same relation as flush membership, and the deferral
-    /// machinery here neither creates nor closes that window; see
+    /// member of the epoch it REGISTERS into, and the membership lock (Issue
+    /// #3805) is what keeps that aligned with flush membership: the
+    /// write-transaction path holds it across append→register
+    /// (`append_batch_and_commit`), and the flusher holds it across
+    /// drain→`start_flush` (`drain_and_open_epoch`), so a cycle can no longer
+    /// land inside the append→register window and drain a frame into epoch
+    /// `X` while its transaction registers into `X + 1`. See
     /// `ConcurrentWalSystem::commit`'s "Race Condition Handling" for the full
-    /// statement of what remains unguarded.
+    /// statement.
     ///
     /// The flusher is the only caller of `start_flush` / `finish_flush`, so
     /// retrying here cannot race anyone.
@@ -518,34 +522,48 @@ impl BackgroundFlusher {
     /// has already advanced `current_epoch` and MUST be retried or the
     /// frontier never moves again.
     ///
-    /// THE ONE INVARIANT HERE: an outcome is never dropped. This method always
-    /// tries to open an epoch and always tries to deliver `outcome` to it,
-    /// even with older epochs still queued — a queued epoch defers *delivery*,
-    /// it must not suppress the *outcome*. Suppressing it is what turned a
-    /// failed disk flush into a silent success for those transactions
-    /// (Issue #3798 review round 2).
-    fn mark_group_commit_flushed(&self, outcome: Result<()>) {
+    /// Open the group-commit epoch for this flush cycle (Issue #3805).
+    ///
+    /// Calls `start_flush()` to close the current epoch and open the next one.
+    /// MUST be called under the membership lock, immediately after `drain_all`
+    /// (see [`Self::drain_and_open_epoch`]): the drain and the epoch
+    /// attribution are one atomic step, so a transaction's append→register
+    /// cannot land between them.
+    ///
+    /// Returns `Ok(Some(epoch))` for the epoch the drained entries belong to,
+    /// `Ok(None)` when there is no group-commit coordinator (Async mode — no
+    /// epoch to attribute to), and `Err` when `start_flush` was refused. A
+    /// refusal opens nothing, so the caller must still flush the drained
+    /// entries and hand the outcome to [`Self::carry_flush_outcome`].
+    fn open_flush_epoch(&self) -> Result<Option<u64>> {
+        let Some(gc) = self.group_commit.as_ref() else {
+            return Ok(None);
+        };
+        gc.start_flush().map(Some).inspect_err(|err| {
+            // No epoch was opened, so nothing is stranded and no waiter was
+            // woken — but the drained entries still need flushing, and a
+            // FAILING outcome still has nowhere to go. `current_epoch` did not
+            // move, so the epoch this cycle would have flushed is the same one
+            // the next cycle will open: the caller carries the failure to it
+            // via `carry_flush_outcome` rather than losing it.
+            self.note_cycle_error("starting the group-commit flush epoch", err);
+        })
+    }
+
+    /// Deliver `outcome` to `epoch`'s waiters (Issue #3798, split for #3805).
+    ///
+    /// Folds in any failure carried from a cycle whose `start_flush` was
+    /// refused (those transactions are covered by THIS epoch), then finishes
+    /// the epoch. A refused `finish_flush` is queued on `pending_finishes`
+    /// and retried at the top of the next cycle — never dropped.
+    ///
+    /// THE ONE INVARIANT HERE: an outcome is never dropped. A queued epoch
+    /// defers *delivery*, it must not suppress the *outcome*. Suppressing it
+    /// is what turned a failed disk flush into a silent success for those
+    /// transactions (Issue #3798 review round 2).
+    fn finish_flush_epoch(&self, epoch: u64, outcome: Result<()>) {
         let Some(gc) = self.group_commit.as_ref() else {
             return;
-        };
-
-        let epoch = match gc.start_flush() {
-            Ok(epoch) => epoch,
-            Err(err) => {
-                // No epoch was opened, so nothing is stranded and no waiter
-                // was woken -- but a FAILING outcome still has nowhere to go,
-                // and `current_epoch` did not move, so the epoch this cycle
-                // would have flushed is the same one the next cycle will open.
-                // Carry the failure to it rather than losing it.
-                if let Err(e) = &outcome {
-                    let mut carried = self.carried_failure.borrow_mut();
-                    if carried.is_none() {
-                        *carried = Some(e.to_string());
-                    }
-                }
-                self.note_cycle_error("starting the group-commit flush epoch", &err);
-                return;
-            }
         };
 
         // Fold in any failure carried from a cycle whose `start_flush` was
@@ -582,9 +600,38 @@ impl BackgroundFlusher {
         }
     }
 
-    fn perform_flush_cycle(&self) {
-        self.drain_pending_finishes();
+    /// Carry a failing outcome to the next epoch that opens (Issue #3798).
+    ///
+    /// Used when `start_flush` was refused: no epoch was opened, so the
+    /// outcome has nowhere to be delivered yet. `current_epoch` did not move,
+    /// so the next successfully opened epoch IS the epoch covering those
+    /// transactions, and [`Self::finish_flush_epoch`] folds this in. A success
+    /// carries nothing.
+    fn carry_flush_outcome(&self, outcome: Result<()>) {
+        if let Err(e) = &outcome {
+            let mut carried = self.carried_failure.borrow_mut();
+            if carried.is_none() {
+                *carried = Some(e.to_string());
+            }
+        }
+    }
 
+    /// Drain the ring buffers and open the group-commit epoch for the drained
+    /// entries as one atomic step under the membership lock (Issue #3805).
+    ///
+    /// Returns the drained entries and, when there was anything to attribute
+    /// (entries or pending transactions), the result of opening the epoch.
+    /// The caller performs the I/O and delivers the outcome OUTSIDE the lock.
+    fn drain_and_open_epoch(
+        &self,
+    ) -> (
+        Vec<super::ring_buffer::PendingEntry>,
+        Option<Result<Option<u64>>>,
+    ) {
+        let _membership = self
+            .commit_membership
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let entries = self.wal.drain_all();
 
         // Always try to advance the epoch when there are entries OR when
@@ -603,13 +650,91 @@ impl BackgroundFlusher {
                     }
                 });
 
-        if !entries.is_empty() {
-            // Flush to coordinator
-            let result = self.coordinator.flush(entries, self.sync_on_flush);
-            self.handle_flush_result(result.map(|_| ()));
-        } else if should_mark_flushed {
-            // No entries but there are pending transactions - advance epoch anyway
-            self.handle_flush_result(Ok(()));
+        let opened = if should_mark_flushed {
+            Some(self.open_flush_epoch())
+        } else {
+            None
+        };
+        (entries, opened)
+    }
+
+    /// Flush drained entries to the coordinator, outside the membership lock.
+    ///
+    /// Returns the outcome for [`Self::finish_flush_epoch`] /
+    /// [`Self::carry_flush_outcome`]. Updates the consecutive-error counter
+    /// and logs exactly as the old combined handler did.
+    fn flush_entries(
+        &self,
+        entries: Vec<super::ring_buffer::PendingEntry>,
+        sync: bool,
+    ) -> Result<()> {
+        if entries.is_empty() {
+            // Reset error counter on success
+            self.error_counter.store(0, Ordering::Relaxed);
+            return Ok(());
+        }
+        match self.coordinator.flush(entries, sync) {
+            Ok(_) => {
+                // Reset error counter on success
+                self.error_counter.store(0, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => {
+                // Track consecutive errors for health monitoring
+                let errors = self.error_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                if errors == FLUSH_ERROR_WARNING_THRESHOLD {
+                    log_flush_error(&format!(
+                        "CRITICAL: WAL flush failed {} consecutive times. \
+                         Data durability may be compromised. Last error: {}",
+                        errors, e
+                    ));
+                } else {
+                    log_flush_error(&format!("WAL flush error: {}", e));
+                }
+
+                // The failure still has to reach this epoch's waiters, so it
+                // travels the same start/finish path a success does (as a new
+                // error built from the string representation).
+                Err(crate::core::error::Error::other(e.to_string()))
+            }
+        }
+    }
+
+    /// Test-only: drive a synthetic flush outcome through the epoch machinery,
+    /// exactly as `perform_flush_cycle` would after `coordinator.flush()`
+    /// returns.
+    ///
+    /// Opens the epoch (or carries the failure if the open is refused) and
+    /// delivers `outcome` to it. Used by tests that need a failure to land on
+    /// a *specific* cycle while a stranded epoch is outstanding, which no
+    /// I/O-level fault injection can schedule deterministically.
+    #[cfg(test)]
+    fn simulate_flush_outcome(&self, outcome: Result<()>) {
+        match self.open_flush_epoch() {
+            Ok(Some(epoch)) => self.finish_flush_epoch(epoch, outcome),
+            Ok(None) => {}
+            Err(_) => self.carry_flush_outcome(outcome),
+        }
+    }
+
+    fn perform_flush_cycle(&self) {
+        self.drain_pending_finishes();
+
+        // Issue #3805: drain + epoch-open is atomic under the membership lock;
+        // the I/O and finish happen outside it, so commits never block on fsync.
+        let (entries, opened) = self.drain_and_open_epoch();
+        let Some(opened) = opened else {
+            return;
+        };
+
+        let outcome = self.flush_entries(entries, self.sync_on_flush);
+        match opened {
+            Ok(Some(epoch)) => self.finish_flush_epoch(epoch, outcome),
+            Ok(None) => {
+                // No group-commit coordinator (Async mode): the outcome was
+                // counted and logged by `flush_entries`; no epoch to finish.
+            }
+            Err(_) => self.carry_flush_outcome(outcome),
         }
     }
 
@@ -631,42 +756,21 @@ impl BackgroundFlusher {
 
     fn perform_final_flush(&self) {
         // Last chance to land a stranded epoch before this thread is gone.
+        // Same membership discipline as the regular cycle (Issue #3805).
         self.drain_pending_finishes();
 
-        let entries = self.wal.drain_all();
-        if !entries.is_empty() {
-            let result = self.coordinator.flush(entries, true);
-            self.handle_flush_result(result.map(|_| ()));
-        }
-    }
+        let (entries, opened) = self.drain_and_open_epoch();
+        let Some(opened) = opened else {
+            return;
+        };
 
-    fn handle_flush_result(&self, result: Result<()>) {
-        match result {
-            Ok(_) => {
-                // Reset error counter on success
-                self.error_counter.store(0, Ordering::Relaxed);
-                self.mark_group_commit_flushed(Ok(()));
-            }
-            Err(e) => {
-                // Track consecutive errors for health monitoring
-                let errors = self.error_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                if errors == FLUSH_ERROR_WARNING_THRESHOLD {
-                    log_flush_error(&format!(
-                        "CRITICAL: WAL flush failed {} consecutive times. \
-                         Data durability may be compromised. Last error: {}",
-                        errors, e
-                    ));
-                } else {
-                    log_flush_error(&format!("WAL flush error: {}", e));
-                }
-
-                // The failure still has to reach this epoch's waiters, so it
-                // travels the same start/finish path a success does (as a new
-                // error built from the string representation).
-                self.mark_group_commit_flushed(Err(crate::core::error::Error::other(
-                    e.to_string(),
-                )));
-            }
+        // The final flush always fsyncs: shutdown is the last chance to make
+        // buffered entries durable.
+        let outcome = self.flush_entries(entries, true);
+        match opened {
+            Ok(Some(epoch)) => self.finish_flush_epoch(epoch, outcome),
+            Ok(None) => {}
+            Err(_) => self.carry_flush_outcome(outcome),
         }
     }
 }
@@ -756,6 +860,25 @@ pub struct ConcurrentWalSystem {
     /// coordinator-`writer`-guarded seal->store->reopen hand-off.
     #[cfg(not(target_arch = "wasm32"))]
     install_lock: Mutex<()>,
+    /// Membership lock for the append→register protocol (Issue #3805).
+    ///
+    /// The write-transaction path holds this across `append_batch_async` +
+    /// `commit()` (group-commit registration), and the background flusher
+    /// holds it across `drain_all` + `start_flush` (epoch attribution). This
+    /// makes flush membership explicit: a flush cycle can never drain a
+    /// transaction's entries into epoch X's batch while the transaction
+    /// registers into X+1. Without it, a cycle that landed inside the
+    /// append→register window drained the frame into X, failed that flush
+    /// (dropping the entries), and the transaction went on to register into
+    /// X+1 — where a later (possibly empty) successful flush acknowledged it.
+    /// A false durability success.
+    ///
+    /// A private LEAF: taken only around the append/register pair and the
+    /// drain/start_flush pair, never across I/O, never across any lock
+    /// ordered after `wal`. The critical sections are microseconds (a ring
+    /// drain and an epoch increment), so holding it does not serialize
+    /// commits behind fsync.
+    commit_membership: Arc<Mutex<()>>,
 }
 
 impl ConcurrentWalSystem {
@@ -871,6 +994,10 @@ impl ConcurrentWalSystem {
         let test_inject_cycle_error = Arc::new(AtomicBool::new(false));
         let flush_interval = Duration::from_millis(config.flush_interval_ms);
 
+        // Membership lock for the append→register protocol (Issue #3805),
+        // shared with the background flush thread below.
+        let commit_membership = Arc::new(Mutex::new(()));
+
         // Start background flush thread for async/group-commit modes
         // ---- flush-thread path: begin ----
         let flush_thread = if matches!(
@@ -889,6 +1016,7 @@ impl ConcurrentWalSystem {
             let last_beat_clone = Arc::clone(&last_beat_micros);
             let cycle_errors_clone = Arc::clone(&flush_cycle_errors);
             let inject_clone = Arc::clone(&test_inject_cycle_error);
+            let membership_clone = Arc::clone(&commit_membership);
             let sync_on_flush =
                 matches!(config.durability_mode, DurabilityMode::GroupCommit { .. });
 
@@ -906,6 +1034,7 @@ impl ConcurrentWalSystem {
                     last_beat_clone,
                     cycle_errors_clone,
                     inject_clone,
+                    membership_clone,
                 );
             }))
         } else {
@@ -932,6 +1061,7 @@ impl ConcurrentWalSystem {
             wal_keyring,
             #[cfg(not(target_arch = "wasm32"))]
             install_lock: Mutex::new(()),
+            commit_membership,
         })
     }
 
@@ -956,6 +1086,7 @@ impl ConcurrentWalSystem {
         last_beat_micros: Arc<AtomicU64>,
         flush_cycle_errors: Arc<AtomicU64>,
         test_inject_cycle_error: Arc<AtomicBool>,
+        commit_membership: Arc<Mutex<()>>,
     ) {
         let flusher = BackgroundFlusher {
             wal,
@@ -970,6 +1101,7 @@ impl ConcurrentWalSystem {
             last_beat_micros,
             flush_cycle_errors,
             test_inject_cycle_error,
+            commit_membership,
             pending_finishes: std::cell::RefCell::new(std::collections::VecDeque::new()),
             carried_failure: std::cell::RefCell::new(None),
         };
@@ -1010,6 +1142,62 @@ impl ConcurrentWalSystem {
         self.wal.append_batch(operations)
     }
 
+    /// Append a batch and register it for group commit as ONE atomic
+    /// membership step (Issue #3805).
+    ///
+    /// In GroupCommit/AsyncBatched modes (when a group-commit coordinator is
+    /// present), holds the membership lock across `append_batch_async` +
+    /// `commit()` (group-commit registration), so the background flusher
+    /// cannot land a drain+epoch-open between the two. Without this, a flush
+    /// cycle in the append→register window drained the transaction's frame
+    /// into epoch X's batch, failed that flush (dropping the entries), and the
+    /// transaction then registered into X+1 — where a later (possibly empty)
+    /// successful flush acknowledged it. A false durability success.
+    ///
+    /// In Synchronous mode the lock is NOT held: `commit()` performs the fsync
+    /// inline, and holding the membership lock across disk I/O would serialize
+    /// all commits on disk latency. There is no epoch to misattribute to in
+    /// Synchronous or Async modes, so the lock buys nothing there.
+    ///
+    /// This is the method the write-transaction path must use. Calling
+    /// `append_batch_async` and `commit()` separately re-opens the race.
+    ///
+    /// # Returns
+    ///
+    /// `(base_lsn, wait_epoch)`: the lowest LSN allocated for the batch
+    /// (`None` for an empty batch), and the group-commit epoch to wait on
+    /// (`None` for modes without epoch tracking).
+    pub fn append_batch_and_commit(
+        &self,
+        operations: Vec<WalOperation>,
+    ) -> Result<(Option<LSN>, Option<u64>)> {
+        // The membership lock is only needed when a group-commit coordinator
+        // is present (GroupCommit/AsyncBatched modes): it serializes the
+        // append→register pair against the flusher's drain→epoch-open pair.
+        //
+        // In Synchronous mode `commit()` performs the fsync inline — holding
+        // the lock across that I/O would serialize all commits on disk
+        // latency, defeating the purpose of a short membership critical
+        // section. In Async mode there is no registration at all. And when
+        // there is no coordinator there is no epoch to be misattributed to, so
+        // the lock buys nothing.
+        if self.group_commit.is_some() {
+            let _membership = self
+                .commit_membership
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let lsns = self.wal.append_batch(operations)?;
+            let base_lsn = lsns.first().copied();
+            let wait_epoch = self.commit()?;
+            Ok((base_lsn, wait_epoch))
+        } else {
+            let lsns = self.wal.append_batch(operations)?;
+            let base_lsn = lsns.first().copied();
+            let wait_epoch = self.commit()?;
+            Ok((base_lsn, wait_epoch))
+        }
+    }
+
     /// Append an operation synchronously (waits for durability).
     ///
     /// This flushes immediately and waits for fsync.
@@ -1022,12 +1210,17 @@ impl ConcurrentWalSystem {
             self.coordinator.flush(entries, true)?;
         }
 
-        // Wait for durability
-        handle.wait().map_err(|e| {
-            Error::Storage(StorageError::WalError {
-                reason: format!("WAL flush failed: {}", e),
-            })
-        })?;
+        // Wait for durability, with a deadlock-detection timeout (Issue #3802).
+        // If the flushing side dies, the unbounded wait would park forever;
+        // the timeout bounds it. Aligned with the group-commit acquire timeout
+        // stance: deadlock detection, not an SLA.
+        handle
+            .wait_timeout(std::time::Duration::from_millis(DEFAULT_ACQUIRE_TIMEOUT_MS))
+            .map_err(|e| {
+                Error::Storage(StorageError::WalError {
+                    reason: format!("WAL flush failed: {}", e),
+                })
+            })?;
 
         Ok(lsn)
     }
@@ -1107,12 +1300,15 @@ impl ConcurrentWalSystem {
                 // Note: Since flush coordinator preserves LSN order, waiting for the last one
                 // technically implies all previous ones are done, but waiting for all is safer
                 // against future changes and handles errors correctly.
+                // Bounded by a deadlock-detection timeout (Issue #3802).
                 if let Some(last_handle) = handles.into_iter().last() {
-                    last_handle.wait().map_err(|e| {
-                        Error::Storage(StorageError::WalError {
-                            reason: format!("WAL flush failed: {}", e),
-                        })
-                    })?;
+                    last_handle
+                        .wait_timeout(std::time::Duration::from_millis(DEFAULT_ACQUIRE_TIMEOUT_MS))
+                        .map_err(|e| {
+                            Error::Storage(StorageError::WalError {
+                                reason: format!("WAL flush failed: {}", e),
+                            })
+                        })?;
                 }
 
                 Ok(lsns)
@@ -1162,15 +1358,15 @@ impl ConcurrentWalSystem {
     /// - Synchronous: Data is already durable when this returns
     /// - Async: No waiting needed (fire-and-forget)
     ///
-    /// # Race Condition Handling
+    /// # Race Condition Handling (Issue #3805)
     ///
-    /// In GroupCommit mode, there's an intentional race between:
+    /// In GroupCommit mode, there WAS a race between:
     /// 1. The flush thread draining entries
     /// 2. Transactions calling `register_transaction()`
     ///
-    /// A caller appends its frames to the ring buffer strictly BEFORE it calls
-    /// this method, so a flush cycle can drain those frames into an earlier
-    /// epoch than the one the caller then registers into. On the SUCCESS path
+    /// A caller appended its frames to the ring buffer strictly BEFORE calling
+    /// this method, so a flush cycle could drain those frames into an earlier
+    /// epoch than the one the caller then registered into. On the SUCCESS path
     /// that is harmless: the drained epoch advances (possibly with no
     /// registered members), the caller's own epoch completes behind it, and by
     /// the time `wait_for_flush` returns the frames really are on disk —
@@ -1178,18 +1374,18 @@ impl ConcurrentWalSystem {
     /// later epoch cannot complete before an earlier one (`flushed_epoch`
     /// advances only over a contiguous run).
     ///
-    /// KNOWN GAP — a FAILING flush inside that window is NOT attributed to the
-    /// caller (Issue #3798 review round 3, tracked separately). If the cycle
-    /// that drained the frames fails, its entries are dropped rather than
-    /// re-queued and the error is recorded against the epoch that drained them
-    /// — not against the epoch the transaction subsequently registers into,
-    /// whose own (entry-free) flush then succeeds. Such a transaction can
-    /// therefore see `wait_for_flush` return `Ok` for frames that never reached
-    /// disk. The window is exactly append→register: once a transaction is
-    /// registered, every outcome for its epoch reaches it (see
-    /// `drain_pending_finishes`). Closing it needs the epoch to be claimed
-    /// before the frames are appended, or the flush to re-queue what it could
-    /// not write; neither is done here.
+    /// CLOSED (Issue #3805): the write-transaction path no longer calls
+    /// `append_batch_async` and `commit()` separately. It uses
+    /// [`Self::append_batch_and_commit`], which holds the membership lock
+    /// across the append→register pair, while the background flusher holds
+    /// the same lock across its drain→`start_flush` pair. A flush cycle can no
+    /// longer land inside the append→register window, so a failing flush's
+    /// dropped entries are always attributed to the epoch their transaction
+    /// registered into. Calling `append_*` and `commit()` separately re-opens
+    /// the window: the old KNOWN GAP (a failing flush inside the window
+    /// recorded against the draining epoch, not the registering transaction's
+    /// epoch, so `wait_for_flush` could return `Ok` for frames that never
+    /// reached disk) applies to THAT usage, not to `append_batch_and_commit`.
     ///
     /// `FlushCoordinator::get_max_flushed_lsn` cannot be used to detect this
     /// after the fact: it is a telemetry approximation, not a durability
@@ -1665,9 +1861,22 @@ impl ConcurrentWalSystem {
     /// and performs a final flush of all pending entries.
     pub fn shutdown(&mut self) {
         // Gracefully shutdown the WAL.
-        // This stops accepting new writes, waits for active batches to complete,
-        // and then closes the ring buffers.
-        self.wal.shutdown_graceful();
+        // This stops accepting new writes, closes the ring buffers (unblocking
+        // any parked appenders via the `Closed` path), waits for active
+        // batches with a bounded deadline (Issue #3801), and then closes.
+        match self.wal.shutdown_graceful() {
+            super::concurrent::ShutdownOutcome::Completed => {}
+            super::concurrent::ShutdownOutcome::TimedOut { active_batches } => {
+                // Buffers are closed; the timed-out appenders will exit via
+                // `Closed`. Log and continue — stalling shutdown forever is
+                // the bug #3801 fixes.
+                super::log_wal_diagnostic(&format!(
+                    "WAL shutdown timed out with {active_batches} appenders still \
+                     in flight; buffers are closed, they will exit via the \
+                     Closed path"
+                ));
+            }
+        }
 
         // Signal shutdown
         self.shutdown_signal.store(true, Ordering::Relaxed);
@@ -1807,7 +2016,9 @@ mod tests {
                         .unwrap();
                     // Ensure the entry is flushed so nothing is stuck unflushed.
                     let _ = wal.commit();
-                    let _ = handle.wait();
+                    // Bounded wait (Issue #3802); the result is ignored here
+                    // because this test only needs the flush to happen.
+                    let _ = handle.wait_timeout(std::time::Duration::from_secs(120));
                 }
             }));
         }
@@ -1941,7 +2152,9 @@ mod tests {
                         .append_with_handle(create_test_operation(id))
                         .unwrap();
                     let _ = wal.commit();
-                    let _ = handle.wait();
+                    // Bounded wait (Issue #3802); the result is ignored here
+                    // because this test only needs the flush to happen.
+                    let _ = handle.wait_timeout(std::time::Duration::from_secs(120));
                 }
             }));
         }
@@ -2827,6 +3040,14 @@ mod tests {
         )
     }
 
+    /// Test handle to the membership lock (Issue #3805).
+    ///
+    /// Lets a test hold the lock to simulate "a transaction is inside its
+    /// append→register window" and prove the flusher cannot drain inside it.
+    fn membership_lock_of(system: &ConcurrentWalSystem) -> Arc<std::sync::Mutex<()>> {
+        Arc::clone(&system.commit_membership)
+    }
+
     /// A [`BackgroundFlusher`] over `system`'s own parts, driven synchronously
     /// on the calling thread.
     ///
@@ -2851,6 +3072,7 @@ mod tests {
             test_inject_cycle_error: Arc::clone(&system.test_inject_cycle_error),
             pending_finishes: std::cell::RefCell::new(std::collections::VecDeque::new()),
             carried_failure: std::cell::RefCell::new(None),
+            commit_membership: Arc::clone(&system.commit_membership),
         }
     }
 
@@ -2936,7 +3158,7 @@ mod tests {
         crate::storage::wal::group_commit::LockSite::StartFlush;
 
     /// A synthetic disk-flush failure, exactly as `perform_flush_cycle` would
-    /// hand one to `handle_flush_result` when `coordinator.flush()` fails.
+    /// hand one to `simulate_flush_outcome` when `coordinator.flush()` fails.
     ///
     /// Driven through that seam rather than by breaking the real coordinator:
     /// the sequence under test needs the failure to land on a *specific* cycle
@@ -2976,7 +3198,7 @@ mod tests {
         // then fails on disk.
         let (epoch_b, _) = gc.register_transaction().expect("registration succeeds");
         assert!(epoch_b > epoch_a, "B must be the epoch after A");
-        flusher.handle_flush_result(flush_failure("injected disk flush failure"));
+        flusher.simulate_flush_outcome(flush_failure("injected disk flush failure"));
 
         // Recovery: A lands, then the frontier is free to move past B.
         flusher.perform_flush_cycle();
@@ -3021,7 +3243,7 @@ mod tests {
         // Strand B, behind A, with a FAILING outcome.
         let (epoch_b, _) = gc.register_transaction().expect("registration succeeds");
         gc.fail_next_acquisition_at_for_test(FINISH_FLUSH);
-        flusher.handle_flush_result(flush_failure("epoch B never reached disk"));
+        flusher.simulate_flush_outcome(flush_failure("epoch B never reached disk"));
 
         // One cycle drains both, oldest first.
         flusher.perform_flush_cycle();
@@ -3062,7 +3284,7 @@ mod tests {
 
         // The disk flush fails AND the epoch cannot be opened to report it.
         gc.fail_next_acquisition_at_for_test(START_FLUSH);
-        flusher.handle_flush_result(flush_failure("disk exploded before the epoch opened"));
+        flusher.simulate_flush_outcome(flush_failure("disk exploded before the epoch opened"));
 
         // The next cycle opens that same epoch (nothing advanced).
         flusher.perform_flush_cycle();
@@ -3082,6 +3304,108 @@ mod tests {
             msg.contains("disk exploded before the epoch opened"),
             "the carried failure must name the original error, got: {msg}"
         );
+    }
+
+    /// Issue #3805: the flusher must not drain inside a transaction's
+    /// append→register window.
+    ///
+    /// The membership lock makes `append_batch_and_commit` (append+register)
+    /// and `drain_and_open_epoch` (drain+epoch-open) mutually exclusive. This
+    /// test runs a transaction inside its window on one thread (holding the
+    /// lock across append+register, exactly as `append_batch_and_commit`
+    /// does), proves a concurrent drain blocks until the window closes, then
+    /// proves the drain sees the registered transaction — so a failing flush
+    /// is attributed to the epoch the transaction actually waits on, never an
+    /// earlier one whose later success would be a false durability report.
+    ///
+    /// Deterministic: channels control the interleaving; the only timing is
+    /// the sleep holding the window open and the assertion that the drain
+    /// blocked for most of it.
+    #[test]
+    fn test_membership_lock_closes_the_append_register_window() {
+        let dir = tempdir().unwrap();
+        let system = quiesced_group_commit_system(dir.path());
+        let gc = coordinator_of(&system);
+        let flusher = test_flusher(&system, &gc);
+        let membership = membership_lock_of(&system);
+
+        let (tx_appended, rx_appended) = std::sync::mpsc::channel::<()>();
+        let (tx_registered, rx_registered) = std::sync::mpsc::channel::<u64>();
+
+        std::thread::scope(|s| {
+            // Simulate a transaction inside its append→register window: hold
+            // the membership lock across the append and the register, exactly
+            // as `append_batch_and_commit` does.
+            s.spawn(|| {
+                let _held = membership.lock().unwrap();
+                let ops = vec![WalOperation::BeginTx { tx_id: 1 }];
+                let lsns = system.wal.append_batch(ops).expect("append succeeds");
+                assert!(!lsns.is_empty(), "the frame must be in the ring buffer");
+                tx_appended.send(()).expect("test harness alive");
+
+                // Hold the window open long enough for the flusher to
+                // (incorrectly) barge in if the lock weren't excluding it.
+                std::thread::sleep(Duration::from_millis(200));
+
+                let epoch = system
+                    .commit()
+                    .expect("commit registers")
+                    .expect("GroupCommit mode returns an epoch");
+                tx_registered.send(epoch).expect("test harness alive");
+                // The lock releases here, closing the window.
+            });
+
+            // Wait until the transaction has appended and is holding the lock.
+            rx_appended.recv().expect("transaction thread alive");
+
+            // The drain must block until the transaction's window closes.
+            let start = std::time::Instant::now();
+            let (entries, opened) = flusher.drain_and_open_epoch();
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed >= Duration::from_millis(150),
+                "drain_and_open_epoch did not block on the membership lock \
+                 (took {elapsed:?}): the append→register window is not closed"
+            );
+
+            // The drain sees the frame AND opens an epoch at or after the one
+            // the transaction registered into. Before the fix it could have
+            // drained first, opening an earlier epoch — the false-success
+            // interleaving.
+            assert!(
+                !entries.is_empty(),
+                "the drained batch must contain the frame"
+            );
+            let epoch = opened
+                .expect("entries were drained, so an epoch must open")
+                .expect("open succeeded")
+                .expect("coordinator present");
+            let wait_epoch = rx_registered.recv().expect("transaction thread alive");
+            assert!(
+                epoch >= wait_epoch,
+                "drain opened epoch {epoch} before the transaction registered into \
+                 {wait_epoch}: the append→register window was not closed"
+            );
+
+            // Outcome attribution: fail THIS flush — the one the drain above
+            // opened for the transaction's frame — and the transaction must
+            // see the failure on its own epoch, not a later success for a
+            // frame that never reached disk. (Deliver to the drained epoch
+            // directly: `simulate_flush_outcome` opens a NEW epoch, so the
+            // failure would land on an epoch the transaction never waited on
+            // and the wait would time out instead.)
+            flusher.finish_flush_epoch(epoch, flush_failure("the frame never reached disk"));
+            let msg = gc
+                .wait_for_flush(wait_epoch)
+                .expect_err(
+                    "the flush failed, so the waiter must see an error, not a false success",
+                )
+                .to_string();
+            assert!(
+                msg.contains("the frame never reached disk"),
+                "the failing outcome must reach the transaction's own epoch, got: {msg}"
+            );
+        });
     }
 
     /// A transient (non-poison) coordinator error must NOT take down the flush
