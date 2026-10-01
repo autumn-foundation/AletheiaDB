@@ -3200,8 +3200,8 @@ mod tests {
 mod havoc_tests {
     use super::*;
     use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
-    use tempfile::tempdir;
     use std::time::Duration;
+    use tempfile::tempdir;
 
     #[test]
     fn test_migration_start_stop_race() {
@@ -3217,18 +3217,13 @@ mod havoc_tests {
         let s1 = service.clone();
         let s2 = service.clone();
 
-        // Thread 1: Calls stop
-        let t1 = thread::spawn(move || {
-            // We want stop() to get past the condvar wait, but preempt before worker_handle.lock()
-            // Since we can't easily hook into the middle of stop(), we'll just bombard start/stop.
-            // Wait, to reliably trigger it, we need `start()` to happen exactly after `stop()`
-            // finishes the condvar wait but before it takes `worker_handle`.
-            s1.stop();
-        });
-
-        // Thread 2: Calls start slightly after stop is initiated
+        // Race a stop() against a start() issued slightly later. Before the
+        // fix, start() could spawn a new worker after stop() finished its
+        // condvar wait but before it took `worker_handle`, so stop() would
+        // join the NEW (still running) worker and hang.
+        let t1 = thread::spawn(move || s1.stop());
         let t2 = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(5)); // Tune this delay
+            thread::sleep(Duration::from_millis(5));
             s2.start();
         });
 
