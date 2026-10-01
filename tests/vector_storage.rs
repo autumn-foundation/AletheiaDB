@@ -521,10 +521,12 @@ fn test_multiple_vector_updates_version_chain() {
 
     // Verify version chain was created (3 versions total)
     let stats_final = db.historical_stats().unwrap();
+    // Each update stores the new version plus a structural carry-forward of
+    // the superseded valid-time prefix (ADR-0061).
     assert_eq!(
         stats_final.total_node_versions,
-        stats_initial.total_node_versions + 2,
-        "Should have 2 additional versions after 2 updates"
+        stats_initial.total_node_versions + 4,
+        "Should have 4 additional versions after 2 updates"
     );
     assert_eq!(stats_final.unique_nodes, 1);
 }
@@ -556,17 +558,17 @@ fn test_historical_stats_with_vectors() {
     }
 
     // Check historical stats
-    // 1 create + 4 updates = 5 total versions
+    // 1 create + 4 updates + 4 structural carry-forwards (ADR-0061) = 9
     let stats = db.historical_stats().unwrap();
     assert_eq!(
-        stats.total_node_versions, 5,
-        "Expected 1 create + 4 updates = 5 versions"
+        stats.total_node_versions, 9,
+        "Expected 1 create + 4 x (carry-forward + update) = 9 versions"
     );
     assert_eq!(stats.unique_nodes, 1);
 
     // Anchors + deltas should equal total versions
     let total = stats.node_anchor_count + stats.node_delta_count;
-    assert_eq!(total, 5, "Anchor + delta count should equal total versions");
+    assert_eq!(total, 9, "Anchor + delta count should equal total versions");
     // Should have at least one anchor (the first version)
     assert!(
         stats.node_anchor_count > 0,

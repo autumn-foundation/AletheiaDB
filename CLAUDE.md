@@ -598,6 +598,27 @@ existing `[valid_from, valid_to)` interval. Rust API:
 `retract_node(_detach)` / `retract_edge` on `AletheiaDB`. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#retracting-a-fact-closing-valid-time).
 
+**Append-only valid-time supersession on update (ADR-0061)**: an update with
+`valid_from = t` no longer leaves the superseded version's valid-time prefix
+unreachable. The version whose valid interval contains `t` is closed on the
+transaction axis only (#3504: recorded valid intervals are never rewritten, so
+earlier-tx snapshots still see it open-ended), and a **structural carry-forward**
+version re-records its content over `[old_valid_from, t)` at the update's
+commit. The still-recorded versions of a live entity therefore partition valid
+time with no gaps or overlaps: an as-of read between two versions returns the
+earlier one. A **backfill** (`t` before later versions) covers only
+`[t, next_valid_from)` and re-asserts the open head, so the successor and current
+state are unchanged; an update at exactly the current `valid_from` is a
+degenerate replace. Structural versions carry the reserved
+`STRUCTURAL_VERSION_TAG` id bit (`VersionId::is_structural`), persist through
+every format without a format change, are skipped by `list_changes` and by
+`get_*_history` / `get_*_at_version` (history lists writes), and are exempt from
+the per-entity version cap. `get_node_valid_time_slices` /
+`get_edge_valid_time_slices` return the current partition. Delete
+withdraws every slice; retraction keeps the earlier slices. Still-recorded
+versions never migrate to the cold tier. See
+[docs/adr/0061-append-only-valid-time-supersession.md](docs/adr/0061-append-only-valid-time-supersession.md).
+
 **Point-in-time (AS OF) traversal (Issue #3225)**: `traverse` accepts optional
 `as_of_valid_time` / `as_of_transaction_time` (ISO 8601 / RFC 3339 or
 microseconds since epoch), independently settable (valid-time only, tx-time

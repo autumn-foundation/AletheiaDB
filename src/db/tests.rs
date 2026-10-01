@@ -3168,8 +3168,9 @@ fn test_stats_populated_matches_underlying_counters() {
         stats.historical.total_node_versions,
         hist.total_node_versions
     );
-    // 2 creates + 1 update = exactly 3 node versions.
-    assert_eq!(stats.historical.total_node_versions, 3);
+    // 2 creates + 1 update + its structural carry-forward (ADR-0061) =
+    // exactly 4 stored node versions.
+    assert_eq!(stats.historical.total_node_versions, 4);
     assert_eq!(stats.historical.unique_nodes, hist.unique_nodes);
     assert_eq!(
         stats.historical.anchor_count,

@@ -21,7 +21,7 @@
 use dashmap::DashMap;
 
 use crate::core::error::StorageError;
-use crate::core::{EdgeId, InternedString, NodeId, Timestamp};
+use crate::core::{EdgeId, InternedString, NodeId, TIMESTAMP_MAX, Timestamp};
 
 /// Configuration for temporal adjacency index.
 #[derive(Debug, Clone)]
@@ -143,6 +143,49 @@ impl TemporalAdjacencyIndex {
             && let Some(entry) = entries.iter_mut().rev().find(|e| e.edge_id == edge_id)
         {
             entry.tx_to = tx_end;
+        }
+    }
+
+    /// Close the transaction time of the specific entry recorded for one edge
+    /// *version*, identified by its `(valid_from, tx_from)` coordinates.
+    ///
+    /// Unlike [`close_edge_transaction_time`](Self::close_edge_transaction_time),
+    /// which closes the edge's latest entry, this targets one version. An edge
+    /// may hold several still-recorded valid-time slices at once (an update
+    /// carries the superseded prefix forward), so closing "the latest" entry
+    /// would close the wrong slice. Only a still-open entry matches; if none
+    /// matches (e.g. the entry was never indexed), this falls back to closing
+    /// the latest still-open entry for the edge, preserving the legacy behavior.
+    pub fn close_edge_transaction_time_of(
+        &self,
+        edge_id: EdgeId,
+        source: NodeId,
+        target: NodeId,
+        valid_from: Timestamp,
+        tx_from: Timestamp,
+        tx_end: Timestamp,
+    ) {
+        let close = |entries: &mut Vec<TemporalAdjacencyEntry>| {
+            let exact = entries.iter().rposition(|e| {
+                e.edge_id == edge_id
+                    && e.valid_from == valid_from
+                    && e.tx_from == tx_from
+                    && e.tx_to == TIMESTAMP_MAX
+            });
+            let pos = exact.or_else(|| {
+                entries
+                    .iter()
+                    .rposition(|e| e.edge_id == edge_id && e.tx_to == TIMESTAMP_MAX)
+            });
+            if let Some(pos) = pos {
+                entries[pos].tx_to = tx_end;
+            }
+        };
+        if let Some(mut entries) = self.outgoing.get_mut(&source) {
+            close(&mut entries);
+        }
+        if let Some(mut entries) = self.incoming.get_mut(&target) {
+            close(&mut entries);
         }
     }
 
@@ -465,7 +508,6 @@ impl TemporalAdjacencyIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::TIMESTAMP_MAX;
     use crate::core::temporal::time;
 
     fn ts(t: i64) -> Timestamp {
