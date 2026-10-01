@@ -339,7 +339,12 @@ impl RecoveryTestHarness {
 /// - Transaction timestamps increase monotonically
 macro_rules! verify_temporal_consistency_for {
     ($entity_id:expr, $entity_type:expr, $versions:expr) => {{
-        let mut sorted_versions = $versions;
+        // One version per write: structural carry-forward / re-assertion
+        // versions (ADR-0061) share their write's transaction time by design.
+        let mut sorted_versions: Vec<_> = $versions
+            .into_iter()
+            .filter(|v| !v.id.is_structural())
+            .collect();
         if !sorted_versions.is_empty() {
             sorted_versions.sort_by_key(|v| v.temporal.transaction_time().start());
 
@@ -440,8 +445,13 @@ fn verify_version_chain_integrity(
             continue;
         }
 
-        // Sort versions by transaction time (for finding latest)
-        let mut sorted_versions = versions;
+        // Sort versions by transaction time (for finding latest). Structural
+        // versions (ADR-0061) share their write's tx time; the latest WRITE is
+        // what current storage mirrors.
+        let mut sorted_versions: Vec<_> = versions
+            .into_iter()
+            .filter(|v| !v.id.is_structural())
+            .collect();
         sorted_versions.sort_by_key(|v| v.temporal.transaction_time().start());
 
         // Verify current storage matches latest version (if it exists in current)
@@ -465,8 +475,13 @@ fn verify_version_chain_integrity(
             continue;
         }
 
-        // Sort versions by transaction time (for finding latest)
-        let mut sorted_versions = versions;
+        // Sort versions by transaction time (for finding latest). Structural
+        // versions (ADR-0061) share their write's tx time; the latest WRITE is
+        // what current storage mirrors.
+        let mut sorted_versions: Vec<_> = versions
+            .into_iter()
+            .filter(|v| !v.id.is_structural())
+            .collect();
         sorted_versions.sort_by_key(|v| v.temporal.transaction_time().start());
 
         // Verify current storage matches latest version (if it exists in current)

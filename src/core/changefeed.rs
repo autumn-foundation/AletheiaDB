@@ -343,6 +343,15 @@ pub(crate) fn build_raw_change(
     label_filter: Option<&str>,
     namespace_fn: impl FnOnce() -> NamespaceId,
 ) -> Option<RawChange> {
+    // Structural versions (an update's carry-forward of the superseded
+    // valid-time prefix, or a backfill's head re-assertion) restate facts
+    // already recorded; they are not changes. Skipping them here keeps the pull
+    // feed identical to the push feed, which only ever broadcasts the version
+    // ids a transaction wrote.
+    if crate::core::id::VersionId::new_unchecked(version_id).is_structural() {
+        return None;
+    }
+
     let tx_range = temporal.transaction_time();
     // Transaction-time window is half-open [t1, t2).
     if !tx_window.contains(tx_range.start()) {

@@ -378,11 +378,12 @@ fn collision_does_not_clobber_history() -> Result<()> {
         "B's head must be its update version"
     );
 
-    // Nothing lost: A (create + tombstone) + B (create + update) = 4 versions.
+    // Nothing lost: A (create + tombstone) + B (create + update + the
+    // update's structural carry-forward, ADR-0061) = 5 versions.
     let stats = historical.stats();
     assert_eq!(
-        stats.total_node_versions, 4,
-        "no version may be clobbered: expected 4 node versions"
+        stats.total_node_versions, 5,
+        "no version may be clobbered: expected 5 node versions"
     );
 
     Ok(())

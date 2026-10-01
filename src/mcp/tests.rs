@@ -11540,8 +11540,9 @@ mod database_stats_tests {
         assert_eq!(hist["unique_edges"], serde_json::json!(1));
         let total_node_versions = hist["total_node_versions"].as_u64().unwrap();
         assert_eq!(
-            total_node_versions, 3,
-            "2 creates + 1 update must yield exactly 3 node versions: {value}"
+            total_node_versions, 4,
+            "2 creates + 1 update + its structural carry-forward (ADR-0061) must \
+             yield exactly 4 stored node versions: {value}"
         );
         assert_eq!(hist["total_edge_versions"], serde_json::json!(1));
 
