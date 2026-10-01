@@ -343,7 +343,7 @@ impl Drop for TempFileGuard {
 /// naming stays consistent between the save and load temp bases.
 fn native_temp_base(real_path: &Path) -> PathBuf {
     use rand::Rng;
-    let suffix: u64 = rand::thread_rng().r#gen();
+    let suffix: u64 = rand::rng().random();
     let dir = real_path.parent().unwrap_or_else(|| Path::new("."));
     dir.join(format!(".aeix-usearch-tmp-{suffix}.usearch"))
 }

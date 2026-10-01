@@ -431,7 +431,7 @@ fn build_db(
 fn rand_string(rng: &mut SmallRng, len: usize) -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     (0..len)
-        .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
+        .map(|_| ALPHABET[rng.random_range(0..ALPHABET.len())] as char)
         .collect()
 }
 
@@ -440,7 +440,7 @@ fn rand_string(rng: &mut SmallRng, len: usize) -> String {
 fn build_props(rng: &mut SmallRng) -> aletheiadb::PropertyMap {
     PropertyMapBuilder::new()
         .insert(UNIQUE_PROP, next_uid())
-        .insert("seq", rng.gen_range(0..i64::MAX))
+        .insert("seq", rng.random_range(0..i64::MAX))
         .insert("name", rand_string(rng, NAME_BYTES))
         .insert("payload", rand_string(rng, PAYLOAD_BYTES))
         .build()
@@ -1001,7 +1001,7 @@ fn build_read_fixture() -> (AletheiaDB, NodeId, Timestamp) {
         db.update_node_with_options(
             read_target,
             PropertyMapBuilder::new()
-                .insert("seq", rng.gen_range(0..i64::MAX))
+                .insert("seq", rng.random_range(0..i64::MAX))
                 .build(),
             WriteRequestOptions::new().with_provenance(prov),
         )

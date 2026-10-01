@@ -396,11 +396,11 @@ pub fn generate_passphrase_key_file_with_kdf(
 
     // Generate MEK, salt, and nonce.
     let mut mek = Zeroizing::new([0u8; 32]);
-    rand::thread_rng().fill_bytes(mek.as_mut());
+    rand::rng().fill_bytes(mek.as_mut());
     let mut salt = [0u8; SALT_LEN];
-    rand::thread_rng().fill_bytes(&mut salt);
+    rand::rng().fill_bytes(&mut salt);
     let mut nonce = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut nonce);
+    rand::rng().fill_bytes(&mut nonce);
 
     // Build the header (everything before the ciphertext: magic, version,
     // kdf_id, kdf params, salt, nonce) FIRST so it can be bound as AEAD

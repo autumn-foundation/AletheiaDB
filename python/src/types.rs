@@ -1,12 +1,13 @@
 //! Python <-> AletheiaDB value conversions and wrapper classes.
 
 use aletheiadb::core::{
-    Edge as RustEdge, GLOBAL_INTERNER, InternedString, Node as RustNode, PropertyMap,
-    PropertyMapBuilder, PropertyValue, Timestamp,
+    Edge as RustEdge, InternedString, Node as RustNode, PropertyMap, PropertyMapBuilder,
+    PropertyValue, Timestamp, GLOBAL_INTERNER,
 };
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString};
+use pyo3::IntoPyObjectExt;
 
 /// Resolve an interned string to an owned `String`.
 pub fn resolve_interned(s: InternedString) -> String {
@@ -30,10 +31,10 @@ pub fn py_to_property_value(value: &Bound<'_, PyAny>) -> PyResult<PropertyValue>
     if value.is_none() {
         return Ok(PropertyValue::Null);
     }
-    if let Ok(b) = value.downcast::<PyBool>() {
+    if let Ok(b) = value.cast::<PyBool>() {
         return Ok(PropertyValue::Bool(b.is_true()));
     }
-    if let Ok(b) = value.downcast::<PyBytes>() {
+    if let Ok(b) = value.cast::<PyBytes>() {
         return Ok(PropertyValue::bytes(b.as_bytes()));
     }
     if value.is_instance_of::<PyInt>() {
@@ -44,18 +45,18 @@ pub fn py_to_property_value(value: &Bound<'_, PyAny>) -> PyResult<PropertyValue>
         let f: f64 = value.extract()?;
         return Ok(PropertyValue::Float(f));
     }
-    if let Ok(s) = value.downcast::<PyString>() {
+    if let Ok(s) = value.cast::<PyString>() {
         let owned: String = s.extract()?;
         return Ok(PropertyValue::string(&owned));
     }
-    if let Ok(list) = value.downcast::<PyList>() {
+    if let Ok(list) = value.cast::<PyList>() {
         let mut all_numeric = true;
         for item in list.iter() {
             if !(item.is_instance_of::<PyFloat>() || item.is_instance_of::<PyInt>()) {
                 all_numeric = false;
                 break;
             }
-            if let Ok(b) = item.downcast::<PyBool>() {
+            if let Ok(b) = item.cast::<PyBool>() {
                 let _ = b;
                 all_numeric = false;
                 break;
@@ -82,32 +83,32 @@ pub fn py_to_property_value(value: &Bound<'_, PyAny>) -> PyResult<PropertyValue>
 }
 
 /// Convert a `PropertyValue` to a Python object.
-pub fn property_value_to_py(py: Python<'_>, value: &PropertyValue) -> PyResult<PyObject> {
+pub fn property_value_to_py(py: Python<'_>, value: &PropertyValue) -> PyResult<Py<PyAny>> {
     Ok(match value {
         PropertyValue::Null => py.None(),
-        PropertyValue::Bool(b) => b.into_py(py),
-        PropertyValue::Int(i) => i.into_py(py),
-        PropertyValue::Float(f) => f.into_py(py),
-        PropertyValue::String(s) => s.as_ref().into_py(py),
-        PropertyValue::Bytes(b) => PyBytes::new_bound(py, b.as_ref()).into_py(py),
+        PropertyValue::Bool(b) => b.into_py_any(py)?,
+        PropertyValue::Int(i) => i.into_py_any(py)?,
+        PropertyValue::Float(f) => f.into_py_any(py)?,
+        PropertyValue::String(s) => s.as_ref().into_py_any(py)?,
+        PropertyValue::Bytes(b) => PyBytes::new(py, b.as_ref()).into_py_any(py)?,
         PropertyValue::Array(arr) => {
-            let list = PyList::empty_bound(py);
+            let list = PyList::empty(py);
             for v in arr.iter() {
                 list.append(property_value_to_py(py, v)?)?;
             }
-            list.into_py(py)
+            list.into_py_any(py)?
         }
         PropertyValue::Vector(v) => {
-            let list = PyList::empty_bound(py);
+            let list = PyList::empty(py);
             for f in v.iter() {
                 list.append(*f as f64)?;
             }
-            list.into_py(py)
+            list.into_py_any(py)?
         }
         PropertyValue::SparseVector(sv) => {
-            let d = PyDict::new_bound(py);
-            let idx = PyList::empty_bound(py);
-            let vals = PyList::empty_bound(py);
+            let d = PyDict::new(py);
+            let idx = PyList::empty(py);
+            let vals = PyList::empty(py);
             for i in sv.indices() {
                 idx.append(*i)?;
             }
@@ -116,7 +117,7 @@ pub fn property_value_to_py(py: Python<'_>, value: &PropertyValue) -> PyResult<P
             }
             d.set_item("indices", idx)?;
             d.set_item("values", vals)?;
-            d.into_py(py)
+            d.into_py_any(py)?
         }
     })
 }
@@ -139,7 +140,7 @@ pub fn py_dict_to_property_map(dict: Option<&Bound<'_, PyDict>>) -> PyResult<Pro
 
 /// Convert a `PropertyMap` to a Python dict.
 pub fn property_map_to_py_dict(py: Python<'_>, map: &PropertyMap) -> PyResult<Py<PyDict>> {
-    let dict = PyDict::new_bound(py);
+    let dict = PyDict::new(py);
     for (key, value) in map.iter() {
         let key_str = resolve_interned(*key);
         // Elide engine-reserved ride-along keys (the namespace marker, #3349,
@@ -243,10 +244,11 @@ pub fn parse_timestamp(_py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Ti
         let micros: i64 = value.extract()?;
         return timestamp_from_micros(micros);
     }
-    if let Ok(s) = value.downcast::<PyString>() {
+    if let Ok(s) = value.cast::<PyString>() {
         let owned: String = s.extract()?;
-        let dt = chrono::DateTime::parse_from_rfc3339(&owned)
-            .map_err(|e| PyValueError::new_err(format!("Invalid ISO-8601 timestamp {:?}: {}", owned, e)))?;
+        let dt = chrono::DateTime::parse_from_rfc3339(&owned).map_err(|e| {
+            PyValueError::new_err(format!("Invalid ISO-8601 timestamp {:?}: {}", owned, e))
+        })?;
         return timestamp_from_micros(dt.timestamp_micros());
     }
     let ts: f64 = value

@@ -2,12 +2,13 @@
 
 use crate::errors::map_error;
 use crate::types::{PyEdge, PyNode};
-use aletheiadb::AletheiaDB as RustDB;
 use aletheiadb::cypher::CypherParameterValue;
 use aletheiadb::query::executor::EntityResult;
+use aletheiadb::AletheiaDB as RustDB;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
+use pyo3::IntoPyObjectExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -15,7 +16,7 @@ fn py_to_cypher_param(value: &Bound<'_, PyAny>) -> PyResult<CypherParameterValue
     if value.is_none() {
         return Ok(CypherParameterValue::Null);
     }
-    if let Ok(b) = value.downcast::<PyBool>() {
+    if let Ok(b) = value.cast::<PyBool>() {
         return Ok(CypherParameterValue::Bool(b.is_true()));
     }
     if value.is_instance_of::<PyInt>() {
@@ -24,16 +25,16 @@ fn py_to_cypher_param(value: &Bound<'_, PyAny>) -> PyResult<CypherParameterValue
     if value.is_instance_of::<PyFloat>() {
         return Ok(CypherParameterValue::Float(value.extract()?));
     }
-    if let Ok(s) = value.downcast::<PyString>() {
+    if let Ok(s) = value.cast::<PyString>() {
         let owned: String = s.extract()?;
         return Ok(CypherParameterValue::String(owned));
     }
-    if let Ok(list) = value.downcast::<PyList>() {
+    if let Ok(list) = value.cast::<PyList>() {
         let mut buf: Vec<f32> = Vec::with_capacity(list.len());
         for item in list.iter() {
-            let f: f64 = item
-                .extract()
-                .map_err(|_| PyTypeError::new_err("Embedding parameters must be lists of numbers"))?;
+            let f: f64 = item.extract().map_err(|_| {
+                PyTypeError::new_err("Embedding parameters must be lists of numbers")
+            })?;
             buf.push(f as f32);
         }
         return Ok(CypherParameterValue::Embedding(Arc::from(buf)));
@@ -49,12 +50,12 @@ fn py_to_cypher_param(value: &Bound<'_, PyAny>) -> PyResult<CypherParameterValue
 ///
 /// Shared by the single-entity row path and the multi-variable binding path
 /// (#549) so both surface nodes/edges identically.
-fn entity_to_py(py: Python<'_>, entity: EntityResult) -> PyResult<PyObject> {
+fn entity_to_py(py: Python<'_>, entity: EntityResult) -> PyResult<Py<PyAny>> {
     Ok(match entity {
-        EntityResult::Node(n) => Py::new(py, PyNode::from_rust(n))?.into_py(py),
-        EntityResult::Edge(e) => Py::new(py, PyEdge::from_rust(e))?.into_py(py),
-        EntityResult::NodeId(id) => id.as_u64().into_py(py),
-        EntityResult::EdgeId(id) => id.as_u64().into_py(py),
+        EntityResult::Node(n) => Py::new(py, PyNode::from_rust(n))?.into_py_any(py)?,
+        EntityResult::Edge(e) => Py::new(py, PyEdge::from_rust(e))?.into_py_any(py)?,
+        EntityResult::NodeId(id) => id.as_u64().into_py_any(py)?,
+        EntityResult::EdgeId(id) => id.as_u64().into_py_any(py)?,
         // Null binding (unmatched OPTIONAL MATCH) or any future variant.
         _ => py.None(),
     })
@@ -78,7 +79,7 @@ pub fn execute_cypher(
     let query_owned = query.to_owned();
     let db_clone = Arc::clone(db);
     let rows = py
-        .allow_threads(move || {
+        .detach(move || {
             let results = if param_map.is_empty() {
                 db_clone.execute_cypher(&query_owned)
             } else {
@@ -88,15 +89,15 @@ pub fn execute_cypher(
         })
         .map_err(map_error)?;
 
-    let list = PyList::empty_bound(py);
+    let list = PyList::empty(py);
     for row in rows {
-        let d = PyDict::new_bound(py);
+        let d = PyDict::new(py);
         // Multi-variable binding row (#549): `MATCH (a),(b) RETURN a,b` binds
         // several variables that the single `entity` field cannot represent.
         // Surface them under a `bindings` dict (var -> entity) rather than the
         // lossy single-entity shape, which would drop every bound entity.
         if let Some(bindings) = row.bindings {
-            let bd = PyDict::new_bound(py);
+            let bd = PyDict::new(py);
             for (name, entity) in bindings {
                 bd.set_item(name, entity_to_py(py, entity)?)?;
             }
@@ -148,15 +149,23 @@ pub fn execute_cypher(
 
 /// Execute an AQL query (`MATCH ... RETURN ...`) and return rows.
 #[pyfunction]
-pub fn execute_aql(py: Python<'_>, db: &crate::db::PyAletheiaDB, query: &str) -> PyResult<Py<PyList>> {
+pub fn execute_aql(
+    py: Python<'_>,
+    db: &crate::db::PyAletheiaDB,
+    query: &str,
+) -> PyResult<Py<PyList>> {
     let db_clone = db.inner();
     let query_owned = query.to_owned();
     let rows = py
-        .allow_threads(move || db_clone.execute_aql(&query_owned).and_then(|r| r.collect_all()))
+        .detach(move || {
+            db_clone
+                .execute_aql(&query_owned)
+                .and_then(|r| r.collect_all())
+        })
         .map_err(map_error)?;
-    let list = PyList::empty_bound(py);
+    let list = PyList::empty(py);
     for row in rows {
-        let d = PyDict::new_bound(py);
+        let d = PyDict::new(py);
         match row.entity {
             EntityResult::Node(n) => {
                 d.set_item("kind", "node")?;

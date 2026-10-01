@@ -123,7 +123,7 @@ fn bench_insert_performance(c: &mut Criterion) {
                     || {
                         // Setup: Create fresh indexes and random order
                         use rand::seq::SliceRandom;
-                        let mut rng = rand::thread_rng();
+                        let mut rng = rand::rng();
                         let mut order: Vec<i64> = (0..count).collect();
                         order.shuffle(&mut rng);
                         (TemporalIndexes::new(), NodeId::new(1).unwrap(), order)

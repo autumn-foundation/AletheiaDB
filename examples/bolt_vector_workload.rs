@@ -49,7 +49,7 @@ fn env_usize(key: &str, default: usize) -> usize {
 
 fn random_vector(rng: &mut SmallRng, dimensions: usize) -> Vec<f32> {
     (0..dimensions)
-        .map(|_| rng.gen_range(-1.0f32..1.0))
+        .map(|_| rng.random_range(-1.0f32..1.0))
         .collect()
 }
 

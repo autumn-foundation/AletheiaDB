@@ -101,9 +101,9 @@ impl SubjectKey {
     /// of the MEK (see the design doc's rejection of `HKDF(MEK, subject_id)`).
     #[must_use]
     pub fn generate() -> Self {
-        use rand::RngCore;
+        use rand::{RngCore, TryRngCore};
         let mut bytes = Zeroizing::new([0u8; SUBJECT_KEY_LEN]);
-        rand::rngs::OsRng.fill_bytes(bytes.as_mut());
+        rand::rngs::OsRng.unwrap_err().fill_bytes(bytes.as_mut());
         Self(bytes)
     }
 

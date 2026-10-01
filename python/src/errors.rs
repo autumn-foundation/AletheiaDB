@@ -33,13 +33,13 @@ pub fn map_storage_error(err: StorageError) -> PyErr {
 }
 
 pub fn register(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add("AletheiaDBError", py.get_type_bound::<AletheiaDBError>())?;
-    module.add("NodeNotFound", py.get_type_bound::<NodeNotFound>())?;
-    module.add("EdgeNotFound", py.get_type_bound::<EdgeNotFound>())?;
-    module.add("InvalidId", py.get_type_bound::<InvalidId>())?;
-    module.add("IoError", py.get_type_bound::<IoError>())?;
-    module.add("TemporalError", py.get_type_bound::<TemporalErrorPy>())?;
-    module.add("QueryError", py.get_type_bound::<QueryErrorPy>())?;
-    module.add("ConfigError", py.get_type_bound::<ConfigErrorPy>())?;
+    module.add("AletheiaDBError", py.get_type::<AletheiaDBError>())?;
+    module.add("NodeNotFound", py.get_type::<NodeNotFound>())?;
+    module.add("EdgeNotFound", py.get_type::<EdgeNotFound>())?;
+    module.add("InvalidId", py.get_type::<InvalidId>())?;
+    module.add("IoError", py.get_type::<IoError>())?;
+    module.add("TemporalError", py.get_type::<TemporalErrorPy>())?;
+    module.add("QueryError", py.get_type::<QueryErrorPy>())?;
+    module.add("ConfigError", py.get_type::<ConfigErrorPy>())?;
     Ok(())
 }
