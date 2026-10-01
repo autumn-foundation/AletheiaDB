@@ -963,6 +963,10 @@ impl Drop for PublishWindow<'_> {
 /// permanently true and the read fast path permanently unreachable. Saturating
 /// keeps the damage to a stale count.
 fn saturating_sub(counter: &AtomicUsize, amount: usize) {
+    // `fetch_update` is deprecated in favour of `try_update` on newer stable
+    // toolchains, but `try_update` postdates this crate's MSRV
+    // (`rust-version` in Cargo.toml), so keep the MSRV-compatible name.
+    #[allow(deprecated)]
     let _ = counter.fetch_update(Ordering::Release, Ordering::Relaxed, |current| {
         Some(current.saturating_sub(amount))
     });
