@@ -2100,8 +2100,9 @@ mod tests {
         let node = recovered_current.get_node(node_id)?;
         assert_eq!(node.get_property("age").unwrap().as_int().unwrap(), 31);
 
-        // Verify historical has versions (create + update)
-        assert_eq!(recovered_historical.get_node_versions().len(), 2);
+        // Verify historical has versions (create + update + the update's
+        // structural carry-forward of the superseded valid-time prefix).
+        assert_eq!(recovered_historical.get_node_versions().len(), 3);
 
         Ok(())
     }
@@ -2164,8 +2165,8 @@ mod tests {
         let edge = recovered_current.get_edge(edge_id)?;
         assert_eq!(edge.get_property("strength").unwrap().as_int().unwrap(), 10);
 
-        // Verify historical has edge versions (create + update)
-        assert_eq!(recovered_historical.get_edge_versions().len(), 2);
+        // Verify historical has edge versions (create + update + carry-forward)
+        assert_eq!(recovered_historical.get_edge_versions().len(), 3);
 
         Ok(())
     }

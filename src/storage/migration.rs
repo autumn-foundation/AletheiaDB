@@ -1295,6 +1295,15 @@ impl MigrationService {
                 continue;
             }
 
+            // Skip still-recorded versions (open transaction interval): like the
+            // head, a carry-forward valid-time slice is part of the entity's
+            // CURRENT belief and must stay mutable in the hot tier — a later
+            // delete or backfill transaction-closes it, and cold versions are
+            // immutable. Only superseded (tx-closed) history migrates.
+            if version.temporal.is_currently_recorded() {
+                continue;
+            }
+
             // Calculate age from transaction time (wallclock comparison)
             let tx_start_ms = version.temporal.transaction_time().start().wallclock();
             let age_ms = (current_wallclock_ms - tx_start_ms).max(0) as u64;
@@ -1376,6 +1385,15 @@ impl MigrationService {
             if let Some(&head_id) = head_versions.get(&version.edge_id)
                 && *version_id == head_id
             {
+                continue;
+            }
+
+            // Skip still-recorded versions (open transaction interval): like the
+            // head, a carry-forward valid-time slice is part of the entity's
+            // CURRENT belief and must stay mutable in the hot tier — a later
+            // delete or backfill transaction-closes it, and cold versions are
+            // immutable. Only superseded (tx-closed) history migrates.
+            if version.temporal.is_currently_recorded() {
                 continue;
             }
 
@@ -1502,7 +1520,11 @@ mod tests {
         NodeVersion::new_anchor(
             VersionId::new(id).unwrap(),
             NodeId::new(node_id).unwrap(),
-            BiTemporalInterval::current(1000.into()),
+            // Superseded history: transaction-closed, as every non-head
+            // version is in a real chain (still-recorded slices never migrate).
+            BiTemporalInterval::current(1000.into())
+                .close_transaction_time(2000.into())
+                .unwrap(),
             GLOBAL_INTERNER.intern("Person").unwrap(),
             properties,
         )
@@ -1672,6 +1694,40 @@ mod tests {
         // With min_hot_versions=2 and 3 versions, only 1 should be candidate
         // (v3 is head and skipped, v2 must stay hot, v1 can migrate)
         assert_eq!(candidates.len(), 1);
+    }
+
+    #[test]
+    fn test_identify_candidates_skips_still_recorded_slices() {
+        let cold = create_cold_storage();
+        let policy = MigrationPolicy::builder()
+            .min_hot_versions(0)
+            .age_threshold(Duration::ZERO)
+            .build();
+        let service = MigrationService::new(cold, policy);
+
+        let node_id = NodeId::new(100).unwrap();
+        let mut versions = FastHashMap::default();
+        // v1: superseded history (tx-closed) -> migratable.
+        let v1 = create_test_node_version(1, 100);
+        // v2: a still-recorded carry-forward slice (tx-open, closed valid) ->
+        // part of the current belief, must stay hot.
+        let mut v2 = create_test_node_version(2, 100);
+        v2.temporal = BiTemporalInterval::current(1000.into())
+            .close_valid_time(1500.into())
+            .unwrap();
+        let v3 = create_test_node_version(3, 100);
+        for v in [v1, v2, v3] {
+            versions.insert(v.id, v);
+        }
+        let mut heads = FastHashMap::default();
+        heads.insert(node_id, VersionId::new(3).unwrap());
+        let mut counts = FastHashMap::default();
+        counts.insert(node_id, 3);
+
+        let candidates =
+            service.identify_node_candidates(&versions, &heads, &counts, Instant::now());
+        let ids: Vec<_> = candidates.iter().map(|c| c.version_id.as_u64()).collect();
+        assert_eq!(ids, vec![1]);
     }
 
     #[test]
@@ -2155,7 +2211,11 @@ mod tests {
         EdgeVersion::new_anchor(
             VersionId::new(id).unwrap(),
             EdgeId::new(edge_id).unwrap(),
-            BiTemporalInterval::current(1000.into()),
+            // Superseded history: transaction-closed, as every non-head
+            // version is in a real chain (still-recorded slices never migrate).
+            BiTemporalInterval::current(1000.into())
+                .close_transaction_time(2000.into())
+                .unwrap(),
             GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             NodeId::new(1).unwrap(),
             NodeId::new(2).unwrap(),
@@ -2168,7 +2228,8 @@ mod tests {
         let properties = PropertyMapBuilder::new().insert("weight", 1.5f64).build();
 
         let range = TimeRange::from(ts_ms.into());
-        let temporal = BiTemporalInterval::new(range, range);
+        let tx_range = TimeRange::new(ts_ms.into(), (ts_ms + 1).into()).unwrap();
+        let temporal = BiTemporalInterval::new(range, tx_range);
 
         EdgeVersion::new_anchor(
             VersionId::new(id).unwrap(),

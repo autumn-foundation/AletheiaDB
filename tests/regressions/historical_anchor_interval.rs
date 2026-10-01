@@ -41,18 +41,15 @@ fn test_reproduce_config_gap() {
     let stats = db.historical_stats().unwrap();
     println!("Stats: {:?}", stats);
 
-    // If interval is 5:
-    // v1: Anchor (always)
-    // v2: Delta (since anchor: 1)
-    // v3: Delta (since anchor: 2)
-    // v4: Delta (since anchor: 3)
-    // v5: Delta (since anchor: 4)
-    // v6: Anchor (since anchor: 5 >= 5)
-    // Total Anchors: 2
+    // If interval is 5: each update also stores a structural carry-forward
+    // (ADR-0061), so the chain holds 1 + 2 * 5 = 11 versions and every stored
+    // version advances the anchor counter:
+    // positions 0, 5, 10 are anchors -> 3 anchors, 8 deltas. (With the
+    // default interval of 10 this would be only 2 anchors.)
 
     assert_eq!(
-        stats.node_anchor_count, 2,
-        "Should have 2 anchors with interval 5 (v1 and v6)"
+        stats.node_anchor_count, 3,
+        "Should have 3 anchors with interval 5 (chain positions 0, 5, 10)"
     );
-    assert_eq!(stats.node_delta_count, 4, "Should have 4 deltas");
+    assert_eq!(stats.node_delta_count, 8, "Should have 8 deltas");
 }

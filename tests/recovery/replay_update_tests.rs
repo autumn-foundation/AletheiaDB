@@ -96,9 +96,10 @@ fn test_replay_update_node_basic() -> Result<()> {
         Some(PropertyValue::Int(30))
     ));
 
-    // And: Historical storage has 2 versions
+    // And: Historical storage has 3 versions: create + update + the update's
+    // structural carry-forward of the superseded valid-time prefix (ADR-0061)
     let hist_stats = historical.stats();
-    assert_eq!(hist_stats.total_node_versions, 2);
+    assert_eq!(hist_stats.total_node_versions, 3);
 
     Ok(())
 }
@@ -247,9 +248,10 @@ fn test_replay_multiple_updates_same_node() -> Result<()> {
         Some(PropertyValue::Int(5))
     ));
 
-    // And: Historical storage has 6 versions (1 create + 5 updates)
+    // And: Historical storage has 11 versions: 1 create + 5 updates + 5
+    // structural carry-forwards (ADR-0061)
     let hist_stats = historical.stats();
-    assert_eq!(hist_stats.total_node_versions, 6);
+    assert_eq!(hist_stats.total_node_versions, 11);
 
     Ok(())
 }
@@ -325,9 +327,10 @@ fn test_replay_update_edge_basic() -> Result<()> {
         matches!(edge.properties.get("strength"), Some(PropertyValue::Float(s)) if (*s - 0.8).abs() < f64::EPSILON)
     );
 
-    // And: Historical storage has 2 edge versions
+    // And: Historical storage has 3 edge versions: create + update +
+    // structural carry-forward (ADR-0061)
     let hist_stats = historical.stats();
-    assert_eq!(hist_stats.total_edge_versions, 2);
+    assert_eq!(hist_stats.total_edge_versions, 3);
 
     Ok(())
 }
@@ -699,9 +702,10 @@ fn test_replay_mixed_creates_and_updates() -> Result<()> {
         Some(PropertyValue::Int(3))
     ));
 
-    // And: Historical storage has 5 versions (3 creates + 2 updates)
+    // And: Historical storage has 7 versions: 3 creates + 2 updates + 2
+    // structural carry-forwards (ADR-0061)
     let hist_stats = historical.stats();
-    assert_eq!(hist_stats.total_node_versions, 5);
+    assert_eq!(hist_stats.total_node_versions, 7);
 
     Ok(())
 }
