@@ -169,6 +169,27 @@ thread_local! {
     static THREAD_ID_HASH: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
+/// Outcome of a graceful shutdown attempt (Issue #3801).
+///
+/// `shutdown_graceful` no longer spins indefinitely: it lets in-flight
+/// appenders finish while they make progress, closes the ring buffers once
+/// they stop (so a writer parked in a blocking append exits via the `Closed`
+/// path instead of deadlocking the shutdown), then waits for the rest with a
+/// bounded deadline derived from `max_append_block_ms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownOutcome {
+    /// All in-flight appenders drained within the deadline; buffers closed.
+    Completed,
+    /// The deadline expired with `active_batches` appenders still in
+    /// flight. Buffers are closed (blocked appenders will exit via the
+    /// `Closed` path), but the caller must not assume every append
+    /// completed — some may have been refused by the close.
+    TimedOut {
+        /// Number of appenders still in flight when the deadline expired.
+        active_batches: usize,
+    },
+}
+
 /// Concurrent Write-Ahead Log with striped architecture.
 ///
 /// Provides high-throughput, low-latency WAL operations by distributing
@@ -541,12 +562,16 @@ impl ConcurrentWal {
         match stripe.append_sync(lsn, data) {
             Ok(handle) => {
                 self.total_appends.fetch_add(1, Ordering::Relaxed);
-                // Wait for flush
-                handle.wait().map_err(|e| {
-                    Error::Storage(StorageError::WalError {
-                        reason: format!("WAL flush failed: {}", e),
-                    })
-                })?;
+                // Wait for flush, with a deadlock-detection timeout (Issue #3802).
+                // Aligned with the group-commit acquire timeout stance (120s):
+                // deadlock detection, not an SLA.
+                handle
+                    .wait_timeout(std::time::Duration::from_secs(120))
+                    .map_err(|e| {
+                        Error::Storage(StorageError::WalError {
+                            reason: format!("WAL flush failed: {}", e),
+                        })
+                    })?;
                 Ok(lsn)
             }
             Err(_entry) => Err(Error::Storage(StorageError::WalError {
@@ -889,25 +914,69 @@ impl ConcurrentWal {
 
     /// Gracefully shutdown the WAL.
     ///
-    /// This signals that shutdown is requested (preventing new batches),
-    /// waits for all active batches to complete, and then closes the ring buffers.
-    pub fn shutdown_graceful(&self) {
-        // 1. Signal shutdown
+    /// This signals that shutdown is requested (preventing new batches), then
+    /// lets in-flight batches that are still making progress finish before
+    /// closing the ring buffers, so a batch being drained by a healthy flusher
+    /// is never cut mid-way into a partial prefix.
+    ///
+    /// The drain wait is progress-aware: it ends once no appender has placed
+    /// an entry for a short grace window (`max_append_block_ms`, capped at 1
+    /// second; 1 second when unbounded). A writer wedged on a buffer nobody
+    /// drains therefore cannot stall shutdown: once the window elapses the
+    /// buffers are closed and it exits via the `Closed` path (Issue #3801).
+    /// The post-close wait has a bounded deadline (`max_append_block_ms`,
+    /// minimum 1 second).
+    pub fn shutdown_graceful(&self) -> ShutdownOutcome {
+        use std::time::{Duration, Instant};
+
+        // 1. Signal shutdown (prevents new batches).
         self.shutdown_requested.store(true, Ordering::SeqCst);
 
-        // 2. Wait for active batches to complete
-        let mut spins = 0;
+        // 2. Let in-flight batches drain while they make progress. Closing
+        //    first would refuse the rest of a batch the flusher is actively
+        //    draining, leaving a partial prefix behind; closing only after an
+        //    unbounded wait deadlocks on a wedged appender when
+        //    `max_append_block_ms == 0` (the spinner waits for the appender,
+        //    the appender waits for space or close, and close never comes).
+        //    A no-progress window gets both right.
+        let block_ms = self.config.max_append_block_ms;
+        let grace = Duration::from_millis(if block_ms == 0 {
+            1_000
+        } else {
+            block_ms.min(1_000)
+        });
+        let mut last_appends = self.total_appends.load(Ordering::Relaxed);
+        let mut last_progress = Instant::now();
         while self.active_batches.load(Ordering::SeqCst) > 0 {
-            if spins < 100 {
-                std::hint::spin_loop();
-            } else {
-                std::thread::yield_now();
+            let appends = self.total_appends.load(Ordering::Relaxed);
+            if appends != last_appends {
+                last_appends = appends;
+                last_progress = Instant::now();
+            } else if last_progress.elapsed() >= grace {
+                break;
             }
-            spins += 1;
+            std::thread::yield_now();
         }
 
-        // 3. Close buffers
+        // 3. Close buffers: unblocks any appender still parked in a blocking
+        //    append via the existing `Closed` path.
         self.close();
+
+        // 4. Wait for remaining active batches with a bounded deadline.
+        let bound_ms = block_ms.max(1_000);
+        let deadline = Instant::now() + Duration::from_millis(bound_ms);
+        loop {
+            let active = self.active_batches.load(Ordering::SeqCst);
+            if active == 0 {
+                return ShutdownOutcome::Completed;
+            }
+            if Instant::now() >= deadline {
+                return ShutdownOutcome::TimedOut {
+                    active_batches: active,
+                };
+            }
+            std::thread::yield_now();
+        }
     }
 
     /// Check if the WAL is closed.
@@ -970,7 +1039,7 @@ mod tests {
     use std::thread;
     use tempfile::tempdir;
 
-    fn test_operation() -> WalOperation {
+    pub(super) fn test_operation() -> WalOperation {
         WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
@@ -1337,7 +1406,11 @@ mod tests {
 
     /// A one-stripe WAL whose ring buffer holds `capacity` entries and whose
     /// blocking appends give up after `bound_ms`.
-    fn wedged_wal(dir: &std::path::Path, capacity: usize, bound_ms: u64) -> Arc<ConcurrentWal> {
+    pub(super) fn wedged_wal(
+        dir: &std::path::Path,
+        capacity: usize,
+        bound_ms: u64,
+    ) -> Arc<ConcurrentWal> {
         let config = ConcurrentWalConfig::new(dir)
             .with_num_stripes(1)
             .with_stripe_capacity(capacity)
@@ -1681,12 +1754,15 @@ mod tests {
 
 #[cfg(test)]
 mod sentry_tests {
+    use super::tests::{test_operation, wedged_wal};
     use super::*;
     use crate::GLOBAL_INTERNER;
     use crate::core::id::NodeId;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::time;
     use crate::storage::wal::entry::MAX_WAL_ENTRY_SIZE;
+    use std::sync::Arc;
+    use std::thread;
     use tempfile::tempdir;
 
     /// 🎯 Target: MAX_WAL_ENTRY_SIZE boundary check
@@ -1840,5 +1916,141 @@ mod sentry_tests {
         for h in handles {
             h.join().unwrap();
         }
+    }
+
+    /// Issue #3801: `shutdown_graceful` must not deadlock on a wedged appender.
+    ///
+    /// A writer parked in a blocking append (unbounded when
+    /// `max_append_block_ms == 0`) used to deadlock shutdown: the spinner
+    /// waited for the appender, the appender waited for buffer space or close,
+    /// and close never came because it ran after the spin. Now buffers close
+    /// first (the appender exits via the `Closed` path) and the wait has a
+    /// deadline.
+    ///
+    /// Deterministic: the appender is wedged on a 2-slot buffer that is never
+    /// drained; the only way shutdown completes is via the close-first path.
+    #[test]
+    fn test_shutdown_graceful_unblocks_wedged_appender() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        // 2-slot buffer, unbounded append: the third append parks forever
+        // unless the buffers are closed.
+        let wal = wedged_wal(dir.path(), 2, 0);
+
+        // Fill the buffer.
+        wal.append_batch(vec![test_operation(), test_operation()])
+            .expect("initial fill succeeds");
+
+        // Wedge an appender: it blocks on the full buffer.
+        let (tx, rx) = mpsc::channel();
+        let worker = Arc::clone(&wal);
+        thread::spawn(move || {
+            let result = worker.append_batch(vec![test_operation()]);
+            let _ = tx.send(result.is_err());
+        });
+
+        // Give the worker time to park in the append.
+        thread::sleep(Duration::from_millis(100));
+
+        // Shutdown must complete within the bound, not hang forever.
+        let start = Instant::now();
+        let outcome = wal.shutdown_graceful();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "shutdown_graceful deadlocked on a wedged appender (took {elapsed:?})"
+        );
+        assert_eq!(
+            outcome,
+            ShutdownOutcome::Completed,
+            "the close should have unblocked the appender via the Closed path"
+        );
+
+        // The wedged appender must have exited with an error (via Closed).
+        assert!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("appender thread alive"),
+            "the wedged appender should have been unblocked by the close"
+        );
+    }
+
+    /// Issue #3801 follow-up: closing the buffers must not cut a batch that a
+    /// healthy drainer is still making room for.
+    ///
+    /// A 4-entry batch on a 2-slot buffer only completes as the drainer frees
+    /// slots. Shutdown is requested while the batch is still mid-flight; the
+    /// progress-aware drain must let it finish rather than close the buffers
+    /// under it and leave a partial prefix behind.
+    #[test]
+    fn test_shutdown_graceful_lets_progressing_batch_finish() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::Duration;
+
+        let dir = tempdir().unwrap();
+        let wal = wedged_wal(dir.path(), 2, 0);
+
+        let running = Arc::new(AtomicBool::new(true));
+        let drained = Arc::new(std::sync::Mutex::new(0usize));
+        let drainer = {
+            let wal = Arc::clone(&wal);
+            let running = Arc::clone(&running);
+            let drained = Arc::clone(&drained);
+            thread::spawn(move || {
+                while running.load(Ordering::SeqCst) {
+                    *drained.lock().unwrap() += wal.drain_all().len();
+                    // Slow drainer: the batch needs several rounds to finish.
+                    thread::sleep(Duration::from_millis(100));
+                }
+                *drained.lock().unwrap() += wal.drain_all().len();
+            })
+        };
+
+        let writer = {
+            let wal = Arc::clone(&wal);
+            thread::spawn(move || wal.append_batch((0..4).map(|_| test_operation()).collect()))
+        };
+
+        // Wait until the batch is in flight but cannot yet have finished.
+        while wal.total_appends() == 0 {
+            thread::yield_now();
+        }
+        let outcome = wal.shutdown_graceful();
+
+        running.store(false, Ordering::SeqCst);
+        drainer.join().unwrap();
+        let result = writer.join().unwrap();
+
+        assert_eq!(outcome, ShutdownOutcome::Completed);
+        assert!(
+            result.is_ok(),
+            "a batch the drainer was making room for must not be cut by shutdown: {result:?}"
+        );
+        assert_eq!(*drained.lock().unwrap(), 4, "expected the full batch");
+    }
+
+    /// The progress-aware drain only waits while batches are in flight: an
+    /// idle WAL must shut down immediately rather than sit out the
+    /// no-progress grace window (1 s with an unbounded `max_append_block_ms`).
+    #[test]
+    fn test_shutdown_graceful_idle_returns_without_waiting_out_grace() {
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let wal = wedged_wal(dir.path(), 2, 0);
+        wal.append_batch(vec![test_operation()])
+            .expect("append on an open WAL succeeds");
+
+        let start = Instant::now();
+        let outcome = wal.shutdown_graceful();
+        let elapsed = start.elapsed();
+
+        assert_eq!(outcome, ShutdownOutcome::Completed);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "idle shutdown waited out the grace window (took {elapsed:?})"
+        );
     }
 }

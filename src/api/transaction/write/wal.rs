@@ -69,10 +69,22 @@ use crate::storage::wal::{LSN, WalOperation};
 ///
 /// # Returns
 ///
-/// `Some(base_lsn)` — the lowest LSN allocated for this transaction (the
-/// `BeginTx` marker's LSN) — for a non-empty transaction, or `None` for an
-/// empty transaction (no ops appended). The base LSN is registered as the
-/// commit's in-flight watermark by the caller (lost-write persist race fix).
+/// `(base_lsn, wait_epoch)`:
+/// - `base_lsn` — the lowest LSN allocated for this transaction (the
+///   `BeginTx` marker's LSN) — for a non-empty transaction, or `None` for an
+///   empty transaction (no ops appended). The base LSN is registered as the
+///   commit's in-flight watermark by the caller (lost-write persist race fix).
+/// - `wait_epoch` — the group-commit epoch to wait on (`None` for modes
+///   without epoch tracking). For an empty transaction this is still the
+///   result of `commit()` (the durability mode's commit step runs even with
+///   no frame).
+///
+/// # Membership atomicity (Issue #3805)
+///
+/// The non-empty path appends and registers via
+/// [`ConcurrentWalSystem::append_batch_and_commit`], which holds the
+/// membership lock across the append→register pair. The empty path calls
+/// `commit()` directly (nothing was appended, so there is no window).
 ///
 /// # Errors
 ///
@@ -81,7 +93,7 @@ pub(crate) fn log_operations_to_wal(
     tx: &WriteTransaction,
     commit_timestamp: Timestamp,
     closing_version_ids: &[VersionId],
-) -> Result<Option<LSN>> {
+) -> Result<(Option<LSN>, Option<u64>)> {
     // Collect all buffered writes into a single batch and append them under one atomic
     // LSN allocation via the WAL `append_batch` path (Issue #219). This is strictly more
     // efficient than the previous per-operation `append_async` loop for multi-operation
@@ -93,8 +105,11 @@ pub(crate) fn log_operations_to_wal(
     if buffered.is_empty() {
         // Empty transaction: no data ops, therefore no frame and no marker.
         // Reproduces the prior early-return exactly. No LSN allocated, so no
-        // in-flight watermark to register.
-        return Ok(None);
+        // in-flight watermark to register. The durability mode's commit step
+        // still runs (e.g. Synchronous drains+flushes, GroupCommit registers
+        // the empty commit) — no membership lock needed, nothing was appended.
+        let wait_epoch = tx.wal.commit()?;
+        return Ok((None, wait_epoch));
     }
 
     let tx_id = tx.tx_id.as_u64();
@@ -134,7 +149,12 @@ pub(crate) fn log_operations_to_wal(
     // `append_batch` allocates a single contiguous LSN band and returns the
     // allocated LSNs in operation order, so element 0 (the `BeginTx` marker) is
     // the base — the lowest LSN for this whole transaction.
-    let lsns = tx.wal.append_batch_async(operations)?;
+    //
+    // Issue #3805: append and group-commit registration are one atomic
+    // membership step (the membership lock is held across both inside
+    // `append_batch_and_commit`), so the background flusher cannot drain this
+    // frame into an earlier epoch's batch before this transaction registers.
+    let (base_lsn, wait_epoch) = tx.wal.append_batch_and_commit(operations)?;
 
-    Ok(lsns.first().copied())
+    Ok((base_lsn, wait_epoch))
 }
