@@ -668,6 +668,13 @@ impl MigrationService {
     /// service.stop();
     /// ```
     pub fn start(&self) {
+        // Acquire the worker handle lock first to serialize start/stop operations
+        // and prevent race conditions (like stop joining a newly spawned thread).
+        let mut handle_guard = self
+            .worker_handle
+            .lock()
+            .expect("MigrationService worker_handle lock poisoned in start()");
+
         // Check if already running (atomic compare-and-swap)
         if self
             .running
@@ -699,10 +706,6 @@ impl MigrationService {
         });
 
         // Store the handle
-        let mut handle_guard = self
-            .worker_handle
-            .lock()
-            .expect("MigrationService worker_handle lock poisoned in start()");
         *handle_guard = Some(handle);
     }
 
@@ -782,6 +785,12 @@ impl MigrationService {
     ///
     /// If the service is not running, this is a no-op and returns immediately.
     pub fn stop(&self) {
+        // Acquire the worker handle lock first to serialize start/stop operations.
+        let mut handle_guard = self
+            .worker_handle
+            .lock()
+            .expect("MigrationService worker_handle lock poisoned in stop()");
+
         // Signal the worker to stop
         if !self.running.swap(false, Ordering::SeqCst) {
             // Was already stopped, no-op
@@ -806,11 +815,6 @@ impl MigrationService {
                 .expect("MigrationService shutdown condvar wait failed");
         }
 
-        // Join the thread if we have a handle
-        let mut handle_guard = self
-            .worker_handle
-            .lock()
-            .expect("MigrationService worker_handle lock poisoned in stop()");
         if let Some(handle) = handle_guard.take() {
             let _ = handle.join();
         }
@@ -1444,6 +1448,16 @@ impl Drop for MigrationService {
     /// after the service is no longer accessible. Uses a timeout to prevent
     /// deadlock if the worker thread is stuck.
     fn drop(&mut self) {
+        // Take handle early to serialize with any concurrent start/stop,
+        // though drop usually means we have exclusive access.
+        let handle_to_join = {
+            if let Ok(mut handle_guard) = self.worker_handle.lock() {
+                handle_guard.take()
+            } else {
+                None
+            }
+        };
+
         // Only attempt stop if running
         if !self.running.swap(false, Ordering::SeqCst) {
             // Was already stopped, no-op
@@ -1489,9 +1503,7 @@ impl Drop for MigrationService {
         }
 
         // Try to join the thread if we have a handle
-        if let Ok(mut handle_guard) = self.worker_handle.lock()
-            && let Some(handle) = handle_guard.take()
-        {
+        if let Some(handle) = handle_to_join {
             // Don't block indefinitely - the thread will terminate on its own
             let _ = handle.join();
         }
@@ -3181,5 +3193,54 @@ mod tests {
 
         // Final verification: cold storage has the highest LSN
         assert_eq!(cold.get_flushed_lsn().unwrap(), Some(LSN(500)));
+    }
+}
+
+#[cfg(test)]
+mod havoc_tests {
+    use super::*;
+    use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_migration_start_stop_race() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let cold = Arc::new(RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap());
+        let policy = MigrationPolicy::default();
+        let service = Arc::new(MigrationService::new(cold, policy));
+
+        // Start the service
+        service.start();
+
+        let s1 = service.clone();
+        let s2 = service.clone();
+
+        // Race a stop() against a start() issued slightly later. Before the
+        // fix, start() could spawn a new worker after stop() finished its
+        // condvar wait but before it took `worker_handle`, so stop() would
+        // join the NEW (still running) worker and hang.
+        let t1 = thread::spawn(move || s1.stop());
+        let t2 = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(5));
+            s2.start();
+        });
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            t1.join().unwrap();
+            t2.join().unwrap();
+            tx.send(()).unwrap();
+        });
+
+        // If the bug exists, t1 will hang in stop() joining the NEW thread.
+        // We'll timeout and panic to demonstrate the deadlock.
+        assert!(
+            rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "Deadlock detected in start/stop race!"
+        );
+
+        service.stop();
     }
 }
