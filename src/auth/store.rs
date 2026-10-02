@@ -16,8 +16,8 @@ use crate::auth::Role;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use dashmap::DashMap;
-use rand::RngCore;
 use rand::rngs::OsRng;
+use rand::{RngCore, TryRngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -244,7 +244,7 @@ impl AuthStore {
         }
 
         let mut random_bytes = [0u8; KEY_RANDOM_BYTES];
-        OsRng.fill_bytes(&mut random_bytes);
+        OsRng.unwrap_err().fill_bytes(&mut random_bytes);
         let mut random_part = URL_SAFE_NO_PAD.encode(random_bytes);
         random_bytes.zeroize();
 
@@ -426,7 +426,7 @@ impl AuthStore {
     fn generate_unique_id(&self) -> String {
         loop {
             let mut bytes = [0u8; 8];
-            OsRng.fill_bytes(&mut bytes);
+            OsRng.unwrap_err().fill_bytes(&mut bytes);
             let id = hex_encode(&bytes);
             if !self.records.contains_key(&id) {
                 return id;

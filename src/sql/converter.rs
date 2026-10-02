@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use sqlparser::ast::{
-    BinaryOperator, Expr, OrderByExpr, Query as SqlQuery, SelectItem, SetExpr, Statement,
-    TableFactor, TableWithJoins, Value,
+    BinaryOperator, Expr, LimitClause, OrderByExpr, OrderByKind, Query as SqlQuery, SelectItem,
+    SetExpr, Statement, TableFactor, TableWithJoins, Value, ValueWithSpan,
 };
 
 use crate::index::vector::DistanceMetric;
@@ -151,19 +151,45 @@ impl SqlConverter {
         // Convert ORDER BY. A property-key `ORDER BY` over `FROM edges` is
         // likewise evaluated for real (Issue #3622): the `SortIterator` reads the
         // edge's own properties when its input is `EdgeScan`-rooted.
-        for order_by in &query.order_by {
-            self.convert_order_by(order_by, &mut ops)?;
+        if let Some(ref order_by) = query.order_by {
+            match &order_by.kind {
+                OrderByKind::Expressions(exprs) => {
+                    for order_by in exprs {
+                        self.convert_order_by(order_by, &mut ops)?;
+                    }
+                }
+                OrderByKind::All(_) => {
+                    return Err(SqlError::UnsupportedFeature(
+                        "ORDER BY ALL is not supported. Use simple column names (e.g., ORDER BY name DESC)".to_string(),
+                    ));
+                }
+            }
         }
 
-        // Convert OFFSET (must come before LIMIT for correct SQL semantics:
-        // skip N rows first, then take M rows from the result)
-        if let Some(ref offset) = query.offset {
-            let n = self.expr_to_usize(&offset.value)?;
+        // Convert OFFSET then LIMIT (OFFSET must come first for correct SQL
+        // semantics: skip N rows first, then take M rows from the result).
+        // `LIMIT ALL` parses as an absent limit.
+        let (offset, limit) = match &query.limit_clause {
+            None => (None, None),
+            Some(LimitClause::LimitOffset {
+                limit,
+                offset,
+                limit_by,
+            }) => {
+                if !limit_by.is_empty() {
+                    return Err(SqlError::UnsupportedFeature(
+                        "LIMIT ... BY is not supported".to_string(),
+                    ));
+                }
+                (offset.as_ref().map(|o| &o.value), limit.as_ref())
+            }
+            Some(LimitClause::OffsetCommaLimit { offset, limit }) => (Some(offset), Some(limit)),
+        };
+        if let Some(offset) = offset {
+            let n = self.expr_to_usize(offset)?;
             ops.push(QueryOp::Skip(n));
         }
-
-        // Convert LIMIT
-        if let Some(ref limit) = query.limit {
+        if let Some(limit) = limit {
             let n = self.expr_to_usize(limit)?;
             ops.push(QueryOp::Limit(n));
         }
@@ -264,6 +290,11 @@ impl SqlConverter {
                 SelectItem::QualifiedWildcard(_, _) => {
                     is_star = true;
                 }
+                SelectItem::ExprWithAliases { .. } => {
+                    return Err(SqlError::UnsupportedFeature(
+                        "Multi-alias projections (expr AS (a, b)) are not supported".to_string(),
+                    ));
+                }
             }
         }
 
@@ -309,7 +340,7 @@ impl SqlConverter {
             }
         };
 
-        let descending = order_by.asc.map(|asc| !asc).unwrap_or(false);
+        let descending = order_by.options.asc.map(|asc| !asc).unwrap_or(false);
 
         ops.push(QueryOp::Sort { key, descending });
 
@@ -533,7 +564,10 @@ impl SqlConverter {
     /// Convert expression to usize.
     fn expr_to_usize(&self, expr: &Expr) -> Result<usize, SqlError> {
         match expr {
-            Expr::Value(Value::Number(n, _)) => n
+            Expr::Value(ValueWithSpan {
+                value: Value::Number(n, _),
+                ..
+            }) => n
                 .parse::<usize>()
                 .map_err(|_| SqlError::TypeError(format!("Expected positive integer, got: {}", n))),
             _ => Err(SqlError::TypeError(format!(
@@ -546,9 +580,10 @@ impl SqlConverter {
     /// Convert expression to string.
     fn expr_to_string(&self, expr: &Expr) -> Result<String, SqlError> {
         match expr {
-            Expr::Value(Value::SingleQuotedString(s) | Value::DoubleQuotedString(s)) => {
-                Ok(s.clone())
-            }
+            Expr::Value(ValueWithSpan {
+                value: Value::SingleQuotedString(s) | Value::DoubleQuotedString(s),
+                ..
+            }) => Ok(s.clone()),
             _ => Err(SqlError::TypeError(format!(
                 "Expected string literal, got: {:?}",
                 expr

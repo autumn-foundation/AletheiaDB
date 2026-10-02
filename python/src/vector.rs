@@ -9,7 +9,13 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 
 /// Distance metrics for vector similarity. Use the `COSINE`, `EUCLIDEAN`, or `DOT_PRODUCT` constants.
-#[pyclass(name = "DistanceMetric", module = "aletheiadb._native", frozen, eq)]
+#[pyclass(
+    name = "DistanceMetric",
+    module = "aletheiadb._native",
+    frozen,
+    eq,
+    from_py_object
+)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PyDistanceMetric {
     pub(crate) inner: DistanceMetric,
@@ -55,7 +61,7 @@ impl PyDistanceMetric {
 }
 
 /// HNSW index configuration.
-#[pyclass(name = "HnswConfig", module = "aletheiadb._native")]
+#[pyclass(name = "HnswConfig", module = "aletheiadb._native", from_py_object)]
 #[derive(Clone)]
 pub struct PyHnswConfig {
     pub(crate) inner: HnswConfig,
@@ -129,7 +135,7 @@ pub fn enable_vector_index(
     let rust_db = db.inner();
     let property = property.to_string();
     let config = config.inner.clone();
-    py.allow_threads(move || rust_db.vector_index(&property).hnsw(config).enable())
+    py.detach(move || rust_db.vector_index(&property).hnsw(config).enable())
         .map_err(map_error)
 }
 
@@ -143,11 +149,11 @@ pub fn find_similar(
     k: usize,
     label: Option<&str>,
 ) -> PyResult<Py<PyList>> {
-    let nid = NodeId::new(query_node_id).map_err(|e| crate::errors::map_storage_error(e))?;
+    let nid = NodeId::new(query_node_id).map_err(crate::errors::map_storage_error)?;
     let rust_db = db.inner();
     let label_owned = label.map(|s| s.to_string());
     let results = py
-        .allow_threads(move || {
+        .detach(move || {
             let mut query = aletheiadb::SimilarityQuery::from_node(nid).k(k);
             if let Some(l) = &label_owned {
                 query = query.with_label(l);
@@ -155,7 +161,7 @@ pub fn find_similar(
             rust_db.similarity_search(query)
         })
         .map_err(map_error)?;
-    let list = PyList::empty_bound(py);
+    let list = PyList::empty(py);
     for (id, score) in results {
         let t = (id.as_u64(), score as f64);
         list.append(t)?;
@@ -179,7 +185,7 @@ pub fn find_similar_by_vector(
     let rust_db = db.inner();
     let label_owned = label.map(|s| s.to_string());
     let results = py
-        .allow_threads(move || {
+        .detach(move || {
             let mut query = aletheiadb::SimilarityQuery::from_embedding(embedding).k(k);
             if let Some(l) = &label_owned {
                 query = query.with_label(l);
@@ -187,7 +193,7 @@ pub fn find_similar_by_vector(
             rust_db.similarity_search(query)
         })
         .map_err(map_error)?;
-    let list = PyList::empty_bound(py);
+    let list = PyList::empty(py);
     for (id, score) in results {
         let t = (id.as_u64(), score as f64);
         list.append(t)?;

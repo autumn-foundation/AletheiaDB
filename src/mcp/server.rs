@@ -136,7 +136,7 @@ use chrono::{DateTime, Utc};
 use rmcp::{
     ErrorData as RmcpErrorData, ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult,
+        CallToolRequestParams, CallToolResult, ContentBlock, Implementation, ListToolsResult,
         PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
     },
     service::{RequestContext, RoleServer},
@@ -2252,7 +2252,7 @@ impl AletheiaMcpServer {
     }
 
     pub(crate) fn success_json(&self, value: serde_json::Value) -> CallToolResult {
-        CallToolResult::success(vec![Content::text(
+        CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
         )])
     }
@@ -2276,7 +2276,7 @@ impl AletheiaMcpServer {
         let value = serde_json::Value::Object(top_level);
         // Compact serialization, matching both the pre-#3234 error payloads
         // and the query tool's error path (success payloads stay pretty).
-        CallToolResult::error(vec![Content::text(
+        CallToolResult::error(vec![ContentBlock::text(
             serde_json::to_string(&value).unwrap_or_else(|_| value.to_string()),
         )])
     }
@@ -9785,7 +9785,7 @@ impl AletheiaMcpServer {
         if let Some(language) = language {
             obj.insert("language".to_string(), json!(language));
         }
-        CallToolResult::error(vec![Content::text(
+        CallToolResult::error(vec![ContentBlock::text(
             json!({ "error": serde_json::Value::Object(obj) }).to_string(),
         )])
     }
@@ -9814,7 +9814,7 @@ impl AletheiaMcpServer {
             obj.insert("language".to_string(), json!(language));
         }
         obj.insert("details".to_string(), details);
-        CallToolResult::error(vec![Content::text(
+        CallToolResult::error(vec![ContentBlock::text(
             json!({ "error": serde_json::Value::Object(obj) }).to_string(),
         )])
     }
@@ -10652,7 +10652,7 @@ impl AletheiaMcpServer {
             return self.result_bytes_error(language, serialized.len(), cap);
         }
 
-        CallToolResult::success(vec![Content::text(serialized)])
+        CallToolResult::success(vec![ContentBlock::text(serialized)])
     }
 
     /// Build the structured result-byte-cap error and record the termination
@@ -12430,7 +12430,7 @@ impl ServerHandler for AletheiaMcpServer {
 mod server_unit_tests {
     use std::sync::Arc;
 
-    use super::{AletheiaMcpServer, CallToolResult, Content};
+    use super::{AletheiaMcpServer, CallToolResult, ContentBlock};
     use crate::core::PropertyValue;
     use crate::core::error::{Error, QueryError};
     use crate::core::id::{EdgeId, NodeId};
@@ -12578,7 +12578,7 @@ mod server_unit_tests {
     fn race_deadline_returns_fast_result() {
         let server = make_server();
         let out = server.race_deadline(1_000, test_guard(&server), || {
-            CallToolResult::success(vec![Content::text("done".to_string())])
+            CallToolResult::success(vec![ContentBlock::text("done".to_string())])
         });
         match out {
             super::RaceOutcome::Completed(result) => {
@@ -12596,7 +12596,7 @@ mod server_unit_tests {
         let server = make_server();
         let out = server.race_deadline(10, test_guard(&server), || {
             std::thread::sleep(std::time::Duration::from_millis(300));
-            CallToolResult::success(vec![Content::text("late".to_string())])
+            CallToolResult::success(vec![ContentBlock::text("late".to_string())])
         });
         assert!(
             matches!(out, super::RaceOutcome::TimedOut),
@@ -13791,7 +13791,7 @@ mod server_unit_tests {
         let db = Arc::new(AletheiaDB::new().expect("db init"));
         let server = AletheiaMcpServer::new(db);
 
-        let synthetic = CallToolResult::success(vec![Content::text("a".repeat(N))]);
+        let synthetic = CallToolResult::success(vec![ContentBlock::text("a".repeat(N))]);
         assert_eq!(server.limit_termination_counts().memory_bytes, 0);
 
         let result = server.enforce_memory_budget("traverse", synthetic, CAP);
@@ -13812,7 +13812,7 @@ mod server_unit_tests {
         // (proves the trip above is the multiply, not an always-on rejection).
         let ok = server.enforce_memory_budget(
             "traverse",
-            CallToolResult::success(vec![Content::text("a".repeat(N))]),
+            CallToolResult::success(vec![ContentBlock::text("a".repeat(N))]),
             N * super::MEMORY_WORKING_SET_EXPANSION,
         );
         assert_ne!(ok.is_error, Some(true), "estimate == cap must not trip");

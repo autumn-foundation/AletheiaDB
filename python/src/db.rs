@@ -1,8 +1,8 @@
 //! `AletheiaDB` Python wrapper.
 
-use crate::errors::{ConfigErrorPy, map_error, map_storage_error};
+use crate::errors::{map_error, map_storage_error, ConfigErrorPy};
 use crate::types::{
-    PyEdge, PyNode, parse_timestamp, property_map_to_py_dict, py_dict_to_property_map,
+    parse_timestamp, property_map_to_py_dict, py_dict_to_property_map, PyEdge, PyNode,
 };
 use aletheiadb::api::WriteOps;
 use aletheiadb::core::{EdgeId, NodeId};
@@ -50,7 +50,9 @@ impl PyAletheiaDB {
     #[new]
     fn new() -> PyResult<Self> {
         let db = RustDB::open_from_env().map_err(map_error)?;
-        Ok(Self { inner: Arc::new(db) })
+        Ok(Self {
+            inner: Arc::new(db),
+        })
     }
 
     /// Open a database from a TOML config file.
@@ -66,7 +68,9 @@ impl PyAletheiaDB {
         let config = AletheiaDBConfig::from_toml_file(config_path)
             .map_err(|e| ConfigErrorPy::new_err(format!("Config error: {}", e)))?;
         let db = RustDB::with_unified_config(config).map_err(map_error)?;
-        Ok(Self { inner: Arc::new(db) })
+        Ok(Self {
+            inner: Arc::new(db),
+        })
     }
 
     // ---------- Node CRUD ----------
@@ -83,7 +87,7 @@ impl PyAletheiaDB {
         let label_owned = label.to_owned();
         let db = self.inner();
         let id = py
-            .allow_threads(move || db.create_node(&label_owned, props))
+            .detach(move || db.create_node(&label_owned, props))
             .map_err(map_error)?;
         Ok(id.as_u64())
     }
@@ -92,9 +96,7 @@ impl PyAletheiaDB {
     fn get_node(&self, py: Python<'_>, id: u64) -> PyResult<PyNode> {
         let nid = node_id(id)?;
         let db = self.inner();
-        let node = py
-            .allow_threads(move || db.get_node(nid))
-            .map_err(map_error)?;
+        let node = py.detach(move || db.get_node(nid)).map_err(map_error)?;
         Ok(PyNode::from_rust(node))
     }
 
@@ -109,30 +111,24 @@ impl PyAletheiaDB {
         let nid = node_id(id)?;
         let props = py_dict_to_property_map(properties)?;
         let db = self.inner();
-        py.allow_threads(move || -> Result<(), Error> {
-            db.write(|tx| tx.update_node(nid, props))
-        })
-        .map_err(map_error)
+        py.detach(move || -> Result<(), Error> { db.write(|tx| tx.update_node(nid, props)) })
+            .map_err(map_error)
     }
 
     /// Delete a node (orphans its edges; prefer `delete_node_cascade`).
     fn delete_node(&self, py: Python<'_>, id: u64) -> PyResult<()> {
         let nid = node_id(id)?;
         let db = self.inner();
-        py.allow_threads(move || -> Result<(), Error> {
-            db.write(|tx| tx.delete_node(nid))
-        })
-        .map_err(map_error)
+        py.detach(move || -> Result<(), Error> { db.write(|tx| tx.delete_node(nid)) })
+            .map_err(map_error)
     }
 
     /// Delete a node along with all of its incident edges.
     fn delete_node_cascade(&self, py: Python<'_>, id: u64) -> PyResult<()> {
         let nid = node_id(id)?;
         let db = self.inner();
-        py.allow_threads(move || -> Result<(), Error> {
-            db.write(|tx| tx.delete_node_cascade(nid))
-        })
-        .map_err(map_error)
+        py.detach(move || -> Result<(), Error> { db.write(|tx| tx.delete_node_cascade(nid)) })
+            .map_err(map_error)
     }
 
     /// Count nodes in the current state.
@@ -177,7 +173,7 @@ impl PyAletheiaDB {
         let label_owned = label.to_owned();
         let db = self.inner();
         let id = py
-            .allow_threads(move || db.create_edge(src, tgt, &label_owned, props))
+            .detach(move || db.create_edge(src, tgt, &label_owned, props))
             .map_err(map_error)?;
         Ok(id.as_u64())
     }
@@ -186,9 +182,7 @@ impl PyAletheiaDB {
     fn get_edge(&self, py: Python<'_>, id: u64) -> PyResult<PyEdge> {
         let eid = edge_id(id)?;
         let db = self.inner();
-        let edge = py
-            .allow_threads(move || db.get_edge(eid))
-            .map_err(map_error)?;
+        let edge = py.detach(move || db.get_edge(eid)).map_err(map_error)?;
         Ok(PyEdge::from_rust(edge))
     }
 
@@ -202,19 +196,15 @@ impl PyAletheiaDB {
         let eid = edge_id(id)?;
         let props = py_dict_to_property_map(properties)?;
         let db = self.inner();
-        py.allow_threads(move || -> Result<(), Error> {
-            db.write(|tx| tx.update_edge(eid, props))
-        })
-        .map_err(map_error)
+        py.detach(move || -> Result<(), Error> { db.write(|tx| tx.update_edge(eid, props)) })
+            .map_err(map_error)
     }
 
     fn delete_edge(&self, py: Python<'_>, id: u64) -> PyResult<()> {
         let eid = edge_id(id)?;
         let db = self.inner();
-        py.allow_threads(move || -> Result<(), Error> {
-            db.write(|tx| tx.delete_edge(eid))
-        })
-        .map_err(map_error)
+        py.detach(move || -> Result<(), Error> { db.write(|tx| tx.delete_edge(eid)) })
+            .map_err(map_error)
     }
 
     fn count_edges(&self) -> usize {
@@ -277,7 +267,7 @@ impl PyAletheiaDB {
         let db = self.inner();
         let label_opt = label.map(|s| s.to_string());
 
-        let results: Vec<(u64, Option<u64>, u32)> = py.allow_threads(move || {
+        let results: Vec<(u64, Option<u64>, u32)> = py.detach(move || {
             let mut visited: HashSet<NodeId> = HashSet::new();
             let mut queue: VecDeque<(NodeId, Option<EdgeId>, u32)> = VecDeque::new();
             let mut out: Vec<(u64, Option<u64>, u32)> = Vec::new();
@@ -325,9 +315,9 @@ impl PyAletheiaDB {
             out
         });
 
-        let list = PyList::empty_bound(py);
+        let list = PyList::empty(py);
         for (nid, eid, depth) in results {
-            let d = PyDict::new_bound(py);
+            let d = PyDict::new(py);
             d.set_item("node_id", nid)?;
             d.set_item("edge_id", eid)?;
             d.set_item("depth", depth)?;
@@ -359,7 +349,7 @@ impl PyAletheiaDB {
         };
         let db = self.inner();
         let node = py
-            .allow_threads(move || db.get_node_at_time(nid, vt, tt))
+            .detach(move || db.get_node_at_time(nid, vt, tt))
             .map_err(map_error)?;
         Ok(PyNode::from_rust(node))
     }
@@ -384,7 +374,7 @@ impl PyAletheiaDB {
         };
         let db = self.inner();
         let edge = py
-            .allow_threads(move || db.get_edge_at_time(eid, vt, tt))
+            .detach(move || db.get_edge_at_time(eid, vt, tt))
             .map_err(map_error)?;
         Ok(PyEdge::from_rust(edge))
     }
@@ -394,11 +384,11 @@ impl PyAletheiaDB {
         let nid = node_id(id)?;
         let db = self.inner();
         let history = py
-            .allow_threads(move || db.get_node_history(nid))
+            .detach(move || db.get_node_history(nid))
             .map_err(map_error)?;
-        let list = PyList::empty_bound(py);
+        let list = PyList::empty(py);
         for v in history.versions.iter() {
-            let d = PyDict::new_bound(py);
+            let d = PyDict::new(py);
             d.set_item("version_id", v.version_id.as_u64())?;
             d.set_item("version_number", v.version_number)?;
             d.set_item("label", v.label.clone())?;

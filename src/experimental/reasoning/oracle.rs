@@ -58,7 +58,7 @@ impl<'a> Oracle<'a> {
         // unnecessary hashing overhead on already-unique integer keys, significantly improving throughput.
         let mut visits: HashMap<NodeId, usize, BuildHasherDefault<IdentityHasher>> =
             HashMap::default();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // Ensure seed exists
         if self.db.get_node(seed).is_err() {
@@ -74,7 +74,7 @@ impl<'a> Oracle<'a> {
 
             for _step in 0..max_steps {
                 // Check for restart/termination
-                if rng.r#gen::<f32>() < alpha {
+                if rng.random::<f32>() < alpha {
                     break;
                 }
 
@@ -85,7 +85,7 @@ impl<'a> Oracle<'a> {
                 }
 
                 // Pick random neighbor
-                let edge_idx = rng.gen_range(0..edges.len());
+                let edge_idx = rng.random_range(0..edges.len());
                 let edge_id = edges[edge_idx];
 
                 // Move
@@ -147,7 +147,7 @@ impl<'a> Oracle<'a> {
         }
 
         let mut hits = 0;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..num_simulations {
             let mut current = start;
@@ -159,7 +159,7 @@ impl<'a> Oracle<'a> {
                     break;
                 }
 
-                let edge_idx = rng.gen_range(0..edges.len());
+                let edge_idx = rng.random_range(0..edges.len());
                 let edge_id = edges[edge_idx];
 
                 match self.db.get_edge_target(edge_id) {

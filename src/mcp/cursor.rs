@@ -193,7 +193,7 @@ impl CursorManager {
     /// and the cap).
     pub(crate) fn with_config(ttl: Duration, max_live: usize) -> Self {
         let mut secret = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut secret);
+        rand::rng().fill_bytes(&mut secret);
         Self {
             secret,
             ttl,
@@ -346,7 +346,7 @@ impl CursorManager {
 
     fn random_id() -> String {
         let mut bytes = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         B64.encode(bytes)
     }
 

@@ -109,11 +109,11 @@ impl FaultInjector {
 
         let mut rng = self.rng.borrow_mut();
         if self.config.corruption_rate >= 1.0
-            || rng.gen_range(0.0_f64..1.0_f64) < self.config.corruption_rate
+            || rng.random_range(0.0_f64..1.0_f64) < self.config.corruption_rate
         {
             // Flip a random bit in each byte to guarantee at least one change.
             for byte in data.iter_mut() {
-                let mask: u8 = rng.gen_range(1_u8..=255_u8);
+                let mask: u8 = rng.random_range(1_u8..=255_u8);
                 *byte ^= mask;
             }
         }

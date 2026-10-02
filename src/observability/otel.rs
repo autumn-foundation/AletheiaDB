@@ -340,7 +340,11 @@ pub fn attach_parent(span: &tracing::Span, traceparent: Option<&str>, tracestate
         return;
     }
     let cx = extract_context(traceparent, tracestate);
-    span.set_parent(cx);
+    // `set_parent` errors only when `span` is not tracked by an OpenTelemetry
+    // layer (e.g. OTel export is not installed), in which case there is no
+    // trace to attach to -- the same silent no-op as before
+    // tracing-opentelemetry 0.33 surfaced it as a `Result`.
+    let _ = span.set_parent(cx);
 }
 
 /// Inject the given context into W3C header pairs for outbound propagation.

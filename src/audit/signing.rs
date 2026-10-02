@@ -10,8 +10,8 @@
 use crate::audit::error::{AuditError, AuditResult};
 use crate::core::hex;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
-use rand::RngCore;
 use rand::rngs::OsRng;
+use rand::{RngCore, TryRngCore};
 use std::path::Path;
 use zeroize::Zeroizing;
 
@@ -41,7 +41,7 @@ impl AuditSigningKey {
     #[must_use]
     pub fn generate() -> Self {
         let mut seed = Zeroizing::new([0u8; 32]);
-        OsRng.fill_bytes(seed.as_mut());
+        OsRng.unwrap_err().fill_bytes(seed.as_mut());
         Self {
             inner: SigningKey::from_bytes(&seed),
         }
