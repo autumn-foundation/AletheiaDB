@@ -1,5 +1,5 @@
 {
-  "lastUpdate": 1790949577256,
+  "lastUpdate": 1790950267146,
   "repoUrl": "https://github.com/autumn-foundation/AletheiaDB",
   "entries": {
     "AletheiaDB Benchmarks": [
@@ -16,43 +16,43 @@
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "fdb54a93706d9225622e7bba659f28474a82c7dc",
-          "message": "fix(docker): smoke test's AS OF read truncates \"now\" to before the node exists (#3855)\n\nThe Docker Image workflow has failed on every trunk push since at least\n2026-09-22, at step 3 of `scripts/docker-smoke.sh`:\n\n```\ncreate: {\"success\":true,\"data\":{\"id\":0,\"label\":\"Person\",\"properties\":{\"name\":\"Alice\"}}}\nOK: created node 0\nOK: queried node back\nas-of: {\"success\":true,\"data\":[]}\nFAIL: AS OF query did not return Alice\n```\n\nBecause the smoke job gates publishing, no `:trunk` or `:sha-*` image\nhas been pushed since then.\n\n## Cause\nThe script builds the AS OF coordinate as `$(( $(date +%s) * 1000000\n))`. `date +%s` has whole-second resolution, and the create and the AS\nOF read run about 30 ms apart, so they almost always fall in the same\nsecond. The coordinate then truncates to a moment *before* the node was\ncreated, and the empty result is correct. The server is behaving as\ndesigned; the bug is in the test.\n\n## Fix\n`sleep 1` before taking the timestamp, so the truncated value is\nstrictly after the create. `date +%s%6N` would avoid the wait, but it's\nGNU-only and this script also runs on macOS.\n\nThis PR also carries the Rust 1.99 `fetch_update` lint fix from #3853\n(`6a962044`). Without it, Linting fails on every branch cut from trunk.\n\n## Test plan\n- [x] Reproduced against a local `aletheia-server` (`--features\nhttp-server,mcp-server`, same calls as the script):\n  - whole-second AS OF → `[]`\n  - microsecond AS OF → Alice\n  - whole-second AS OF taken a second later → Alice\n- [x] `bash -n scripts/docker-smoke.sh`\n- [x] The Docker Image workflow on this PR passes (the script is in its\npath filter, so it runs here)\n\nAlso ported into #3854, which touches `docker.yml` and so runs the same\njob.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01GE9sEPXcFxTuGcNhGw3uiU\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
-          "timestamp": "2026-10-02T08:49:15-05:00",
-          "tree_id": "340f7302edc29f542bce63e59f7f47fe653e9d46",
-          "url": "https://github.com/autumn-foundation/AletheiaDB/commit/fdb54a93706d9225622e7bba659f28474a82c7dc"
+          "id": "73e80c16cd9a4f1ecd11670a338e191637766c2f",
+          "message": "WAL air-tightness (#3805, #3801, #3802) + keep graceful shutdown batch-atomic (#3853)\n\nReplacement for #3824, whose head branch lives on a fork this session\ncan't push to. It carries #3824's four commits unchanged, plus one fix\nfor the macOS CI failure and a trunk merge.\n\n## What #3824 does (unchanged)\n- **#3805**: fixes the append→register race in the concurrent WAL\nsystem.\n- **#3801**: `shutdown_graceful` no longer spins forever on a wedged\nappender. It returns `ShutdownOutcome::{Completed, TimedOut}`.\n- **#3802**: `CompletionHandle::wait_timeout` puts a 120 s\ndeadlock-detection bound on synchronous flush waits.\n\n## The fix on top: shutdown must not cut a batch that is still draining\nOn #3824, `Test Suite (macos-latest, stable)` failed\n`shutdown_correctness::test_shutdown_batch_atomicity` with \"append_batch\nshould succeed with graceful shutdown\".\n\nRoot cause: #3801 moved `close()` *before* the wait for in-flight\nbatches. A batch that a healthy flusher is still making room for, such\nas a 4-entry batch on a 2-slot ring, is refused mid-way with `WAL buffer\nclosed`. That leaves a partial prefix in the WAL, which is the atomicity\nthis test guards. Linux runners usually finished the batch before\nshutdown ran. The macOS runner did not.\n\nThe new ordering in `ConcurrentWal::shutdown_graceful`:\n1. Set `shutdown_requested` so no new batches start.\n2. Wait for in-flight batches **while they make progress**: the window\nresets whenever `total_appends` advances. Give up after a no-progress\nwindow of `max_append_block_ms`, capped at 1 s, or 1 s when unbounded.\n3. `close()`. A wedged appender still exits via `Closed`, so #3801's\nguarantee holds.\n4. Wait for the rest with the existing bounded deadline.\n\nThe new test `test_shutdown_graceful_lets_progressing_batch_finish` uses\na slow drainer and requests shutdown mid-batch. It **fails on #3824's\nclose-first ordering** (`Err(WalError { reason: \"WAL buffer closed\" })`)\nand passes with this change.\n`test_shutdown_graceful_unblocks_wedged_appender` (#3801) still passes;\nit now completes after the ~1 s no-progress window.\n\n## Test plan\n- [x] `cargo fmt --all -- --check`\n- [x] `cargo clippy --all-targets --all-features -- -D warnings`\n- [x] `cargo test --lib storage::wal`: 350 passed\n- [x] `shutdown_correctness`, `havoc_wal_model`, `havoc_wal_notifier`,\n`regression_wal_replay`, `sentinel_wal_stripe`, `wal_abort_framing`,\n`wal_group_commit_recovery`, `wal_recovery_integration`,\n`wal_stall_diagnosability`, `wal_torn_tail_replay`, `wal_tx_framing`,\n`recovery`, `lsn_recovery_regression`: all pass\n- [x] Reproduced the original failure with the new test against the\nclose-first code before applying the fix\n\nSupersedes #3824.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01GE9sEPXcFxTuGcNhGw3uiU\n\n---\n_Generated by [Claude\nCode](https://claude.ai/code/session_01GE9sEPXcFxTuGcNhGw3uiU)_\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+          "timestamp": "2026-10-02T08:50:12-05:00",
+          "tree_id": "8abbfec7a3ebb69ea6670ac2a42e4bc48304cd10",
+          "url": "https://github.com/autumn-foundation/AletheiaDB/commit/73e80c16cd9a4f1ecd11670a338e191637766c2f"
         },
-        "date": 1790949577255,
+        "date": 1790950267145,
         "tool": "customSmallerIsBetter",
         "benches": [
           {
             "name": "target_single_hop/traverse_one_hop",
-            "value": 23.042966753990505,
+            "value": 16.858933216333227,
             "unit": "ns"
           },
           {
             "name": "target_3_hop/traverse_three_hops",
-            "value": 206.4218474781498,
+            "value": 144.8615942172759,
             "unit": "ns"
           },
           {
             "name": "target_time_travel/at_anchor",
-            "value": 242.95308856755028,
+            "value": 197.81779639990583,
             "unit": "ns"
           },
           {
             "name": "target_time_travel/worst_case_9_deltas",
-            "value": 242.5414010710499,
+            "value": 221.81376801906055,
             "unit": "ns"
           },
           {
             "name": "target_time_travel/with_5_deltas",
-            "value": 197.94421111624956,
+            "value": 171.17503347179155,
             "unit": "ns"
           },
           {
             "name": "target_batch_insertion/insert_1000_edges",
-            "value": 412113.4661281685,
+            "value": 301781.9732762551,
             "unit": "ns"
           }
         ]
