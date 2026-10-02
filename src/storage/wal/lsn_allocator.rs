@@ -92,6 +92,10 @@ impl LsnAllocator {
     #[inline]
     pub fn allocate(&self) -> LSN {
         // Use fetch_update (CAS loop) to ensure we don't wrap state on overflow
+        // `fetch_update` is deprecated in favour of `try_update` on newer stable
+        // toolchains, but `try_update` postdates this crate's MSRV
+        // (`rust-version` in Cargo.toml), so keep the MSRV-compatible name.
+        #[allow(deprecated)]
         let lsn = self
             .next_lsn
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -139,6 +143,10 @@ impl LsnAllocator {
         assert!(count > 0, "Cannot allocate 0 LSNs");
 
         // Use fetch_update (CAS loop) to ensure we don't wrap state on overflow
+        // `fetch_update` is deprecated in favour of `try_update` on newer stable
+        // toolchains, but `try_update` postdates this crate's MSRV
+        // (`rust-version` in Cargo.toml), so keep the MSRV-compatible name.
+        #[allow(deprecated)]
         let first = self
             .next_lsn
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
