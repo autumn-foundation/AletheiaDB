@@ -16,8 +16,8 @@
 //! `BOLT_PAGE` (default 100).
 
 use aletheiadb::config::WalConfigBuilder;
-use aletheiadb::core::version::AnchorConfig;
 use aletheiadb::core::ChangeFeedQuery;
+use aletheiadb::core::version::AnchorConfig;
 use aletheiadb::prelude::*;
 
 fn env_usize(key: &str, default: usize) -> usize {
