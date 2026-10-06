@@ -36,6 +36,7 @@
 //! to amortize sorting cost.
 
 use crate::core::error::{Result, StorageError};
+use crate::core::hasher::IdHashBuilder;
 use crate::core::id::{EdgeId, EntityId, NodeId, VersionId};
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 use dashmap::DashMap;
@@ -861,7 +862,7 @@ impl EntityTimelines {
 #[derive(Debug)]
 pub struct TemporalIndexes {
     /// Combined index for both valid and transaction timelines.
-    index: DashMap<EntityId, EntityTimelines>,
+    index: DashMap<EntityId, EntityTimelines, IdHashBuilder>,
     /// Configuration for temporal indexes.
     config: TemporalIndexConfig,
     /// Write-time maintained bi-temporal extent (Issue #3238).
@@ -887,7 +888,7 @@ impl TemporalIndexes {
     /// Create a new empty temporal index with custom configuration.
     pub fn with_config(config: TemporalIndexConfig) -> Self {
         Self {
-            index: DashMap::new(),
+            index: DashMap::with_hasher(IdHashBuilder::default()),
             config,
             extent_aggregate: Mutex::new(ExtentAggregate::default()),
         }
