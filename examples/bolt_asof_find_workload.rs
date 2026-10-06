@@ -59,7 +59,11 @@ fn main() {
     let mut sink = 0usize;
     for i in 0..iters {
         let at = if i % 2 == 0 { checkpoint } else { now };
-        sink += db.find_nodes_at_time("Person", at, at).expect("find").nodes.len();
+        sink += db
+            .find_nodes_at_time("Person", at, at)
+            .expect("find")
+            .nodes
+            .len();
         let v = PropertyValue::String(Arc::from(format!("cat_{}", i % 10).as_str()));
         sink += db
             .find_nodes_by_property_at("Person", "category", &v, at, at)
