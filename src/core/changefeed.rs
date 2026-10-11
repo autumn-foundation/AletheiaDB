@@ -536,6 +536,22 @@ pub(crate) fn consider_version(
     label_filter: Option<&str>,
     namespace_fn: impl FnOnce() -> NamespaceId,
 ) {
+    // Cheap pre-check: the cursor depends only on the version's coordinates, so a row at or
+    // before the resume point can be rejected before `build_raw_change` resolves its namespace
+    // (the dominant per-row cost, wasted on every row a later page skips).
+    if let Some(c) = resume_after {
+        let tx_start = temporal.transaction_time().start();
+        let cursor = ChangeCursor {
+            tx_wallclock: tx_start.wallclock(),
+            tx_logical: tx_start.logical(),
+            kind_ord: kind.ord(),
+            entity_id,
+            version_id,
+        };
+        if cursor <= c {
+            return;
+        }
+    }
     if let Some(rec) = build_raw_change(
         version_id,
         entity_id,
@@ -547,9 +563,7 @@ pub(crate) fn consider_version(
         valid_window,
         label_filter,
         namespace_fn,
-    )
-    .filter(|rec| resume_after.is_none_or(|c| rec.cursor > c))
-    {
+    ) {
         acc.consider(rec);
     }
 }
