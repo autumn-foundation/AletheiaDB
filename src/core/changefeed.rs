@@ -343,6 +343,39 @@ pub(crate) fn build_raw_change(
     label_filter: Option<&str>,
     namespace_fn: impl FnOnce() -> NamespaceId,
 ) -> Option<RawChange> {
+    build_raw_change_gated(
+        version_id,
+        entity_id,
+        kind,
+        temporal,
+        label_id,
+        prev_is_none,
+        tx_window,
+        valid_window,
+        label_filter,
+        |_| true,
+        namespace_fn,
+    )
+}
+
+/// [`build_raw_change`] with a `cursor_gate` evaluated on the candidate's [`ChangeCursor`]
+/// after the cheap filters but **before** `namespace_fn`, so a candidate the caller will
+/// discard anyway (already paged past the resume cursor, or unable to displace a full
+/// bounded accumulator) never pays the namespace derivation.
+#[allow(clippy::too_many_arguments)]
+fn build_raw_change_gated(
+    version_id: u64,
+    entity_id: u64,
+    kind: EntityKind,
+    temporal: &BiTemporalInterval,
+    label_id: InternedString,
+    prev_is_none: bool,
+    tx_window: &TimeRange,
+    valid_window: Option<&TimeRange>,
+    label_filter: Option<&str>,
+    cursor_gate: impl FnOnce(&ChangeCursor) -> bool,
+    namespace_fn: impl FnOnce() -> NamespaceId,
+) -> Option<RawChange> {
     // Structural versions (an update's carry-forward of the superseded
     // valid-time prefix, or a backfill's head re-assertion) restate facts
     // already recorded; they are not changes. Skipping them here keeps the pull
@@ -387,14 +420,19 @@ pub(crate) fn build_raw_change(
         ChangeType::Modified
     };
 
+    let cursor = ChangeCursor {
+        tx_wallclock: tx_range.start().wallclock(),
+        tx_logical: tx_range.start().logical(),
+        kind_ord: kind.ord(),
+        entity_id,
+        version_id,
+    };
+    if !cursor_gate(&cursor) {
+        return None;
+    }
+
     Some(RawChange {
-        cursor: ChangeCursor {
-            tx_wallclock: tx_range.start().wallclock(),
-            tx_logical: tx_range.start().logical(),
-            kind_ord: kind.ord(),
-            entity_id,
-            version_id,
-        },
+        cursor,
         change_type,
         label_id,
         namespace_id: namespace_fn(),
@@ -492,6 +530,18 @@ impl BoundedChanges {
         }
     }
 
+    /// Whether a change with `cursor` could still be retained: always for the unbounded path,
+    /// otherwise only while the heap has room or `cursor` sorts before the current largest
+    /// survivor. A `false` answer means [`consider`](Self::consider) would immediately evict it.
+    pub(crate) fn would_retain(&self, cursor: &ChangeCursor) -> bool {
+        match &self.inner {
+            BoundedInner::Unbounded(_) => true,
+            BoundedInner::Bounded(heap) => {
+                heap.len() < self.bound || heap.peek().is_none_or(|top| *cursor < top.0.cursor)
+            }
+        }
+    }
+
     /// Number of changes currently retained.
     ///
     /// Used by the cold-tier directory pushdown (Issue #3677) to early-stop a bounded,
@@ -536,7 +586,8 @@ pub(crate) fn consider_version(
     label_filter: Option<&str>,
     namespace_fn: impl FnOnce() -> NamespaceId,
 ) {
-    if let Some(rec) = build_raw_change(
+    let gate = |c: &ChangeCursor| resume_after.is_none_or(|r| *c > r) && acc.would_retain(c);
+    if let Some(rec) = build_raw_change_gated(
         version_id,
         entity_id,
         kind,
@@ -546,10 +597,9 @@ pub(crate) fn consider_version(
         tx_window,
         valid_window,
         label_filter,
+        gate,
         namespace_fn,
-    )
-    .filter(|rec| resume_after.is_none_or(|c| rec.cursor > c))
-    {
+    ) {
         acc.consider(rec);
     }
 }
