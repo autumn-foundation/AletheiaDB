@@ -35,14 +35,16 @@ fn main() {
                 let mut v = Vec::with_capacity(size);
                 for i in 0..size {
                     let n = t * size + i;
-                    v.push(tx.create_node(
-                        "Doc",
-                        PropertyMapBuilder::new()
-                            .insert("title", format!("doc-{n}"))
-                            .insert("rank", n as i64)
-                            .insert("topic", format!("t{}", n % 12))
-                            .build(),
-                    )?);
+                    v.push(
+                        tx.create_node(
+                            "Doc",
+                            PropertyMapBuilder::new()
+                                .insert("title", format!("doc-{n}"))
+                                .insert("rank", n as i64)
+                                .insert("topic", format!("t{}", n % 12))
+                                .build(),
+                        )?,
+                    );
                 }
                 for w in v.windows(2) {
                     tx.create_edge(
@@ -63,7 +65,9 @@ fn main() {
                 for id in chunk {
                     tx.update_node(
                         *id,
-                        PropertyMapBuilder::new().insert("rank", (r * 7) as i64).build(),
+                        PropertyMapBuilder::new()
+                            .insert("rank", (r * 7) as i64)
+                            .build(),
                     )?;
                 }
                 Ok(())

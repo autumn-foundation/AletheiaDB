@@ -482,6 +482,12 @@ impl CurrentStorage {
     fn try_index_vector(&self, node_id: NodeId, properties: &PropertyMap) -> Result<bool> {
         let mut indexed_any = false;
 
+        // `DashMap::iter` heap-allocates a shard guard per shard even when the
+        // map is empty; the common case is no vector index configured.
+        if self.vector_indexes.is_empty() {
+            return Ok(false);
+        }
+
         // Index in all multi-property indexes
         for entry in self.vector_indexes.iter() {
             let prop_name = entry.key();
@@ -500,6 +506,10 @@ impl CurrentStorage {
     /// Returns Ok(true) if removed from any index, Ok(false) if not applicable.
     fn try_remove_from_index(&self, node_id: NodeId) -> Result<bool> {
         let mut removed_any = false;
+
+        if self.vector_indexes.is_empty() {
+            return Ok(false);
+        }
 
         // Remove from all multi-property indexes
         for entry in self.vector_indexes.iter() {
@@ -523,6 +533,10 @@ impl CurrentStorage {
         new_props: &PropertyMap,
         old_props: &PropertyMap,
     ) -> Result<()> {
+        if self.vector_indexes.is_empty() {
+            return Ok(());
+        }
+
         // Update all multi-property indexes
         for entry in self.vector_indexes.iter() {
             let prop_name = entry.key();
