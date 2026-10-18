@@ -1,5 +1,5 @@
 {
-  "lastUpdate": 1792301097610,
+  "lastUpdate": 1792302744585,
   "repoUrl": "https://github.com/autumn-foundation/AletheiaDB",
   "entries": {
     "AletheiaDB Benchmarks": [
@@ -16,43 +16,43 @@
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "118fe5bed8300db6d254640c2499f992b6c62070",
-          "message": "Bolt: add get_node_at_time point-in-time read benchmark (no fix) (#3829)\n\n## Summary\n\n- Adds `examples/bolt_temporal_workload.rs`, a deterministic,\npublic-API-driven benchmark for `AletheiaDB::get_node_at_time`'s full\nbi-temporal read path (`EntityTimeline` index lookup + anchor+delta\nproperty reconstruction). No existing benchmark exercised this path:\n`benches/historical_storage.rs`/`benches/property_delta.rs`\nmicrobenchmark internal functions directly, and\n`examples/bolt_workload.rs` (used by #3795/#3796/#3809/#3819) never\nbuilds version history or calls `get_node_at_time`.\n- **No `src/` changes.** This PR ships a benchmark harness only — no\nperformance fix.\n\n## Why no fix\n\nProfiling this harness under `valgrind --tool=callgrind` (500 nodes × 20\nversions, 150,000 scattered point-in-time reads) found\n`EntityTimeline::find_indices_at_point` (`src/index/temporal/mod.rs`) at\n**8.18%** of total instructions — the largest attributable cost in the\nread path. The mechanism: it binary-searches a `cutoff` correctly in\n`O(log N)`, then `.filter()`s the *entire* prefix `versions[..cutoff]`\ninstead of just the entries near the cutoff, making it effectively\n`O(cutoff)` per call.\n\nA safe fix requires augmenting `EntityTimeline` with an\ninterval-tree-style \"max end in subtree\" index so lookups stay correct\nunder overlapping/out-of-order backdated corrections (a supported\nfeature here — contradiction genealogy, belief revision) while becoming\ngenuinely `O(log N + K)`. That's a data-structure change to a type\nseveral other features depend on (cursor pagination, `AS OF` traversal,\n`temporal_extent`), which this project's Bolt process treats as an\narchitectural decision needing a human call, not something to ship\nunsupervised in a \"smallest change that moves the counter\" PR.\n\nFull writeup with the profile breakdown and a considered-but-rejected\noptimization (a smaller, ~2.34%-of-profile redundant-fetch in the\nanchor+delta chain-walk, under the 5% floor) is in #3828.\n\n## What this PR is for\n\nLanding the harness now means the 8.18% number above — and any future\nwork on it — is reproducible by anyone who checks out this branch,\nwithout redoing the setup.\n\n## Test plan\n\n- [x] `cargo fmt --all` (clean)\n- [x] `cargo build --profile bench --example bolt_temporal_workload`\nsucceeds\n- [x] Native run produces a deterministic `sink=...` line\n- [x] `cargo clippy --example bolt_temporal_workload --all-features --\n-D warnings` — clean, no warnings\n- [x] CI \"Linting\" job — passed\n- Reproduce the profile:\n  ```\n  cargo build --profile bench --example bolt_temporal_workload\nBOLT_NODES=500 BOLT_VERSIONS_PER_NODE=20 BOLT_CACHE_SIZE=200\nBOLT_READ_ITERS=150000 \\\n    valgrind --tool=callgrind --callgrind-out-file=/tmp/cg.out -- \\\n    target/release/examples/bolt_temporal_workload\ncallgrind_annotate --threshold=100 /tmp/cg.out | grep -i\nfind_indices_at_point\n  ```\n\nCloses/references: #3828\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01QFVfNGcEHYTFa56yepUfxY\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
-          "timestamp": "2026-10-18T00:04:36-05:00",
-          "tree_id": "0598ffb0ec2a3805f1efd661def1c0d6a79d62f1",
-          "url": "https://github.com/autumn-foundation/AletheiaDB/commit/118fe5bed8300db6d254640c2499f992b6c62070"
+          "id": "3f44bc8349cd015bbb5f5fed223d3471caf5c86e",
+          "message": "⚡ Bolt: stop cloning the whole response per rung-4 probe (instructions -58.7%) (#3842)\n\n## Summary\n\nThe MCP token-budget response shaper's rung-4 array-truncation binary\nsearch (Issue #3353, `src/mcp/budget.rs::truncate_arrays_to_fit`)\nmeasured each candidate response size by doing `map.clone()` on the\n**entire** response object (every retained entity, not just the array\nfield being truncated) and then\n`serde_json::to_string_pretty(...).len()` — allocating and formatting a\nfull copy just to read a byte count, up to `O(log n)` times per\ntruncated array field.\n\nThis PR eliminates both allocations from the probe without changing any\nobservable behavior.\n\n## 🎯 Workload\n\n`examples/bolt_budget_truncation_workload.rs` — a `list_nodes` call over\na 3000-node dataset with `max_response_tokens` small enough that even\nthe fully-summarized page overflows, forcing the `counts_and_handles`\nrung's binary search to run (30 `list_nodes` calls total). Reproduce:\n\n```\ncargo build --profile bench --example bolt_budget_truncation_workload --features mcp-server\nvalgrind --tool=callgrind --callgrind-out-file=/tmp/cg.out -- \\\n    target/release/examples/bolt_budget_truncation_workload\ncallgrind_annotate /tmp/cg.out src/mcp/budget.rs | grep assembled_len\n```\n\nNo existing benchmark covered this path: `benches/` has no\nbudget/token-shaping entry, and no other `examples/bolt_*.rs` workload\npasses `max_response_tokens`.\n\n## 📈 Profile\n\nBaseline (commit 9eaa0ab): **31,369,217,848 Ir** total. `assembled_len`\n(the per-probe measurement function) accounted for **17,414,260,845 Ir —\n55.52% of total**, across 360 calls (30 fast-exit checks + 330\nbinary-search probes). Malloc-family functions alone\n(`_int_malloc`/`_int_free`/`malloc`/`malloc_consolidate`/`free`/`unlink_chunk`)\nwere ~44% of total instructions — a direct signature of the per-probe\nfull-object clone.\n\n## 💡 Hypothesis\n\n`assembled_len`'s `map.clone()` deep-clones every entity in the response\non every binary-search probe, when the search only needs to know: (a)\nthe byte length of the array truncated to a shorter prefix, and (b) the\nbyte length of a couple of small pagination-sibling scalars rewritten to\ndescribe that prefix. Moving the array's dropped suffix aside instead of\ncloning it (`Vec::split_off`, no clone), and reverting a snapshot of the\nfew touched scalars, gets the identical measurement without touching the\nrest of the (possibly large) response.\n\nSeparately, `measured_bytes`'s\n`serde_json::to_string_pretty(value).len()` allocates and formats a\n`String` purely to read its length — a counting `io::Write` sink fed to\n`serde_json::to_writer_pretty` produces the identical byte count with no\nallocation.\n\n## 🔧 Change\n\n- `assembled_len` now mutates `map` in place instead of cloning it, then\nreverts every mutation before returning — bit-for-bit unchanged from the\ncaller's perspective.\n- `measured_bytes` counts bytes via a `ByteCounter: io::Write` sink\ninstead of allocating a `String`; a new `measured_bytes_map` does the\nsame for a `Map` directly (avoiding a `Value::Object(map.clone())`\nwrapper that would reintroduce the clone).\n- No behavior change: `set_array_prefix`/`rewrite_pagination_siblings`\nstill run exactly once per truncated field, with the real tool name,\nonce the search converges.\n\n## 📊 Measurement\n\nSame harness/session, `valgrind --tool=callgrind`, 3000 nodes, 30\n`list_nodes` calls, `BOLT_MAX_TOKENS=400`:\n\n| metric | before | after | delta |\n|---|---|---|---|\n| Total instructions (Ir) | 31,369,217,848 | 12,953,576,074 |\n**-58.71%** |\n| `assembled_len` inclusive Ir (360 calls) | 17,414,260,845 |\n716,551,308 | -95.88% |\n| `assembled_len` share of total | 55.52% | 5.53% | |\n\n58.71% total-instruction reduction clears the impact floor (≥5%) by more\nthan 11x. The workload's `sink` (sum of response byte-lengths across all\n30 calls) is **bit-for-bit identical before and after (45510)**,\nconfirming the bytes emitted to callers are unchanged.\n\n## 🔬 Reproduce\n\n```\ncargo build --profile bench --example bolt_budget_truncation_workload --features mcp-server\nvalgrind --tool=callgrind --callgrind-out-file=/tmp/cg_after.out -- \\\n    target/release/examples/bolt_budget_truncation_workload\ncallgrind_annotate /tmp/cg_after.out src/mcp/budget.rs | grep assembled_len\n```\n\n## Test plan\n\n- [x] `cargo fmt --all -- --check` — clean\n- [x] `cargo clippy --all-targets --all-features -- -D warnings` —\nclean, no warnings\n- [x] `cargo test --lib --features mcp-server` — 5363 passed, 0 failed,\n12 ignored\n- [x] `cargo test --lib --features mcp-server mcp::budget::` — 11 passed\n(module's own unit tests)\n- [x] `cargo test --lib --features mcp-server mcp::tests::` — 497 passed\n- [x] Native run of the workload produces byte-identical `sink=45510`\nbefore and after\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01LUR7MNSPNNbxHR6bMtBkhR\n\n\n---\n_Generated by [Claude\nCode](https://claude.ai/code/session_01LUR7MNSPNNbxHR6bMtBkhR)_\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+          "timestamp": "2026-10-18T00:05:35-05:00",
+          "tree_id": "00a6c02c362a638c4bc868e9ae573f817581274d",
+          "url": "https://github.com/autumn-foundation/AletheiaDB/commit/3f44bc8349cd015bbb5f5fed223d3471caf5c86e"
         },
-        "date": 1792301097609,
+        "date": 1792302744585,
         "tool": "customSmallerIsBetter",
         "benches": [
           {
             "name": "target_single_hop/traverse_one_hop",
-            "value": 16.670441540803676,
+            "value": 21.217810050070565,
             "unit": "ns"
           },
           {
             "name": "target_3_hop/traverse_three_hops",
-            "value": 146.07936256329404,
+            "value": 171.97346133029222,
             "unit": "ns"
           },
           {
             "name": "target_time_travel/at_anchor",
-            "value": 174.08704184208364,
+            "value": 212.7890191937108,
             "unit": "ns"
           },
           {
             "name": "target_time_travel/worst_case_9_deltas",
-            "value": 176.49305178196465,
+            "value": 213.73693793217456,
             "unit": "ns"
           },
           {
             "name": "target_time_travel/with_5_deltas",
-            "value": 143.12287557356137,
+            "value": 163.7955820557715,
             "unit": "ns"
           },
           {
             "name": "target_batch_insertion/insert_1000_edges",
-            "value": 288876.96696361253,
+            "value": 375698.4891756775,
             "unit": "ns"
           }
         ]
