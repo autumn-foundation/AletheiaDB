@@ -283,6 +283,13 @@ impl HistoricalStorage {
         all.saturating_sub(structural)
     }
 
+    /// Capacity hint for collecting a node's version chain: the number of
+    /// hot versions recorded for it (structural ones included). Only sizes an
+    /// allocation, so a stale value costs a regrow, never correctness.
+    pub(super) fn node_chain_len_hint(&self, node_id: NodeId) -> usize {
+        self.node_version_counts.get(&node_id).copied().unwrap_or(0)
+    }
+
     /// Edge counterpart of [`node_logical_version_count`](Self::node_logical_version_count).
     pub(super) fn edge_logical_version_count(&self, edge_id: EdgeId) -> usize {
         let all = self.edge_version_counts.get(&edge_id).copied().unwrap_or(0);

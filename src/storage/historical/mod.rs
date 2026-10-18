@@ -3194,7 +3194,7 @@ impl HistoricalStorage {
             .ok_or(StorageError::NodeNotFound(node_id))?;
 
         // Traverse the version chain backwards to get all versions in order
-        let mut version_ids = Vec::new();
+        let mut version_ids = Vec::with_capacity(self.node_chain_len_hint(node_id));
         let mut current_id = Some(current_version_id);
 
         while let Some(vid) = current_id {
@@ -3248,7 +3248,7 @@ impl HistoricalStorage {
             .ok_or(StorageError::NodeNotFound(node_id))?;
 
         // Traverse the version chain backwards to collect all versions
-        let mut version_ids = Vec::new();
+        let mut version_ids = Vec::with_capacity(self.node_chain_len_hint(node_id));
         let mut current_id = Some(current_version_id);
 
         while let Some(vid) = current_id {

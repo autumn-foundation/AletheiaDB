@@ -557,6 +557,12 @@ required-features = ["mcp-server"]
 name = "bolt_mcp_read_overhead_workload"
 required-features = ["mcp-server"]
 
+# Bolt profiling workload for the token-budget response shaper's rung-4
+# array-truncation binary search (Issue #3353).
+[[example]]
+name = "bolt_budget_truncation_workload"
+required-features = ["mcp-server"]
+
 # Embedding examples require their respective feature flags
 [[example]]
 name = "embedding_openai"
@@ -952,6 +958,11 @@ required-features = ["semantic-search", "semantic-reasoning"]
 # Bulk graph import with valid-time backfill (Issue #3211)
 [[example]]
 name = "bulk_import"
+required-features = ["import"]
+
+# Bolt profiling harness for bulk CSV node import (see PR history for measurements)
+[[example]]
+name = "bolt_profile_import"
 required-features = ["import"]
 
 [[bench]]
