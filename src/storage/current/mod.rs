@@ -480,6 +480,13 @@ impl CurrentStorage {
     /// Returns Ok(true) if any vector was indexed, Ok(false) if none applicable,
     /// Err on failure (will have already done partial work).
     fn try_index_vector(&self, node_id: NodeId, properties: &PropertyMap) -> Result<bool> {
+        // DashMap::iter() allocates a guard per shard even when the map is
+        // empty; every node write pays that cost otherwise, so short-circuit
+        // the overwhelmingly common case of zero vector indexes registered.
+        if self.vector_indexes.is_empty() {
+            return Ok(false);
+        }
+
         let mut indexed_any = false;
 
         // `DashMap::iter` heap-allocates a shard guard per shard even when the
@@ -505,6 +512,10 @@ impl CurrentStorage {
     ///
     /// Returns Ok(true) if removed from any index, Ok(false) if not applicable.
     fn try_remove_from_index(&self, node_id: NodeId) -> Result<bool> {
+        if self.vector_indexes.is_empty() {
+            return Ok(false);
+        }
+
         let mut removed_any = false;
 
         if self.vector_indexes.is_empty() {
