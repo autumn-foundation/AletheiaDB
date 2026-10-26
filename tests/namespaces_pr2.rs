@@ -327,3 +327,36 @@ fn back_compat_default_scope_matches_unscoped() {
         db.get_node(n2).unwrap().id
     );
 }
+
+#[test]
+fn scoped_property_find_matches_with_index_and_for_unknown_label() {
+    let db = AletheiaDB::new().unwrap();
+    let a = db
+        .create_node_in_namespace("Person", props("Alice"), "agent:a")
+        .unwrap();
+    let _b = db
+        .create_node_in_namespace("Person", props("Alice"), "agent:b")
+        .unwrap();
+    let scope_a = NamespaceScope::single(ns("agent:a"));
+    let alice = PropertyValue::from("Alice");
+
+    // Scan path (no property index): only the scope's member matches.
+    assert_eq!(
+        db.find_nodes_by_property_scoped("Person", "name", &alice, &scope_a)
+            .unwrap(),
+        vec![a]
+    );
+    // Never-interned label: empty, not an error.
+    assert!(
+        db.find_nodes_by_property_scoped("NoSuchLabel", "name", &alice, &scope_a)
+            .unwrap()
+            .is_empty()
+    );
+    // Covering index: indexed path must yield the identical scoped result.
+    db.property_index("Person", "name").enable().unwrap();
+    assert_eq!(
+        db.find_nodes_by_property_scoped("Person", "name", &alice, &scope_a)
+            .unwrap(),
+        vec![a]
+    );
+}
