@@ -2608,6 +2608,50 @@ impl CurrentStorage {
             .collect()
     }
 
+    /// Scan-path variant of [`find_nodes_by_property`](Self::find_nodes_by_property)
+    /// restricted to the members of `namespaces` (Issue #3349).
+    ///
+    /// Probes only the namespace membership index's candidates instead of
+    /// iterating every node in the database, so a scoped lookup costs
+    /// O(scope members) rather than O(all nodes). Returns `None` when an
+    /// equality index covers `(label, property)` with an indexable value --
+    /// the caller should use the O(matches) indexed probe in that case.
+    /// Result order is unspecified; callers sort.
+    pub fn find_nodes_by_property_in_namespaces(
+        &self,
+        label: &str,
+        property_key: &str,
+        property_value: &PropertyValue,
+        namespaces: &[crate::core::namespace::Namespace],
+    ) -> Option<Vec<NodeId>> {
+        let (Some(label_id), Some(key_id)) = (
+            crate::core::interning::GLOBAL_INTERNER.get_id(label),
+            crate::core::interning::GLOBAL_INTERNER.get_id(property_key),
+        ) else {
+            return Some(Vec::new());
+        };
+        if crate::index::property_index::value_key(property_value)
+            .is_some_and(|_| self.indexes.has_property_index(label_id, key_id))
+        {
+            return None;
+        }
+        let mut out = Vec::new();
+        for ns in namespaces {
+            for id in self.indexes.namespace_node_ids(ns) {
+                let hit = self.indexes.with_node(id, |n| {
+                    n.label == label_id
+                        && n.properties
+                            .get_by_interned_key(&key_id)
+                            .is_some_and(|v| v == property_value)
+                });
+                if hit == Some(true) {
+                    out.push(id);
+                }
+            }
+        }
+        Some(out)
+    }
+
     // ========================================================================
     // Secondary property (equality) index — opt-in, node-only, current-state.
     // See `crate::index::property_index` for the design and scope boundaries.
