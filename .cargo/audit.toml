@@ -53,4 +53,24 @@ ignore = [
     # re-check on the next aws-smithy / embed_anything refresh and remove this
     # ignore then (tracked via issue #3807).
     "RUSTSEC-2026-0258",
+
+    # Transitive-only advisories with NO patched release reachable from our
+    # lockfile, all behind optional features (`embeddings*` -> embed_anything ->
+    # candle-core / aws-sdk-s3 / aws-config, `encryption-aws-kms` -> aws-sdk-kms
+    # test-util) and absent from default and shipped builds. AletheiaDB never
+    # extracts untrusted zip archives, does not exercise the legacy rustls 0.21 /
+    # webpki 0.101 client stack (the hyper-014 connector is compiled but never
+    # instantiated, see RUSTSEC-2026-0258 above), and does not use lru::pop on
+    # untrusted panics. The patched lines (zip >= 9, rustls >= 0.23.46,
+    # crypto-bigint >= 0.7.6, lru >= 0.18.5) require upstream bumps of candle and
+    # the aws-smithy stack. Re-check on the next candle / embed_anything /
+    # aws-smithy refresh and remove these ignores then.
+    "RUSTSEC-2026-0367", # zip: SUID/SGID preserved on extract (candle-core, docx-rust)
+    "RUSTSEC-2026-0368", # zip: extract symlink targets outside destination
+    "RUSTSEC-2026-0369", # zip: permissions applied through symlinks
+    "RUSTSEC-2026-0346", # rustls 0.21: Debug impl exposes session values (aws-smithy legacy)
+    "RUSTSEC-2026-0349", # rustls 0.21: ServerHello key-exchange downgrade
+    "RUSTSEC-2026-0382", # rustls-webpki 0.101: distrusted intermediates (aws-smithy legacy)
+    "RUSTSEC-2026-0387", # crypto-bigint 0.5: timing variability (aws-sigv4)
+    "RUSTSEC-2026-0253", # lru 0.16: LruCache::pop panic safety (aws-sdk-s3)
 ]
