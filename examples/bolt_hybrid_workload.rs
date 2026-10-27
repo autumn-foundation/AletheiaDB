@@ -76,12 +76,10 @@ fn main() {
     for i in 0..query_iters {
         let q = random_vector(&mut rng, dimensions);
         if let Ok(res) = db.traverse_and_rank(hub_ids[i % hubs], "CONTAINS", &q, k) {
-            for row in res {
-                if let Ok(r) = row {
-                    sink = sink
-                        .wrapping_add(1)
-                        .wrapping_add(r.score.unwrap_or(0.0).to_bits() as u64);
-                }
+            for r in res.flatten() {
+                sink = sink
+                    .wrapping_add(1)
+                    .wrapping_add(r.score.unwrap_or(0.0).to_bits() as u64);
             }
         }
     }
