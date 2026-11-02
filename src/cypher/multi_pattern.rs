@@ -271,6 +271,30 @@ pub fn evaluate(
         first_memos.push(memo);
     }
 
+    // ---- WHERE pushdown (first pattern only): prune first-node candidates by
+    // top-level AND conjuncts that reference only the first node's variable, so
+    // doomed candidates are never expanded. The full WHERE still runs below,
+    // so this only drops rows the final filter would drop anyway.
+    if let (Some(predicate), Some(memo), Some(CypherPatternElement::Node(first))) = (
+        where_clause.as_ref(),
+        first_memos.first_mut(),
+        pattern.first().and_then(|p| p.elements.first()),
+    ) && let Some(var) = &first.variable
+    {
+        let mut conjuncts = Vec::new();
+        collect_first_node_conjuncts(predicate, var, &mut conjuncts);
+        if !conjuncts.is_empty() {
+            memo.retain(|node| {
+                let binding: Binding = vec![(var.clone(), EntityResult::Node(node.clone()))];
+                // Prune only on a definite non-True; an error keeps the
+                // candidate so the final filter reports it exactly as before.
+                conjuncts.iter().all(|c| {
+                    !matches!(eval.eval_predicate(c, &binding), Ok(Tri::False | Tri::Null))
+                })
+            });
+        }
+    }
+
     // ---- Nested-loop binding matcher: extend the binding set by each pattern.
     // Each branch threads its `used_edges` set forward for relationship
     // uniqueness across the whole clause (FIX #1).
@@ -412,6 +436,30 @@ pub(crate) fn match_bindings(
     }
 
     Ok(env.into_iter().map(|b| b.vars).collect())
+}
+
+/// Collect top-level AND conjuncts that are a plain `var.prop <op> literal`
+/// (or reversed) comparison on `var`, safe to evaluate against a lone-node
+/// binding.
+fn collect_first_node_conjuncts<'e>(
+    expr: &'e CypherExpr,
+    var: &str,
+    out: &mut Vec<&'e CypherExpr>,
+) {
+    match expr {
+        CypherExpr::And(a, b) => {
+            collect_first_node_conjuncts(a, var, out);
+            collect_first_node_conjuncts(b, var, out);
+        }
+        CypherExpr::Comparison { left, right, .. } => {
+            let is_prop = |e: &CypherExpr| matches!(e, CypherExpr::Property { variable, .. } if variable == var);
+            let is_value = |e: &CypherExpr| matches!(e, CypherExpr::Value(_));
+            if (is_prop(left) && is_value(right)) || (is_value(left) && is_prop(right)) {
+                out.push(expr);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Convert a Cypher literal (resolving a `$param`) into a [`PropertyValue`]
