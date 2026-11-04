@@ -226,6 +226,19 @@ impl AletheiaDB {
         scope: &NamespaceScope,
     ) -> Result<Vec<NodeId>> {
         self.validate_scope(scope)?;
+        // Explicit scope without a covering property index: probe only the
+        // scope's members instead of scanning every node in the database.
+        if let Some(namespaces) = scope.explicit_namespaces()
+            && let Some(mut ids) = self.current.find_nodes_by_property_in_namespaces(
+                label,
+                property_key,
+                property_value,
+                &namespaces,
+            )
+        {
+            ids.sort_unstable();
+            return Ok(ids);
+        }
         let mut ids = self.find_nodes_by_property(label, property_key, property_value);
         // `All` (`resolved_ids() == None`) names every namespace, so there is
         // nothing to filter. Otherwise filter via the O(1) interned-id membership

@@ -237,7 +237,7 @@ ed25519-dalek = { version = "2", optional = true }
 # from native.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 usearch = "2.25.2"
-zstd = "0.13"
+zstd = "0.14"
 memmap2 = "0.9"
 # Redb for tiered cold storage (pure Rust, ADR-0025)
 redb = "4.1"
