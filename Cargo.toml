@@ -998,3 +998,7 @@ required-features = []
 name = "query_resource_limits"
 harness = false
 path = "benches/query_resource_limits.rs"
+
+# Bolt profiling workload for named-snapshot reads (Issue #3370).
+[[example]]
+name = "bolt_snapshot_read_workload"

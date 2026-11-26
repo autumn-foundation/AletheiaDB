@@ -398,7 +398,10 @@ impl TemporalAdjacencyIndex {
         self.outgoing
             .get(&node_id)
             .map(|entries| {
-                let mut seen = std::collections::HashSet::new();
+                let mut seen: std::collections::HashSet<
+                    EdgeId,
+                    crate::core::hasher::IdHashBuilder,
+                > = std::collections::HashSet::default();
 
                 // Binary search to find first entry where valid_from <= valid_time
                 // Entries are sorted by valid_from, so we scan from this point forward
@@ -440,7 +443,10 @@ impl TemporalAdjacencyIndex {
         self.incoming
             .get(&node_id)
             .map(|entries| {
-                let mut seen = std::collections::HashSet::new();
+                let mut seen: std::collections::HashSet<
+                    EdgeId,
+                    crate::core::hasher::IdHashBuilder,
+                > = std::collections::HashSet::default();
 
                 // Binary search to find first entry where valid_from <= valid_time
                 let start_idx = entries.partition_point(|e| e.valid_from <= valid_time);
@@ -481,7 +487,10 @@ impl TemporalAdjacencyIndex {
         self.outgoing
             .get(&node_id)
             .map(|entries| {
-                let mut seen = std::collections::HashSet::new();
+                let mut seen: std::collections::HashSet<
+                    EdgeId,
+                    crate::core::hasher::IdHashBuilder,
+                > = std::collections::HashSet::default();
 
                 // Binary search to find first entry where valid_from <= valid_time
                 let start_idx = entries.partition_point(|e| e.valid_from <= valid_time);
