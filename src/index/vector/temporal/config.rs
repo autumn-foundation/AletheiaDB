@@ -76,6 +76,11 @@ pub struct TemporalVectorConfig {
     ///
     /// When this limit is exceeded, the oldest snapshots are removed.
     /// This prevents unbounded storage growth.
+    ///
+    /// This limit also sets how far back an as-of search can go. A search
+    /// before the oldest snapshot gives no hits. For long history, set a
+    /// larger value. The rebuild from history (Issue #3888) also keeps only
+    /// the newest `max_snapshots` vector changes.
     pub max_snapshots: usize,
 
     /// Interval for creating full snapshots (default: 10)

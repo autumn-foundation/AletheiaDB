@@ -36,6 +36,5 @@ pub(crate) struct TemporalVectorIndexEntry {
     /// The temporal vector index for this property
     pub(crate) index: Arc<TemporalVectorIndex>,
     /// Configuration used to create this index
-    #[allow(dead_code)]
     pub(crate) config: TemporalVectorConfig,
 }

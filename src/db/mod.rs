@@ -114,6 +114,8 @@ pub mod snapshot;
 pub mod stats;
 /// Temporal query operations.
 pub mod temporal;
+/// Durable record of the enabled temporal vector indexes (Issue #3888).
+pub(crate) mod temporal_vector_sidecar;
 #[cfg(test)]
 /// Unit tests for the database API.
 pub mod tests;

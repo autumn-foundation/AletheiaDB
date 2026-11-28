@@ -65,7 +65,9 @@ impl AletheiaDB {
     /// If an index is already registered for `property_name`, `config` is
     /// ignored and the backfill runs against the existing index (entries are
     /// updated in place, so the call is idempotent). The rebuild covers
-    /// **current state only** — temporal vector indexes are not rebuilt.
+    /// **current state only**. A temporal vector index is rebuilt from
+    /// history at enable and at open (see
+    /// [`enable_temporal_vector_index`](Self::enable_temporal_vector_index)).
     ///
     /// Returns the number of node vectors indexed by the backfill.
     ///
@@ -117,10 +119,24 @@ impl AletheiaDB {
 
     /// Enable temporal vector indexing for a specific property.
     ///
-    /// Once enabled, vector changes will be tracked over time using snapshot-based
-    /// indexing, enabling point-in-time vector queries and semantic drift tracking.
-    /// This also integrates with the historical storage's observer pattern to create
-    /// vector snapshots aligned with graph anchors.
+    /// The index tracks vector changes over time with snapshots. This enables
+    /// point-in-time (as-of) vector search and semantic drift tracking.
+    ///
+    /// # History and reopen (Issue #3888, ADR-0062)
+    ///
+    /// - The enable builds the snapshots from historical storage, so the
+    ///   index also covers data written before the enable.
+    /// - If no vector index exists for the property, the enable creates one
+    ///   and fills it from current nodes (see
+    ///   [`rebuild_vector_index`](Self::rebuild_vector_index)).
+    /// - With index persistence, the config goes to a sidecar file. A reopen
+    ///   enables the index again and rebuilds it from history.
+    /// - Enable with a config equal to the active one is a no-op.
+    /// - Only the newest `max_snapshots` vector changes get a snapshot. Use a
+    ///   larger `max_snapshots` to search further back.
+    ///
+    /// Commits wait while the enable runs. The time grows with the hot
+    /// history size.
     ///
     /// # Arguments
     ///
@@ -141,98 +157,151 @@ impl AletheiaDB {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - Temporal vector indexing is already enabled
-    /// - The historical storage lock is poisoned
+    /// - A temporal vector index with a different config is enabled
+    /// - No HNSW config is given and no vector index exists
+    /// - The backfill from history fails
+    /// - The sidecar file cannot be written
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn enable_temporal_vector_index(
         &self,
         property_name: &str,
         config: TemporalVectorConfig,
     ) -> Result<()> {
-        let result = (|| {
-            // Resolve hnsw_config: use provided config or get from existing vector index
-            let resolved_hnsw_config = if let Some(hnsw_config) = config.hnsw_config.clone() {
-                // Config was provided explicitly
-                hnsw_config
-            } else if self.current.is_vector_index_enabled_for(property_name) {
-                // No config provided, but vector index exists - use its config
-                self.current.get_hnsw_config_for(property_name).ok_or_else(|| {
-                    crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
-                        format!(
-                            "Vector index exists for '{}' but could not retrieve its configuration",
-                            property_name
-                        ),
-                    ))
-                })?
-            } else {
-                // No config provided and no vector index exists - error
-                return Err(crate::core::error::Error::Vector(
-                    crate::core::error::VectorError::IndexError(
-                        "HNSW configuration is required when no vector index exists. \
-                     Use TemporalVectorConfig::default_with_hnsw() to provide one, \
-                     or enable the vector index first with enable_vector_index()."
-                            .to_string(),
-                    ),
-                ));
-            };
+        self.enable_temporal_vector_index_impl(property_name, config, true)
+            .record_error_metric()
+    }
 
-            // Enable vector index if it doesn't exist yet
-            if !self.current.is_vector_index_enabled_for(property_name) {
-                self.current
-                    .enable_vector_index(property_name, resolved_hnsw_config.clone())?;
-            }
+    /// Enable a temporal vector index and fill it from history.
+    ///
+    /// `persist` writes the config to the sidecar. The restore at open uses
+    /// `false`, so a failed restore does not change the file.
+    pub(crate) fn enable_temporal_vector_index_impl(
+        &self,
+        property_name: &str,
+        config: TemporalVectorConfig,
+        persist: bool,
+    ) -> Result<()> {
+        use crate::core::error::{Error, VectorError};
 
-            #[cfg(feature = "observability")]
-            let _span = crate::observability::vector_index_span(
-                "enable_temporal_vector_index",
-                property_name,
-            )
-            .entered();
-
-            // Create a resolved config with the hnsw_config set
-            let resolved_config = TemporalVectorConfig {
-                hnsw_config: Some(resolved_hnsw_config),
-                ..config
-            };
-
-            // Enable temporal vector index in current storage
+        // Use the given HNSW config, or the config of the existing vector index.
+        let resolved_hnsw_config = if let Some(hnsw_config) = config.hnsw_config.clone() {
+            hnsw_config
+        } else if self.current.is_vector_index_enabled_for(property_name) {
             self.current
-                .enable_temporal_vector_index(property_name, resolved_config)?;
-
-            // Get the temporal vector index for this property from current storage
-            let temporal_index = self
-                .current
-                .get_temporal_vector_index_for(property_name)
+                .get_hnsw_config_for(property_name)
                 .ok_or_else(|| {
-                    crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
-                        "Temporal vector index not found after enabling".to_string(),
-                    ))
-                })?;
+                    Error::Vector(VectorError::IndexError(format!(
+                        "Vector index exists for '{}' but could not retrieve its configuration",
+                        property_name
+                    )))
+                })?
+        } else {
+            return Err(Error::Vector(VectorError::IndexError(
+                "HNSW configuration is required when no vector index exists. \
+                 Use TemporalVectorConfig::default_with_hnsw() to provide one, \
+                 or enable the vector index first with enable_vector_index()."
+                    .to_string(),
+            )));
+        };
+        let resolved_config = TemporalVectorConfig {
+            hnsw_config: Some(resolved_hnsw_config.clone()),
+            ..config
+        };
 
-            // Register pre-anchor hooks with historical storage (for strong consistency)
-            // Both node and edge hooks perform the same action, so we create one and clone it
-            let hook: crate::storage::historical::PreAnchorHook = {
-                let index = Arc::clone(&temporal_index);
-                Arc::new(move |_entity_type, _entity_id, timestamp, _properties| {
-                    index.create_snapshot_for_anchor(timestamp)
-                })
-            };
+        #[cfg(feature = "observability")]
+        let _span =
+            crate::observability::vector_index_span("enable_temporal_vector_index", property_name)
+                .entered();
 
-            let node_hook = Arc::clone(&hook);
-            let edge_hook = hook;
+        // Hold the commit guard: no commit can run between the history read
+        // and the hook registration, so no change is lost or applied twice.
+        let mut historical = self.historical.write();
 
-            let mut historical = self.historical.write();
+        if let Some(active) = self.current.get_temporal_vector_config_for(property_name) {
+            if active == resolved_config {
+                return Ok(());
+            }
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Temporal vector index is already enabled for property '{}' \
+                 with a different configuration",
+                property_name
+            ))));
+        }
 
-            historical.register_pre_node_anchor_hook(node_hook);
-            historical.register_pre_edge_anchor_hook(edge_hook);
+        // An empty current-state index would later overwrite good persisted
+        // files, so fill it from current nodes.
+        if !self.current.is_vector_index_enabled_for(property_name) {
+            self.current
+                .rebuild_vector_index(property_name, resolved_hnsw_config)?;
+            if let Some(ref tracker) = self.persistence_tracker {
+                tracker.record_vector_mutation();
+            }
+        }
 
-            // Create observer and register with historical storage (for extensibility)
-            let observer = VectorIndexObserver::new(temporal_index);
-            historical.add_observer(std::sync::Arc::new(observer));
+        self.current
+            .enable_temporal_vector_index(property_name, resolved_config.clone())?;
+        let temporal_index = self
+            .current
+            .get_temporal_vector_index_for(property_name)
+            .ok_or_else(|| {
+                Error::Vector(VectorError::IndexError(
+                    "Temporal vector index not found after enabling".to_string(),
+                ))
+            })?;
 
-            Ok(())
+        let filled = (|| {
+            let changes = historical.node_vector_changes(property_name)?;
+            let live = self.current.node_vectors(property_name);
+            temporal_index.backfill(changes, live)?;
+            if persist {
+                self.persist_temporal_vector_config(property_name, &resolved_config)?;
+            }
+            Ok::<(), Error>(())
         })();
-        result.record_error_metric()
+        if let Err(e) = filled {
+            self.current.remove_temporal_vector_index(property_name);
+            return Err(e);
+        }
+
+        // Pre-anchor hooks keep vector snapshots in step with graph anchors.
+        // The node and edge hooks do the same action.
+        let hook: crate::storage::historical::PreAnchorHook = {
+            let index = Arc::clone(&temporal_index);
+            Arc::new(move |_entity_type, _entity_id, timestamp, _properties| {
+                index.create_snapshot_for_anchor(timestamp)
+            })
+        };
+        historical.register_pre_node_anchor_hook(Arc::clone(&hook));
+        historical.register_pre_edge_anchor_hook(hook);
+        historical.add_observer(Arc::new(VectorIndexObserver::new(temporal_index)));
+
+        Ok(())
+    }
+
+    /// Write the config of one temporal vector index to the sidecar.
+    ///
+    /// A no-op for an ephemeral database. A config that cannot be stored (a
+    /// custom metric) gives a warning: a reopen does not restore it.
+    fn persist_temporal_vector_config(
+        &self,
+        property_name: &str,
+        config: &TemporalVectorConfig,
+    ) -> Result<()> {
+        use crate::db::temporal_vector_sidecar::{PersistedEntry, sidecar_path, upsert_entry};
+
+        let Some(path) = sidecar_path(&self.persistence_config) else {
+            return Ok(());
+        };
+        match PersistedEntry::new(property_name, config) {
+            Some(entry) => upsert_entry(&path, entry),
+            None => {
+                crate::db::temporal_vector_sidecar::log_warning(&format!(
+                    "temporal vector index '{property_name}' has a custom metric; \
+                     a reopen does not restore it"
+                ));
+                Ok(())
+            }
+        }
     }
 
     /// Check if temporal vector indexing is enabled.
@@ -360,6 +429,38 @@ impl AletheiaDB {
     /// ```
     pub fn list_temporal_vector_indexes(&self) -> Vec<String> {
         self.current.list_temporal_vector_indexes()
+    }
+
+    /// Get the number of snapshots in the temporal vector index of a property.
+    ///
+    /// Returns `None` if no temporal vector index is enabled for the property.
+    #[must_use]
+    pub fn temporal_vector_snapshot_count(&self, property_name: &str) -> Option<usize> {
+        self.current
+            .get_temporal_vector_index_for(property_name)
+            .map(|index| index.snapshot_count())
+    }
+
+    /// Create a snapshot of the temporal vector index of a property now.
+    ///
+    /// Use this to make recent writes visible to an as-of search before the
+    /// snapshot strategy creates the next snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no temporal vector index is enabled for the property,
+    /// or if the snapshot build fails.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn create_temporal_vector_snapshot(&self, property_name: &str) -> Result<()> {
+        let index = self
+            .current
+            .get_temporal_vector_index_for(property_name)
+            .ok_or_else(|| {
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+                    format!("No temporal vector index enabled for property '{property_name}'"),
+                ))
+            })?;
+        index.create_manual_snapshot().record_error_metric()
     }
 
     /// Create a builder for configuring a vector index on a property.

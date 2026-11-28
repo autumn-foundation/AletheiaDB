@@ -400,6 +400,11 @@ index.load_mmap(path)?;  // Does not load entire file into RAM
 
 ## 6. Temporal Snapshot Format
 
+> **Status: not implemented.** Snapshots are not written to disk. A reopen
+> rebuilds them from historical storage. Only the config is stored, in
+> `temporal_vector_indexes.dat`. See
+> [ADR-0062](adr/0062-temporal-vector-index-rebuild-from-history.md).
+
 For temporal vector indexes, snapshots are stored in a `snapshots/` subdirectory.
 
 ### 6.1 Snapshot Files

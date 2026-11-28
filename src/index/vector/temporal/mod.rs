@@ -94,6 +94,8 @@ use crate::index::vector::hnsw::HnswIndex;
 use crate::index::vector::{DistanceMetric, TemporalSearchResults, VectorIndex};
 
 // Submodules
+/// Build snapshots from history (Issue #3888).
+pub mod backfill;
 /// Configuration types for temporal vector indexing.
 pub mod config;
 /// Observers for reacting to storage events.
@@ -103,6 +105,7 @@ pub(crate) mod snapshot;
 pub mod stats;
 
 // Re-exports
+pub use backfill::{BackfillReport, VectorChange};
 pub use config::{DriftMetric, RetentionPolicy, SnapshotStrategy, TemporalVectorConfig};
 pub use observer::VectorIndexObserver;
 pub use stats::{MemoryStats, SnapshotInfo};

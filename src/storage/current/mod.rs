@@ -1866,6 +1866,36 @@ impl CurrentStorage {
         Ok(())
     }
 
+    /// Get the config of the temporal vector index of a property.
+    ///
+    /// Returns `None` if no temporal vector index is enabled for the property.
+    pub(crate) fn get_temporal_vector_config_for(
+        &self,
+        property_name: &str,
+    ) -> Option<TemporalVectorConfig> {
+        self.temporal_vector_indexes
+            .get(property_name)
+            .map(|entry| entry.config.clone())
+    }
+
+    /// Remove the temporal vector index of a property (used to undo a failed
+    /// enable). Returns `true` if an index was removed.
+    pub(crate) fn remove_temporal_vector_index(&self, property_name: &str) -> bool {
+        self.temporal_vector_indexes.remove(property_name).is_some()
+    }
+
+    /// Get the `property_name` vector of each current node that has one.
+    pub(crate) fn node_vectors(&self, property_name: &str) -> Vec<(NodeId, Arc<[f32]>)> {
+        self.all_nodes()
+            .filter_map(|node| match node.properties.get(property_name) {
+                Some(crate::core::property::PropertyValue::Vector(v)) => {
+                    Some((node.id, Arc::clone(v)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Check if temporal vector indexing is enabled for any property.
     pub fn is_temporal_vector_index_enabled(&self) -> bool {
         !self.temporal_vector_indexes.is_empty()

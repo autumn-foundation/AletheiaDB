@@ -351,6 +351,11 @@ pub fn enable_temporal_vector_index(&self, property_name: &str, config: Temporal
 
 #### Temporal Vector Implementation Details
 
+**Reopen and old data (Issue #3888):** The enable builds the snapshots from
+historical storage. With index persistence, a sidecar records the config, and
+a reopen enables the index again. See
+[ADR-0062](adr/0062-temporal-vector-index-rebuild-from-history.md).
+
 **Architecture: Dual-Path Design**
 
 The temporal vector index uses a hybrid architecture mirroring AletheiaDB's current/historical storage split:

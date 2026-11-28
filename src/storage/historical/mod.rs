@@ -40,6 +40,7 @@ use tracing;
 mod hooks;
 mod slices;
 mod snapshot_policy;
+mod vector_timeline;
 
 use hooks::{AnchorHookContext, HookMetrics};
 pub use hooks::{HookMetricsSnapshot, PreAnchorHook};
