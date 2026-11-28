@@ -277,7 +277,15 @@ The "Mutation Testing" workflow (`.github/workflows/mutants.yml`) has two paths:
 - **On PRs (blocking gate)**: `cargo mutants --in-diff` runs on the code the PR
   touches, then `.github/scripts/mutants_gate.py gate` enforces a minimum
   mutation score. The check name is **`Mutants (PR diff)`**; it fails the PR
-  when the diff's score is below the threshold.
+  when the diff's score is below the threshold. One mutant costs about
+  8.5 min on a hosted runner, so the run is sharded:
+  - `Mutants (PR diff plan)` lists the diff's mutants and starts one
+    `Mutants (PR diff shard N)` job for each `PR_MUTANTS_PER_SHARD` (10)
+    mutants, at most `PR_MAX_SHARDS` (20). Each shard job runs
+    `--sharding round-robin --shard N/total`.
+  - `Mutants (PR diff)` runs `gate --shards-dir … --expected-shards …` on
+    the sum. A failed, cancelled, missing, or empty shard fails the check,
+    because part of the diff was not tested.
 - **Weekly (informational rotating sample)**: every Sunday, 12 of 96
   round-robin shards run (~12.5% of all mutants). cargo-mutants' *default*
   sharding is `slice` (contiguous chunks of the mutant list in file order —

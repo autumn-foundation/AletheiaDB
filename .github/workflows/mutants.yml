@@ -42,22 +42,100 @@ env:
   # GitHub matrices cannot reference env values.
   TOTAL_SHARDS: 96
   JOBS_PER_WEEK: 12
+  # PR-diff sharding (see the mutants-pr-plan job): mutants per shard job,
+  # sized so one shard (baseline + ~10 mutants at ~8.5 min) fits its
+  # 150-min limit, and the most shard jobs one PR may start.
+  PR_MUTANTS_PER_SHARD: 10
+  PR_MAX_SHARDS: 20
 
 jobs:
   # ── PR mode: gate the mutation score of the code touched by the diff ──
-  mutants-pr:
-    name: Mutants (PR diff)
+  #
+  # One mutant costs about 8.5 min on a hosted runner (~7 min incremental
+  # rebuild + ~1 min nextest), so one job fits only ~12 mutants in its time
+  # limit. The plan job lists the diff's mutants and sizes a shard matrix
+  # (PR_MUTANTS_PER_SHARD each, at most PR_MAX_SHARDS). The shard jobs run
+  # round-robin shards. The gate job (check name "Mutants (PR diff)") sums
+  # every shard and enforces the threshold. A missing, failed, or empty
+  # shard fails the gate: part of the diff was never tested.
+  mutants-pr-plan:
+    name: Mutants (PR diff plan)
     if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'diff')
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 20
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Gate script self-test
-        run: python3 .github/scripts/test_mutants_gate.py
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-mutants-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-
+
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@cargo-binstall
+
+      - name: Install cargo-mutants
+        run: cargo binstall --no-confirm "cargo-mutants@${CARGO_MUTANTS_VERSION}"
+
+      - name: Generate diff against base branch
+        run: |
+          BASE_REF="${{ github.base_ref }}"
+          # Three-dot: diff from merge-base so only PR-introduced changes are mutated, not drifted trunk code.
+          git diff "origin/${BASE_REF:-trunk}"...HEAD > mutants-diff.patch
+          wc -c mutants-diff.patch
+
+      - name: Plan shards
+        id: plan
+        run: |
+          count=0
+          if [ -s mutants-diff.patch ]; then
+            # Listing parses the source only; it does not build.
+            cargo mutants --list --features "$MUTANTS_FEATURES" \
+              --in-diff mutants-diff.patch > mutants-list.txt
+            count=$(grep -c . mutants-list.txt || true)
+          fi
+          shards=$(( (count + PR_MUTANTS_PER_SHARD - 1) / PR_MUTANTS_PER_SHARD ))
+          if [ "$shards" -gt "$PR_MAX_SHARDS" ]; then
+            echo "::warning::$count mutants exceed $PR_MAX_SHARDS shards of $PR_MUTANTS_PER_SHARD; shards can time out"
+            shards=$PR_MAX_SHARDS
+          fi
+          matrix=$(python3 -c 'import json, sys; print(json.dumps(list(range(int(sys.argv[1])))))' "$shards")
+          echo "$count mutants in diff -> $shards shard(s)"
+          {
+            echo "shards=$shards"
+            echo "matrix=$matrix"
+          } >> "$GITHUB_OUTPUT"
+          echo "## Mutation test plan: $count mutants, $shards shard(s)" >> "$GITHUB_STEP_SUMMARY"
+
+  mutants-pr:
+    name: Mutants (PR diff shard ${{ matrix.shard }})
+    needs: mutants-pr-plan
+    if: needs.mutants-pr-plan.outputs.shards != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.mutants-pr-plan.outputs.matrix) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -88,56 +166,102 @@ jobs:
       - name: Generate diff against base branch
         run: |
           BASE_REF="${{ github.base_ref }}"
-          # Three-dot: diff from merge-base so only PR-introduced changes are mutated, not drifted trunk code.
           git diff "origin/${BASE_REF:-trunk}"...HEAD > mutants-diff.patch
           wc -c mutants-diff.patch
 
-      - name: Run mutation tests on diff
+      - name: Run mutation tests on diff (shard ${{ matrix.shard }})
         run: |
-          if [ ! -s mutants-diff.patch ]; then
-            echo "Diff is empty; skipping mutation run (gate passes with no mutants)."
-            exit 0
-          fi
           set +e
           cargo mutants --in-place -vV \
             --features "$MUTANTS_FEATURES" \
             --test-tool nextest \
             --in-diff mutants-diff.patch \
+            --sharding round-robin \
+            --shard "${{ matrix.shard }}/${{ needs.mutants-pr-plan.outputs.shards }}" \
             --output mutants-run
           status=$?
           set -e
           echo "cargo-mutants exit code: $status"
           # 0 = all caught, 2 = missed mutants found, 3 = timeouts occurred:
-          # all three mean the run itself worked — the gate script decides
-          # pass/fail from the score. Anything else (1 usage, 4 baseline tests
-          # failing, 5/6 diff problems, 70 internal) is an infrastructure
-          # failure and fails this step immediately.
+          # all three mean the run itself worked — the gate job decides
+          # pass/fail from the combined score. Anything else (1 usage, 4
+          # baseline tests failing, 5/6 diff problems, 70 internal) is an
+          # infrastructure failure and fails this step immediately.
           case "$status" in
-            0|2|3) exit 0 ;;
+            0|2|3) ;;
             *)
               echo "::error::cargo-mutants infrastructure failure (exit $status)"
               exit "$status"
               ;;
           esac
+          # A shard that drew no mutants writes no outcome files; record
+          # an explicit empty result so the gate can tell it from a crash.
+          mkdir -p mutants-run/mutants.out
+          for f in caught missed timeout unviable; do
+            touch "mutants-run/mutants.out/$f.txt"
+          done
 
-      - name: Enforce mutation-score gate
-        run: |
-          python3 .github/scripts/mutants_gate.py gate \
-            --mutants-out mutants-run/mutants.out \
-            --config .github/mutants-gate.toml \
-            --allow-missing
-
-      - name: Upload mutation results
+      - name: Upload shard results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: mutants-pr-results
+          name: mutants-pr-shard-${{ matrix.shard }}
           path: mutants-run/mutants.out/
           retention-days: 14
           if-no-files-found: ignore
           # Artifacts are immutable within a run; without this a job re-run
           # 409s on upload and the stale first-attempt artifact survives.
           overwrite: true
+
+  mutants-pr-gate:
+    name: Mutants (PR diff)
+    needs: [mutants-pr-plan, mutants-pr]
+    # always(): a failed or cancelled shard must fail this check, not skip it.
+    if: ${{ always() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'diff')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Gate script self-test
+        run: python3 .github/scripts/test_mutants_gate.py
+
+      - name: Check plan and shard jobs
+        run: |
+          plan="${{ needs.mutants-pr-plan.result }}"
+          shards="${{ needs.mutants-pr-plan.outputs.shards }}"
+          runs="${{ needs.mutants-pr.result }}"
+          if [ "$plan" != "success" ]; then
+            echo "::error::mutants plan job: $plan"
+            exit 1
+          fi
+          if [ "$shards" != "0" ] && [ "$runs" != "success" ]; then
+            echo "::error::mutants shard jobs: $runs (every shard must finish)"
+            exit 1
+          fi
+
+      - name: Download shard results
+        if: needs.mutants-pr-plan.outputs.shards != '0'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: mutants-pr-shard-*
+          path: pr-shards
+          merge-multiple: false
+
+      - name: Enforce mutation-score gate
+        run: |
+          if [ "${{ needs.mutants-pr-plan.outputs.shards }}" = "0" ]; then
+            python3 .github/scripts/mutants_gate.py gate \
+              --mutants-out no-mutants.out \
+              --config .github/mutants-gate.toml \
+              --allow-missing
+          else
+            python3 .github/scripts/mutants_gate.py gate \
+              --shards-dir pr-shards \
+              --expected-shards "${{ needs.mutants-pr-plan.outputs.shards }}" \
+              --config .github/mutants-gate.toml
+          fi
 
   # ── Weekly rotating sample: JOBS_PER_WEEK of TOTAL_SHARDS shards ───────
   #
