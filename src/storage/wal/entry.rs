@@ -212,6 +212,19 @@ pub enum WalOperation {
         /// The authoritative transaction commit timestamp.
         commit_timestamp: Timestamp,
     },
+    /// Abort a transaction frame that was already appended (Issue #3799).
+    ///
+    /// The commit path writes this record when a step after the frame append
+    /// fails. Recovery, PITR, and the replica applier then drop the band that
+    /// starts at `begin_lsn`. The record is always appended after its band, but
+    /// the match does not depend on order.
+    AbortTx {
+        /// The `tx_id` of the band's [`WalOperation::BeginTx`].
+        tx_id: u64,
+        /// The LSN of the band's [`WalOperation::BeginTx`]. Transaction ids
+        /// restart in each process, so the LSN is the unique key.
+        begin_lsn: LSN,
+    },
 }
 
 /// A single WAL entry.

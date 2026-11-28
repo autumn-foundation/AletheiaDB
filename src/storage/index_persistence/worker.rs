@@ -308,6 +308,7 @@ pub(crate) fn spawn_background_persistence_thread(
     tracker: Arc<PersistenceTracker>,
     policies: PersistencePolicies,
     stopped_flag: Arc<AtomicBool>,
+    in_flight: Arc<crate::api::transaction::write::InFlightLsns>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         // Wrap entire thread in panic handler to prevent silent failures
@@ -330,6 +331,12 @@ pub(crate) fn spawn_background_persistence_thread(
                 // Skip if shutdown signaled
                 if tracker.is_shutdown() {
                     break;
+                }
+
+                // Issue #3799: no snapshot while a failed commit's writes are
+                // in memory. `persist_indexes` reports the reason.
+                if in_flight.diverged_lsn().is_some() {
+                    continue;
                 }
 
                 // Track if any index was persisted this cycle
@@ -415,7 +422,13 @@ pub(crate) fn spawn_background_persistence_thread(
                 }
             }
 
-            // Final persist on shutdown
+            // Final persist on shutdown, unless the divergence fence is set
+            // (Issue #3799): then recovery rebuilds from the last good
+            // snapshot and the WAL.
+            if let Err(e) = in_flight.check_not_diverged("persist indexes at shutdown") {
+                crate::storage::wal::log_wal_diagnostic(&e.to_string());
+                return;
+            }
             let _ = persist_all_indexes(
                 &current,
                 &historical,

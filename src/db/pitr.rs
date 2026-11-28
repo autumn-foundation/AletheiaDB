@@ -300,6 +300,10 @@ fn parse_bands(entries: Vec<WalEntry>) -> Vec<Band> {
         }
     }
 
+    // Issue #3799: a failed commit's band never replays and is never counted,
+    // even when its abort record lies past the target.
+    let entries = crate::storage::recovery::drop_aborted_frames(entries);
+
     let mut bands: Vec<Band> = Vec::new();
     let mut open: Vec<WalEntry> = Vec::new();
     let mut open_active = false;
@@ -536,8 +540,19 @@ fn compute_window(all: &[WalEntry], source_lsn: u64) -> PitrWindow {
     let mut latest_lsn = source_lsn;
     let mut latest_ts = Timestamp::from(0);
     let mut have_latest = false;
+    // Issue #3799: skip the commit coordinate of an aborted band.
+    let aborted = crate::storage::recovery::aborted_band_keys(all);
+    let mut open_band: Option<(LSN, u64)> = None;
 
     for e in all {
+        if let WalOperation::BeginTx { tx_id } = e.operation {
+            open_band = Some((e.lsn, tx_id));
+        }
+        if matches!(e.operation, WalOperation::CommitTx { .. })
+            && open_band.take().is_some_and(|key| aborted.contains(&key))
+        {
+            continue;
+        }
         // A transaction's commit coordinate: the framed `CommitTx`, or a legacy
         // (unframed) data op's own coordinate. Control ops and framed data ops
         // (accounted by their `CommitTx`) are skipped to avoid double counting.
@@ -1015,6 +1030,40 @@ mod band_filter_tests {
             !entry_needs_vocab_check(&entry_with_version(Some(13))),
             "a v13+ (inline-string) entry needs no range check"
         );
+    }
+
+    fn abort_entry(lsn: u64, tx_id: u64, begin_lsn: u64) -> WalEntry {
+        framed(
+            lsn,
+            WalOperation::AbortTx {
+                tx_id,
+                begin_lsn: LSN(begin_lsn),
+            },
+            ts(0),
+        )
+    }
+
+    /// Issue #3799: PITR never replays or counts an aborted band, even when
+    /// its abort record lies after the target.
+    #[test]
+    fn aborted_band_is_neither_replayed_nor_counted() {
+        let mut entries = all_of(vec![tx(1, 1, 1, ts(100)), tx(4, 2, 1, ts(200))]);
+        entries.push(abort_entry(7, 1, 1));
+        let f = filter_bands(entries.clone(), &PitrTarget::AsOf(ts(150)), 0);
+        assert_eq!(f.applied, 0, "the aborted band must not apply");
+        assert!(f.entries.is_empty());
+        assert_eq!(f.discarded, 1, "only the live band counts as discarded");
+        assert_eq!(count_transactions(&entries, 0), 1);
+    }
+
+    /// Issue #3799: an aborted band does not define the window edge.
+    #[test]
+    fn aborted_band_does_not_extend_the_window() {
+        let mut entries = all_of(vec![tx(1, 1, 1, ts(100)), tx(4, 2, 1, ts(200))]);
+        entries.push(abort_entry(7, 2, 4));
+        let window = compute_window(&entries, 0);
+        assert_eq!(window.latest_lsn, 3, "latest is the last live CommitTx");
+        assert_eq!(window.latest_ts, ts(100));
     }
 
     #[test]

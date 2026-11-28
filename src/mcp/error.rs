@@ -697,10 +697,11 @@ mod tests {
         // Why non-retriable, honestly stated. It is NOT one argument but two,
         // and they are not equally strong:
         //
-        //   * The group-commit ACQUISITION timeout genuinely leaves durability
-        //     UNKNOWN on the commit path — the transaction may still become
-        //     durable and replay at recovery — so telling a client to retry
-        //     would risk a double-applied transaction. Escalation is correct.
+        //   * The group-commit ACQUISITION timeout on the commit path can leave
+        //     durability UNKNOWN (when the #3799 abort record is not
+        //     confirmed), and after a post-apply failure the live state still
+        //     holds the write until reopen. A blind retry can apply the
+        //     transaction twice. Escalation is correct.
         //   * The bounded APPEND timeout (ring buffer full, #3798) is by
         //     contrast retry-SAFE: a mid-batch failure leaves a WAL prefix with
         //     no CommitTx marker, which recovery discards (#3413 framing), so

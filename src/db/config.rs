@@ -1529,6 +1529,7 @@ impl AletheiaDB {
                     Arc::clone(tracker),
                     config.persistence.policies.clone(),
                     Arc::clone(&db.persistence_thread_stopped),
+                    Arc::clone(&db.in_flight),
                 );
                 db.persistence_thread_handle = Some(handle);
             }

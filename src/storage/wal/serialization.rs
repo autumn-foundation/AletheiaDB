@@ -67,6 +67,9 @@ pub(crate) const OP_COMMIT_TX: u8 = 12;
 /// Leading transaction-begin marker (Issue #3413). Only appears in segments at
 /// or above `WAL_VERSION_TX_FRAMING`.
 pub(crate) const OP_BEGIN_TX: u8 = 13;
+/// Op tag for [`WalOperation::AbortTx`] (Issue #3799). Only a failed commit
+/// writes it. See ADR-0062 for why it needs no WAL version bump.
+pub(crate) const OP_ABORT_TX: u8 = 14;
 
 /// Serialize a label as length-prefixed UTF-8: `[len: u32-LE][utf8 bytes]`
 /// (Issue #3506, WAL v13/v14).
@@ -348,6 +351,10 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
             // op type (1) + tx_id (8) + entry_count (4) + commit_timestamp (12)
             1 + 8 + 4 + TIMESTAMP_SIZE
         }
+        WalOperation::AbortTx { .. } => {
+            // op type (1) + tx_id (8) + begin_lsn (8)
+            1 + 8 + 8
+        }
     };
 
     FIXED_OVERHEAD + variable_size
@@ -570,6 +577,11 @@ pub(crate) fn serialize_operation_into(
             buffer.extend_from_slice(&tx_id.to_le_bytes());
             buffer.extend_from_slice(&entry_count.to_le_bytes());
             commit_timestamp.serialize_into(buffer);
+        }
+        WalOperation::AbortTx { tx_id, begin_lsn } => {
+            buffer.push(OP_ABORT_TX);
+            buffer.extend_from_slice(&tx_id.to_le_bytes());
+            buffer.extend_from_slice(&begin_lsn.0.to_le_bytes());
         }
     }
 

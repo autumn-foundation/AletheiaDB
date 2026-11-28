@@ -74,6 +74,9 @@ impl AletheiaDB {
                 }
             })?;
 
+            // Issue #3799: refuse while a failed commit's writes are in memory.
+            self.in_flight.check_not_diverged("persist indexes")?;
+
             // Fail-closed guard for the encrypted-WAL-but-plaintext-index window
             // (Issue #3616 PR3; belt-and-suspenders under the #3708 hot-live driver).
             // If the live WAL is encrypted but this handle's index manager still

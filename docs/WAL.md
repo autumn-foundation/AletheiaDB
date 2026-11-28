@@ -328,6 +328,7 @@ The following table describes recovery behavior for different crash scenarios:
 | **Power failure mid-fsync** | Synchronous/GroupCommit | OS guarantees atomicity, last entry may be incomplete | None or last transaction only |
 | **Disk full during WAL write** | Any | Recovery stops at last complete entry | Recent uncommitted writes |
 | **Vector index config invalid** | Any | **Recovery fails** to maintain integrity | None - prevents inconsistent state |
+| **Commit failed after the WAL append** | Any | Band dropped if its `AbortTx` record is durable (Issue #3799) | None - the caller got an error |
 
 #### Durability Guarantees by Mode
 
@@ -370,6 +371,49 @@ The following table describes recovery behavior for different crash scenarios:
 ```
 
 **Key Point:** GroupCommit blocks the caller until fsync completes, guaranteeing durability. This is why it's ACID-compliant despite batching.
+
+### Commit-path abort record (Issue #3799)
+
+A commit appends its frame `[BeginTx, ..ops.., CommitTx]` before it waits for
+durability. If a later step fails, the frame is still in the ring buffer and
+the flusher can still write it. The commit path then writes an
+`AbortTx { tx_id, begin_lsn }` record. Recovery, PITR, and the replica
+applier drop the band that the record names. See
+[ADR-0062](adr/0062-commit-path-abort-record.md).
+
+| Failed step | Live state | Fence |
+|-------------|------------|-------|
+| Commit step in the append (register timeout, sync flush error) | Not applied | No |
+| `apply_changes` | Partly applied | Yes |
+| `wait_for_flush` | Applied | Yes |
+
+The commit path releases the commit clock, then writes the record and waits
+for it with the mode rules. The error then says one of these:
+
+- **"Transaction aborted: the abort record is durable"**: recovery does not
+  replay the transaction.
+- **"The abort record is not confirmed durable ... durability status
+  UNKNOWN"**: the write or the wait failed, or the mode (`Async`,
+  `AsyncBatched`) does not wait for fsync. The transaction can still replay.
+
+Only a `StorageError::WalError` gets this text. Other error types keep their
+type; the outcome goes to the WAL diagnostic log.
+
+**Fence.** When the live state holds the writes, `persist_indexes`,
+`backup`, and the background persistence worker (also at shutdown) stop with
+`FailedPrecondition`. Reopen the database to clear the fence.
+
+**Windows that stay unknown:**
+
+- A crash after the frame is durable and before the abort record is durable.
+- An index snapshot taken while the commit waited for its flush, before the
+  fence was set.
+- A replica that applied the band in an earlier batch than the abort record.
+- Live readers see the writes until the process restarts.
+
+**Compatibility.** The record uses op tag 14 and needs no WAL version bump: a
+healthy WAL never holds it. An older binary that reads it stops replay with
+"Unknown WAL operation type" and does not open.
 
 ### Handling Corrupted Segments
 
@@ -975,15 +1019,12 @@ Counters `GroupCommitCoordinator::reentrancy_detections()` and
 `acquire_timeouts()` expose both classes for health checks and soak tests; a
 non-zero `reentrancy_detections` is always a caller bug.
 
-> **Durability-unknown caveat.** An acquisition timeout at a *commit-path* site
-> (`register_transaction`, `wait_for_flush`) says so explicitly: the in-flight
-> transaction's WAL frame may already have been appended, so it **may still
-> become durable and replay at recovery**. Do not report such a failure to a
-> client as a clean abort. The WAL transaction frame format that would make
-> this precise has already landed (Issue #3413 — `BeginTx`/`CommitTx`/
-> `AbortTx`); what is still missing is the **commit path emitting an abort
-> record** when a step after the append fails, tracked as **Issue #3799**.
-> Until then the outcome is genuinely unknown and is disclosed as such.
+> **Durability disclosure.** An acquisition timeout at a *commit-path* site
+> (`register_transaction`, `wait_for_flush`) says so in its message: the
+> frame can already be in the ring buffer, so it can still replay at recovery
+> unless the caller writes an abort record. The transaction commit path does
+> this and adds the outcome to the error. See
+> [Commit-path abort record](#commit-path-abort-record-issue-3799).
 > Observation sites wrote nothing and make no durability claim.
 
 For the full call-site audit behind this hardening — including why re-entrant

@@ -15,6 +15,9 @@
 //! This ensures that if the system crashes after step 2/3 but before step 4,
 //! the changes can be recovered from the WAL on restart.
 //!
+//! If a step after step 2 fails, the commit path writes an `AbortTx` record
+//! for the frame, so recovery does not replay it (Issue #3799).
+//!
 //! # Performance
 //!
 //! The conversion from `BufferedWrite` (transaction buffer) to `WalOperation` (WAL entry)
@@ -23,10 +26,32 @@
 //! extremely fast.
 
 use super::WriteTransaction;
-use crate::core::error::Result;
+use crate::core::error::Error;
 use crate::core::id::VersionId;
 use crate::core::temporal::Timestamp;
 use crate::storage::wal::{LSN, WalOperation};
+
+/// A failure of [`log_operations_to_wal`], split by where it happened
+/// (Issue #3799).
+#[derive(Debug)]
+pub(crate) enum LogFailure {
+    /// The frame did not reach the ring buffer. This is a clean failure.
+    NotAppended(Error),
+    /// The frame is in the ring buffer and the commit step after the append
+    /// failed. The caller must write an abort record for `begin_lsn`.
+    Appended {
+        /// LSN of the frame's `BeginTx`.
+        begin_lsn: LSN,
+        /// The commit-step error.
+        error: Error,
+    },
+}
+
+impl From<Error> for LogFailure {
+    fn from(error: Error) -> Self {
+        Self::NotAppended(error)
+    }
+}
 
 /// Log all buffered operations to the Write-Ahead Log (WAL).
 ///
@@ -88,12 +113,15 @@ use crate::storage::wal::{LSN, WalOperation};
 ///
 /// # Errors
 ///
-/// Returns an error if the WAL append fails (e.g., disk full, IO error).
+/// - [`LogFailure::NotAppended`] if the append fails (e.g., disk full, IO
+///   error), or if an empty transaction's commit step fails.
+/// - [`LogFailure::Appended`] if the append succeeds and the commit step after
+///   it fails (Issue #3799).
 pub(crate) fn log_operations_to_wal(
     tx: &WriteTransaction,
     commit_timestamp: Timestamp,
     closing_version_ids: &[VersionId],
-) -> Result<(Option<LSN>, Option<u64>)> {
+) -> Result<(Option<LSN>, Option<u64>), LogFailure> {
     // Collect all buffered writes into a single batch and append them under one atomic
     // LSN allocation via the WAL `append_batch` path (Issue #219). This is strictly more
     // efficient than the previous per-operation `append_async` loop for multi-operation
@@ -154,7 +182,14 @@ pub(crate) fn log_operations_to_wal(
     // membership step (the membership lock is held across both inside
     // `append_batch_and_commit`), so the background flusher cannot drain this
     // frame into an earlier epoch's batch before this transaction registers.
-    let (base_lsn, wait_epoch) = tx.wal.append_batch_and_commit(operations)?;
-
-    Ok((base_lsn, wait_epoch))
+    //
+    // Issue #3799: keep the base LSN when the commit step fails, so the caller
+    // can write an abort record for this frame.
+    let (base_lsn, commit) = tx.wal.append_frame_and_commit(operations)?;
+    match (base_lsn, commit) {
+        (base_lsn, Ok(wait_epoch)) => Ok((base_lsn, wait_epoch)),
+        (Some(begin_lsn), Err(error)) => Err(LogFailure::Appended { begin_lsn, error }),
+        // A non-empty batch always has a base LSN.
+        (None, Err(error)) => Err(LogFailure::NotAppended(error)),
+    }
 }

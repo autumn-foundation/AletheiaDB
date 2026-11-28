@@ -27,6 +27,15 @@
 //! LSN is guaranteed present in any current+historical snapshot). The guard's
 //! `Drop` deregisters, so any early-return / panic path also releases the LSN.
 //!
+//! # Divergence fence (Issue #3799)
+//!
+//! If a commit fails after its in-memory apply, the commit path aborts the
+//! WAL frame, but the live state still holds the writes.
+//! [`InFlightLsns::mark_diverged`] records this. While it is set, index
+//! persistence and backup refuse ([`InFlightLsns::check_not_diverged`]), so no
+//! snapshot keeps writes that the WAL disowns. Only a reopen clears it. See
+//! ADR-0062.
+//!
 //! # Lock ordering
 //!
 //! The internal mutex is a **leaf**: it is only ever held for the duration of a
@@ -39,6 +48,7 @@
 //! position in the CLAUDE.md lock order beyond "leaf, acquired last".
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Tracks the base LSNs of commits that are durable but not yet applied.
@@ -55,6 +65,11 @@ pub(crate) struct InFlightLsns {
     /// — works in raw `u64` LSN values; wrapping here would ripple `LSN`
     /// wrap/unwrap into several call sites for no safety gain in this leaf type.
     lsns: Mutex<BTreeSet<u64>>,
+    /// Divergence fence (Issue #3799). `0` means "not set". Else it holds the
+    /// `BeginTx` LSN of a frame that was applied in memory and then aborted.
+    /// The live state then holds writes that the WAL disowns, so no snapshot
+    /// may capture it. Only a reopen clears the fence.
+    diverged: AtomicU64,
 }
 
 impl InFlightLsns {
@@ -92,6 +107,43 @@ impl InFlightLsns {
             .lock()
             .ok()
             .and_then(|set| set.iter().next().copied())
+    }
+
+    /// Set the divergence fence for the aborted frame at `begin_lsn`
+    /// (Issue #3799). The first mark stays.
+    pub(crate) fn mark_diverged(&self, begin_lsn: u64) {
+        // `begin_lsn` is never 0 (LSNs start at 1). Keep the first mark.
+        let _ = self.diverged.compare_exchange(
+            0,
+            begin_lsn.max(1),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    /// The `BeginTx` LSN of the first aborted-but-applied frame, if the
+    /// divergence fence is set (Issue #3799).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn diverged_lsn(&self) -> Option<u64> {
+        match self.diverged.load(Ordering::Acquire) {
+            0 => None,
+            lsn => Some(lsn),
+        }
+    }
+
+    /// Refuse a snapshot while the divergence fence is set (Issue #3799).
+    /// `what` names the refused operation in the error text.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn check_not_diverged(&self, what: &str) -> crate::core::error::Result<()> {
+        match self.diverged_lsn() {
+            None => Ok(()),
+            Some(lsn) => Err(crate::core::error::Error::FailedPrecondition(format!(
+                "cannot {what}: a failed commit (WAL frame at LSN {lsn}) was applied in memory \
+                 and then aborted, so the live state holds writes that the WAL does not keep. \
+                 A snapshot now would keep those writes. Reopen the database: recovery \
+                 rebuilds the state without them (Issue #3799)."
+            ))),
+        }
     }
 
     /// Deregister `lsn`. Invoked only by [`InFlightGuard::drop`].

@@ -91,11 +91,10 @@
 //!    (`src/api/transaction/write/mod.rs`). Any single indefinite block
 //!    underneath it becomes an untimed, zero-CPU convoy of every other
 //!    committing thread. **Mitigation deferred:** that hold is deliberate and
-//!    documented at the site. The WAL transaction *frame format* itself
-//!    (Issue #3413 — `BeginTx`/`CommitTx`/`AbortTx`) has landed; what the
-//!    shortened hold still waits on is the **commit path emitting an abort
-//!    record** when a step after the append fails, tracked as Issue #3799.
-//!    Out of scope here.
+//!    documented at the site. The commit path now writes an `AbortTx` record
+//!    when a step after the append fails (Issue #3799), and it writes it
+//!    after it releases the commit clock. Shortening the hold itself is
+//!    Issue #3804. Out of scope here.
 //!
 //! ## Lock-leaf contract
 //!
@@ -138,18 +137,24 @@
 //! performance SLA** — the same contract `timeout_max_ms` carries. Setting it
 //! to `0` disables the bound and restores legacy unbounded `Mutex::lock`.
 //!
-//! ## Durability-unknown caveat
+//! ## Durability disclosure
 //!
 //! An acquisition timeout at a **commit-path** site (`register_transaction`,
-//! `wait_for_flush`) says so in its message: the in-flight transaction's WAL
-//! frame may already have been appended, so it **may still become durable and
-//! replay at recovery**. Such a failure must not be reported to a client as a
-//! clean abort. The frame format that would let the commit path say so
-//! precisely has already landed (Issue #3413, `AbortTx`); what is still
-//! missing is the commit path **emitting** that abort record when a step after
-//! the append fails, tracked as Issue #3799. Until then the outcome is
-//! genuinely unknown and is disclosed as such. Observation sites wrote nothing
-//! and therefore make no durability claim.
+//! `wait_for_flush`) says so in its message: the frame can already be in the
+//! ring buffer, so it can still become durable and replay at recovery, unless
+//! the caller writes an abort record for it.
+//!
+//! The transaction commit path does this (Issue #3799, ADR-0062). It writes an
+//! `AbortTx` record and adds the outcome to the error:
+//!
+//! - Abort record durable: the transaction is aborted. Recovery does not
+//!   replay it.
+//! - Abort record not confirmed: durability status UNKNOWN. The transaction
+//!   can still replay.
+//!
+//! A crash after the frame is durable and before the abort record is durable
+//! stays unknown by nature. Observation sites wrote nothing and make no
+//! durability claim.
 //!
 //! ## Escalation flag
 //!
@@ -599,6 +604,9 @@ pub struct GroupCommitCoordinator {
     /// microseconds wide — so the failure is injected instead of raced.
     #[cfg(test)]
     test_fail_next_acquire_site: AtomicU64,
+    /// Number of injected failures left at `test_fail_next_acquire_site`.
+    #[cfg(test)]
+    test_fail_acquire_remaining: AtomicU64,
 
     /// When true, `finish_flush` probes whether the state mutex is free at the
     /// instant it calls `notify_all` (see `test_pre_notify_try_lock_ok`).
@@ -746,6 +754,8 @@ impl GroupCommitCoordinator {
             #[cfg(test)]
             test_fail_next_acquire_site: AtomicU64::new(0),
             #[cfg(test)]
+            test_fail_acquire_remaining: AtomicU64::new(0),
+            #[cfg(test)]
             test_pre_notify_probe: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             test_pre_notify_try_lock_ok: AtomicU64::new(0),
@@ -781,7 +791,13 @@ impl GroupCommitCoordinator {
         // ---- Step 0 (test builds only): injected acquisition failure -------
         #[cfg(test)]
         if self.test_fail_next_acquire_site.load(Ordering::Relaxed) == site.as_u64() {
-            self.test_fail_next_acquire_site.store(0, Ordering::Relaxed);
+            if self
+                .test_fail_acquire_remaining
+                .fetch_sub(1, Ordering::Relaxed)
+                <= 1
+            {
+                self.test_fail_next_acquire_site.store(0, Ordering::Relaxed);
+            }
             self.acquire_timeouts.fetch_add(1, Ordering::Relaxed);
             let budget = self.acquire_timeout_ms.load(Ordering::Relaxed);
             return Err(self.abandon_acquisition(site, Duration::ZERO, budget));
@@ -931,8 +947,10 @@ impl GroupCommitCoordinator {
             // Commit-path sites only. The caller cannot tell whether its
             // transaction reached the WAL, so it must not report a clean
             // failure to its own client.
-            " durability status UNKNOWN for the in-flight transaction: it may still become \
-             durable and replay at recovery, so do NOT report it as cleanly failed."
+            " The in-flight WAL frame may already be appended, so it can still become \
+             durable and replay at recovery, unless the caller writes an abort record for \
+             it. The transaction commit path does this and adds the final outcome \
+             (Issue #3799)."
         } else {
             // An observation site wrote nothing; claiming durability is at risk
             // would be a false alarm an operator would escalate for nothing.
@@ -1021,6 +1039,14 @@ impl GroupCommitCoordinator {
     /// budget would, once. See `test_fail_next_acquire_site`.
     #[cfg(test)]
     pub(crate) fn fail_next_acquisition_at_for_test(&self, site: LockSite) {
+        self.fail_next_acquisitions_at_for_test(site, 1);
+    }
+
+    /// Make the next `count` acquisitions at `site` fail (Issue #3799).
+    #[cfg(test)]
+    pub(crate) fn fail_next_acquisitions_at_for_test(&self, site: LockSite, count: u64) {
+        self.test_fail_acquire_remaining
+            .store(count, Ordering::Relaxed);
         self.test_fail_next_acquire_site
             .store(site.as_u64(), Ordering::Relaxed);
     }
@@ -1056,9 +1082,9 @@ impl GroupCommitCoordinator {
     ///   (re-entrancy detection), or if the acquisition exceeds
     ///   `acquire_timeout_ms`; setting that to `0` removes the timeout mode.
     /// - An acquisition timeout here is a **commit-path** failure: the
-    ///   transaction's WAL frame may already be appended, so durability is
-    ///   unknown and the error must not be reported as a clean abort (see the
-    ///   module's durability-unknown caveat).
+    ///   transaction's WAL frame can already be appended. The caller must write
+    ///   an abort record before it reports a clean failure (see the module's
+    ///   durability disclosure, Issue #3799).
     pub fn register_transaction(&self) -> Result<(u64, bool), Error> {
         let mut state = self.lock_state(LockSite::RegisterTransaction)?;
 
@@ -1107,10 +1133,10 @@ impl GroupCommitCoordinator {
     ///   `acquire_timeout_ms` (`0` removes that timeout mode) —
     ///   `StorageError::WalError` in both cases
     ///
-    /// This is a **commit-path** site: both the flush timeout and an
-    /// acquisition timeout leave durability **unknown** (the WAL frame may
-    /// already be appended), so neither may be reported as a clean abort — see
-    /// the module's durability-unknown caveat.
+    /// This is a **commit-path** site: after a flush timeout or an acquisition
+    /// timeout the WAL frame can already be appended. The caller must write an
+    /// abort record before it reports a clean failure (see the module's
+    /// durability disclosure, Issue #3799).
     ///
     /// # Examples
     ///
@@ -1797,9 +1823,8 @@ mod tests {
     /// watchdog fires.
     ///
     /// `register_transaction` is on the commit path, so the message must also
-    /// disclose that durability is UNKNOWN — the caller cannot tell whether
-    /// its transaction will be replayed at recovery, and must not report a
-    /// clean failure to its own client.
+    /// say that the frame can still replay at recovery unless the caller writes
+    /// an abort record (Issue #3799).
     #[test]
     fn test_acquisition_returns_diagnosable_error_when_guard_held_elsewhere() {
         let coord = Arc::new(GroupCommitCoordinator::with_defaults());
@@ -1826,7 +1851,8 @@ mod tests {
             "current_epoch",
             "flushed_epoch",
             "batch_count",
-            "durability status UNKNOWN",
+            "can still become durable and replay at recovery",
+            "abort record",
         ] {
             assert!(
                 msg.contains(needle),
@@ -1868,7 +1894,7 @@ mod tests {
         let err = result.expect_err("acquisition behind a wedged holder must fail, not hang");
         let msg = err.to_string();
         assert!(
-            !msg.contains("durability status UNKNOWN"),
+            !msg.contains("replay at recovery"),
             "an observation site wrote nothing, so it must not claim durability is at risk: {msg}"
         );
         assert!(

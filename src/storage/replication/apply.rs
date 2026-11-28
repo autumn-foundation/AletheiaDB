@@ -256,9 +256,12 @@ fn last_complete_frame_boundary(entries: &[WalEntry]) -> Option<usize> {
                 pending_last = None;
                 pending_contiguous = true;
             }
+            // Issue #3799: an abort record is also a complete boundary. The
+            // replay resolver drops its band when both are in one batch.
             WalOperation::Checkpoint { .. }
             | WalOperation::DeclareUniqueConstraint { .. }
-            | WalOperation::DropUniqueConstraint { .. } => {
+            | WalOperation::DropUniqueConstraint { .. }
+            | WalOperation::AbortTx { .. } => {
                 // Self-committing control op: discards any torn open frame
                 // (defensive, mirrors the recovery resolver) and applies.
                 open = None;
@@ -304,7 +307,7 @@ fn max_applied_timestamp(applied: &[WalEntry]) -> Option<Timestamp> {
             WalOperation::CommitTx {
                 commit_timestamp, ..
             } => *commit_timestamp,
-            WalOperation::BeginTx { .. } => continue,
+            WalOperation::BeginTx { .. } | WalOperation::AbortTx { .. } => continue,
             _ => entry.timestamp,
         };
         if max_ts.is_none_or(|m| candidate > m) {
@@ -569,6 +572,72 @@ mod tests {
             edges.len(),
             1,
             "adjacency must reflect the replayed edge alongside its endpoint nodes"
+        );
+    }
+
+    /// Issue #3799: an `AbortTx` record completes a boundary, like a control
+    /// op, so the applier does not wait for more entries after it.
+    #[test]
+    fn boundary_at_abort_record() {
+        let entries = vec![framed(
+            1,
+            WalOperation::AbortTx {
+                tx_id: 1,
+                begin_lsn: LSN(0),
+            },
+            ts(10),
+        )];
+        assert_eq!(last_complete_frame_boundary(&entries), Some(0));
+    }
+
+    /// Issue #3799: an abort record does not raise the HLC seed.
+    #[test]
+    fn max_applied_timestamp_ignores_abort_record() {
+        let entries = vec![framed(
+            1,
+            WalOperation::AbortTx {
+                tx_id: 1,
+                begin_lsn: LSN(0),
+            },
+            ts(999),
+        )];
+        assert_eq!(max_applied_timestamp(&entries), None);
+    }
+
+    /// Issue #3799: when a band and its abort record arrive in one batch, the
+    /// replica does not apply the band.
+    #[test]
+    fn apply_replica_batch_skips_band_aborted_in_same_batch() {
+        let (_dir, handles) = test_handles();
+        let mut pending = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 1 }, ts(10)),
+            framed(2, create_node_op(1), ts(11)),
+            framed(
+                3,
+                WalOperation::CommitTx {
+                    tx_id: 1,
+                    entry_count: 1,
+                    commit_timestamp: ts(100),
+                },
+                ts(12),
+            ),
+            framed(
+                4,
+                WalOperation::AbortTx {
+                    tx_id: 1,
+                    begin_lsn: LSN(1),
+                },
+                ts(13),
+            ),
+        ];
+        apply_replica_batch(&handles, &mut pending).expect("apply must succeed");
+        assert!(pending.is_empty(), "the abort record must be consumed");
+        assert!(
+            handles
+                .current
+                .get_node(crate::core::NodeId::new(1).unwrap())
+                .is_err(),
+            "an aborted band must not be applied"
         );
     }
 }

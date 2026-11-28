@@ -566,6 +566,7 @@ impl AletheiaDB {
             tracker,
             self.persistence_config.policies.clone(),
             std::sync::Arc::clone(&self.persistence_thread_stopped),
+            std::sync::Arc::clone(&self.in_flight),
         );
         self.persistence_thread_handle = Some(handle);
     }

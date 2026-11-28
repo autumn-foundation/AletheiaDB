@@ -72,6 +72,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **DURABILITY:** a commit that failed after its WAL append could come back
+  after a restart (Issue #3799, ADR-0062). The frame stayed in the ring
+  buffer, so the flusher could still write it and recovery replayed it,
+  although the caller got an error. The commit path now writes a new
+  `AbortTx { tx_id, begin_lsn }` WAL record after such a failure (register or
+  sync flush error in the append step, `apply_changes` error, or
+  `wait_for_flush` error). Crash recovery, PITR, and the replica applier drop
+  the band that the record names. When the record is durable, the error says
+  "Transaction aborted: the abort record is durable". When it is not, the
+  error keeps "durability status UNKNOWN". The commit clock is released before
+  the record is written. Issue #3413 did not add an abort record; docs that
+  said so are corrected.
+- **BEHAVIORAL:** after an `apply_changes` or `wait_for_flush` failure, the
+  live state holds writes that the WAL disowns. `persist_indexes`, `backup`,
+  and the background persistence worker (also at shutdown) now refuse with
+  `FailedPrecondition` until the database is reopened, so no snapshot keeps
+  those writes. On-disk format: new op tag 14, no WAL version bump; an older
+  binary refuses to open a WAL that holds the record.
+
 - Adjacency compaction could tear a concurrent read (Issue #3810). It retired
   the delta entries **before** publishing the CSR that absorbed them, so a
   reader landing in that window got an adjacency list missing those edges — an
@@ -167,17 +186,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contention could not be told apart from a suspected deadlock. It also appears
   in the acquisition-failure forensic payload.
 
-- Documented the durability-unknown caveat on commit-path acquisition timeouts
-  (Issue #3798): a timeout at `register_transaction` or `wait_for_flush` may
-  leave a WAL frame already appended, so the transaction **may still become
-  durable and replay at recovery** and must not be reported to a client as a
-  clean abort. The WAL transaction frame format that would make this precise
-  already shipped in 0.2.0 (Issue #3413 — `BeginTx`/`CommitTx`/`AbortTx`); what
-  is still missing is the commit path **emitting** an abort record when a step
-  after the append fails, tracked as Issue #3799. See
-  [docs/WAL.md](docs/WAL.md) ("Stall Diagnosability") and the module
-  documentation on `src/storage/wal/group_commit.rs` for the full call-site
-  audit.
+- Documented the durability disclosure on commit-path acquisition timeouts
+  (Issue #3798): after a timeout at `register_transaction` or
+  `wait_for_flush`, the WAL frame can already be appended. The commit path now
+  writes an abort record and reports the final outcome (Issue #3799, see
+  above). See [docs/WAL.md](docs/WAL.md) ("Stall Diagnosability") and the
+  module documentation on `src/storage/wal/group_commit.rs` for the full
+  call-site audit.
 
 ### Known issues
 

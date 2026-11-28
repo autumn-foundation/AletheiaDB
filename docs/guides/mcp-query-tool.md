@@ -600,12 +600,16 @@ transaction's buffer is rolled back before anything is applied or
 WAL-logged, and commit-phase failures (conflicts, constraint violations)
 abort the transaction as a whole. Atomicity is guaranteed for **every
 acknowledged outcome** (any success or error response the caller receives)
-and for **all non-crash failure modes**. One narrow caveat: the WAL
-currently has no transaction framing, so a process **crash during the
-commit flush window** can persist a prefix of a batch that was never
-acknowledged, and recovery may then replay that prefix — a pre-existing
-engine property of all multi-operation transactions, tracked in issue
-#3413. Separately, readers using non-snapshot read paths can briefly
+and for **all non-crash failure modes**. Across a crash, recovery replays
+a batch whole or not at all: the WAL frames each transaction
+(`BeginTx`/`CommitTx`, issue #3413), and recovery discards a frame whose
+`CommitTx` did not reach disk. If the commit fails after the WAL append, the
+engine writes an `AbortTx` record (issue #3799). When that record is durable,
+the error says "Transaction aborted" and recovery does not replay the batch.
+When it is not, the error says "durability status UNKNOWN": the whole batch
+can still replay. If the failure came after the in-memory apply (a flush
+wait failure), live reads can see the batch until the database is reopened;
+index persistence and backup refuse until then. Separately, readers using non-snapshot read paths can briefly
 observe a commit in progress mid-apply — also pre-existing behavior for
 all multi-op transactions, not specific to `apply_batch`. The error
 response reports the failing operation:
