@@ -529,6 +529,18 @@ async fn reconnect_churn_no_false_exhaustion() {
             "round {round}: quota falsely exhausted after churn — aborted slots \
              not reaped within the cap (#3688 false-exhaustion)"
         );
+
+        // The check above proves only that ONE slot is free. Wait until EVERY
+        // aborted slot is reaped before the next round (or the final CAP
+        // check) takes the whole cap again. A leaked slot keeps the count
+        // above zero and fails here.
+        assert!(
+            wait_until(SLOT_RELEASE_BOUND, || principal_count(&db, &reader_id) == 0)
+                .await
+                .is_some(),
+            "round {round}: aborted long-poll slots leaked: count stays at {}",
+            principal_count(&db, &reader_id)
+        );
     }
 
     // Fully released; a fresh CAP subscribes succeed and the CAP+1 is rejected.
