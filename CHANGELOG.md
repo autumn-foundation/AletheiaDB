@@ -72,6 +72,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The temporal vector index survives a reopen (Issue #3888, ADR-0062).
+  - `enable_temporal_vector_index` builds the snapshots from historical
+    storage. Thus as-of vector search also covers data that was written
+    before the call. If no vector index exists, the call fills one from
+    current nodes. If the call fails, it removes the indexes that it created.
+  - With index persistence, the database writes the config to
+    `{data_dir}/indexes/temporal_vector_indexes.dat`. A reopen enables the
+    index again and rebuilds it. The database moves a bad file aside.
+  - A second call with a config equal to the active one now does nothing (it
+    was an error). A different config is still an error.
+  - Each temporal vector index now adds its own pre-anchor hook. Before, each
+    enable replaced the hooks of the other indexes.
+  - New API: `AletheiaDB::temporal_vector_snapshot_count` and
+    `AletheiaDB::create_temporal_vector_snapshot`.
+
 - Adjacency compaction could tear a concurrent read (Issue #3810). It retired
   the delta entries **before** publishing the CSR that absorbed them, so a
   reader landing in that window got an adjacency list missing those edges — an
@@ -88,6 +103,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a phantom edge to node 0 instead of being dropped.
 
 ### Changed
+
+- Dependency upgrades for security advisories (`cargo audit`: 43 -> 0).
+  - `autumn-web` 0.6 -> 0.11 (`aletheia-server`, `autumn-spike`; MSRV of
+    those two crates is now 1.97). This removes `jsonwebtoken` 10, `p256`
+    0.13 and `crypto-bigint` 0.5.
+  - Vendored `docx-rust` 0.1.8 (with `zip` 9) and `processors-rs` 0.7.1
+    (with `pdf-extract` 0.12 / `lopdf` 0.42) under `vendor/`, used through
+    `[patch.crates-io]`. Upstream pins blocked both fixes. Only the optional
+    `embeddings` features reach them.
+  - `rmcp` 2.1 -> 3.12 (MCP server). The handler uses `ServerConfig` and
+    returns `CallToolResponse`. The tool behavior does not change.
+  - `embed_anything` 0.6.7 -> 0.7.1 and `candle-*` -> 0.11.1 (optional
+    `embeddings` features). candle now uses `zip` 9.
+  - In-range updates: `rustls`, `rustls-webpki`, `webpki-roots`,
+    `webpki-root-certs`, `quinn-proto`, `quinn-udp`, `url`, `zstd`,
+    `zstd-safe`, `zstd-sys`, `pulldown-cmark`, `ctutils`.
+  - The Python 3.9 wheel test runs on `ubuntu-24.04`. `ubuntu-latest`
+    (26.04) has no Python 3.9 build.
 
 - **BEHAVIORAL:** WAL appends can now fail instead of blocking indefinitely
   (Issue #3798). When a stripe ring buffer stays full for

@@ -1856,14 +1856,72 @@ impl CurrentStorage {
 
         // Create temporal vector index wrapped in Arc for sharing
         let index = Arc::new(TemporalVectorIndex::new(config.clone())?);
+        self.install_temporal_vector_index(property_name, index, config)
+    }
 
-        // Insert into multi-property DashMap
-        self.temporal_vector_indexes.insert(
-            property_name.to_string(),
-            TemporalVectorIndexEntry { index, config },
-        );
+    /// Register a temporal vector index that the caller built (for example,
+    /// one filled from history). Writes reach the index only after this call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a temporal vector index is already enabled for the
+    /// property.
+    pub(crate) fn install_temporal_vector_index(
+        &self,
+        property_name: &str,
+        index: Arc<TemporalVectorIndex>,
+        config: TemporalVectorConfig,
+    ) -> Result<()> {
+        match self
+            .temporal_vector_indexes
+            .entry(property_name.to_string())
+        {
+            Entry::Occupied(_) => Err(crate::core::error::Error::Vector(
+                crate::core::error::VectorError::IndexError(format!(
+                    "Temporal vector index is already enabled for property '{property_name}'"
+                )),
+            )),
+            Entry::Vacant(vacant) => {
+                vacant.insert(TemporalVectorIndexEntry { index, config });
+                Ok(())
+            }
+        }
+    }
 
-        Ok(())
+    /// Get the config of the temporal vector index of a property.
+    ///
+    /// Returns `None` if no temporal vector index is enabled for the property.
+    pub(crate) fn get_temporal_vector_config_for(
+        &self,
+        property_name: &str,
+    ) -> Option<TemporalVectorConfig> {
+        self.temporal_vector_indexes
+            .get(property_name)
+            .map(|entry| entry.config.clone())
+    }
+
+    /// Remove the temporal vector index of a property (used to undo a failed
+    /// enable). Returns `true` if an index was removed.
+    pub(crate) fn remove_temporal_vector_index(&self, property_name: &str) -> bool {
+        self.temporal_vector_indexes.remove(property_name).is_some()
+    }
+
+    /// Remove the current-state vector index of a property (used to undo a
+    /// failed enable). Returns `true` if an index was removed.
+    pub(crate) fn remove_vector_index(&self, property_name: &str) -> bool {
+        self.vector_indexes.remove(property_name).is_some()
+    }
+
+    /// Get the `property_name` vector of each current node that has one.
+    pub(crate) fn node_vectors(&self, property_name: &str) -> Vec<(NodeId, Arc<[f32]>)> {
+        self.all_nodes()
+            .filter_map(|node| match node.properties.get(property_name) {
+                Some(crate::core::property::PropertyValue::Vector(v)) => {
+                    Some((node.id, Arc::clone(v)))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Check if temporal vector indexing is enabled for any property.

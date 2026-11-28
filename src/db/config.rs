@@ -1735,6 +1735,13 @@ impl AletheiaDB {
                 crate::db::schema_constraint::load_sidecar(path, &db.constraint_registry);
             }
 
+            // Temporal vector indexes (Issue #3888): enable again each index
+            // that the sidecar records and rebuild its snapshots from history.
+            // This must come after WAL replay, index load, and the cold-tier
+            // wiring, so history and current state are complete. A failed
+            // entry gives a warning; open continues.
+            db.restore_temporal_vector_indexes();
+
             // Drift monitors (Issue #3367): if the sidecar was quarantined at
             // open, reseed `next_id` above any orphaned `__drift_alarm` node's
             // `monitor_id` now that index/WAL load has made alarm nodes

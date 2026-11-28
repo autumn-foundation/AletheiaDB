@@ -136,8 +136,9 @@ use chrono::{DateTime, Utc};
 use rmcp::{
     ErrorData as RmcpErrorData, ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResult, ContentBlock, Implementation, ListToolsResult,
-        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+        ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig,
+        Tool,
     },
     service::{RequestContext, RoleServer},
 };
@@ -12375,8 +12376,8 @@ const BUDGET_TOOL_HINT: &str = " Optional token budget (Issue #3353): pass \
     unchanged (row-limit) behavior.";
 
 impl ServerHandler for AletheiaMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
@@ -12391,18 +12392,14 @@ impl ServerHandler for AletheiaMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, RmcpErrorData> {
-        Ok(ListToolsResult {
-            tools: tool_definitions(),
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListToolsResult::with_all_items(tool_definitions()))
     }
 
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, RmcpErrorData> {
+    ) -> Result<CallToolResponse, RmcpErrorData> {
         let args = request
             .arguments
             .map(serde_json::Value::Object)
@@ -12417,12 +12414,12 @@ impl ServerHandler for AletheiaMcpServer {
         // here to mirror `dispatch_tool`.
         if request.name.as_ref() == "await_changes" {
             if let Err(err) = self.auth.authorize_tool("await_changes") {
-                return Ok(self.error_result(err));
+                return Ok(self.error_result(err).into());
             }
-            return Ok(self.dispatch_await_changes_async(args, None).await);
+            return Ok(self.dispatch_await_changes_async(args, None).await.into());
         }
 
-        Ok(self.dispatch_tool(request.name.as_ref(), args))
+        Ok(self.dispatch_tool(request.name.as_ref(), args).into())
     }
 }
 

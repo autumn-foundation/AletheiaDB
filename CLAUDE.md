@@ -222,7 +222,13 @@ let similar = db.find_similar(node_id, 10)?;
 
 **Key Features:**
 - Multi-property vector indexes (multiple embeddings per database)
-- Temporal vector indexes (track embedding evolution over time)
+- Temporal vector indexes (track embedding evolution over time). When you
+  enable the index, it builds its snapshots from history, so it covers old
+  data. With index persistence, `{data_dir}/indexes/temporal_vector_indexes.dat`
+  records the config, and a reopen rebuilds the index from history. If you
+  enable the index again with the same config, nothing changes.
+  `max_snapshots` sets how far back an as-of search goes (Issue #3888,
+  ADR-0062).
 - Semantic drift tracking (detect knowledge changes)
 - Full bi-temporal versioning
 
