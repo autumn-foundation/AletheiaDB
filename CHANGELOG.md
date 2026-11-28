@@ -72,6 +72,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SECURITY:** `cargo audit` is clean with no ignores (was 43 advisories plus
+  4 ignores).
+  - Bumped: rmcp 2.1 -> 3.12, embed_anything 0.6.7 -> 0.7.1,
+    candle 0.9/0.10 -> 0.11.1, and autumn-web 0.6 -> 0.11 in
+    `aletheia-server` and the spike. autumn-web 0.11 makes `jsonwebtoken`
+    optional, so `rsa` and `crypto-bigint` 0.5 are gone. `aletheia-server`
+    now needs Rust 1.97.
+  - Semver bumps: quinn, rustls, rustls-webpki, url, webpki-roots, zstd,
+    pulldown-cmark, ctutils.
+  - Vendored with a minimal patch (`[patch.crates-io]`, see `vendor/`):
+    docx-rust 0.1.8 on zip 9, and processors-rs 0.7.1 on pdf-extract 0.12
+    (lopdf 0.42). Upstream pins kept them on vulnerable versions.
 - **DURABILITY:** a commit that failed after its WAL append could come back
   after a restart (Issue #3799, ADR-0062). The frame could still reach disk,
   and recovery replayed it, although the caller got an error. Now, when the
