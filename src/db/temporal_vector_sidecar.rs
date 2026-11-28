@@ -411,6 +411,21 @@ mod tests {
     }
 
     #[test]
+    fn large_sidecar_loads() {
+        // Many entries with long names: the file is larger than a few KiB
+        // but well under the size limit, so it must load.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SIDECAR_FILE);
+        let config = configs().remove(0);
+        for i in 0..40 {
+            let name = format!("{i:03}{}", "p".repeat(200));
+            upsert_entry(&path, PersistedEntry::new(&name, &config).unwrap()).unwrap();
+        }
+        assert!(std::fs::metadata(&path).unwrap().len() > 8 * 1024);
+        assert_eq!(load_entries(&path).len(), 40);
+    }
+
+    #[test]
     fn missing_file_gives_no_entries() {
         let dir = tempfile::tempdir().unwrap();
         assert!(load_entries(&dir.path().join(SIDECAR_FILE)).is_empty());
