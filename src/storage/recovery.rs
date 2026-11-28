@@ -1824,6 +1824,21 @@ mod framing_tests {
         );
     }
 
+    /// Issue #3799: an aborted torn band at the end of the input is counted.
+    /// The abort record comes first, so no later record closes the band.
+    #[test]
+    fn drop_aborted_frames_counts_torn_band_at_end_of_input() {
+        let mut entries = band(1, 7, &[1], 100); // 1 data op, LSN 1..=3
+        entries.push(abort(4, 7, 1));
+        entries.push(abort(5, 8, 6));
+        entries.push(framed(6, WalOperation::BeginTx { tx_id: 8 }, ts(101)));
+        entries.push(framed(7, create_node_op(2), ts(101)));
+        entries.push(framed(8, create_node_op(3), ts(101)));
+        let (kept, dropped) = drop_aborted_frames_counted(entries);
+        assert!(kept.is_empty());
+        assert_eq!(dropped, 3);
+    }
+
     /// Issue #3799: an aborted band that is torn (no `CommitTx`) is dropped up
     /// to the next band start; the next band stays intact.
     #[test]
