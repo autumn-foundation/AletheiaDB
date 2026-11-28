@@ -33,23 +33,40 @@ every version, so the data to rebuild the index is on disk.
    atomic write). At open, after recovery, the database enables each recorded
    index again (with backfill). A bad file is quarantined. Save merges with
    the file, so a failed restore does not delete an entry.
-6. **Idempotent enable.** Enable with an equal config is a no-op. A different
-   config is an error.
+6. **Idempotent enable.** If the config is equal to the active config, the
+   enable does nothing. A different config is an error. If the caller gives
+   no HNSW config, the enable compares with the active HNSW config.
 7. **Current-state index.** If no vector index exists for the property,
    enable uses `rebuild_vector_index` (enable + backfill from current nodes).
+8. **Install after fill.** The enable fills a detached index, then installs
+   it. A commit that ends late cannot make a snapshot during the fill. If a
+   step fails, the enable removes the indexes that it created.
+9. **One hook for each index.** Each index appends its own pre-anchor hook.
 
 ## Consequences
 
 - As-of vector search survives a reopen, and an index enabled on old data
   covers its past.
 - Open time grows with the hot history size of each temporal index.
-- History in the cold tier is not read. Only hot history is replayed.
+- History in the cold tier is not read. Only hot history is replayed. A
+  change point in the cold tier, or a version that cannot be rebuilt, is
+  skipped and counted in a warning. The previous value stays.
+- A live snapshot at an anchor time `t` holds the state before the write at
+  `t`. A rebuilt snapshot at `t` holds the state after it. Thus an as-of
+  search at exactly a commit time can give a different result before and
+  after a reopen.
+- Rebuilt snapshots use commit timestamps. Live snapshots from
+  `on_transaction` use the wall clock. If the commit clock is ahead of the
+  wall clock, a later live snapshot can sort before a rebuilt one.
+- The sidecar is not in the `.albk` backup. A restore does not restore the
+  config. (The current-state vector index configs are not in `.albk` either.)
 - A config with a custom metric is not persisted (a closure cannot be stored).
 - `TemporalVectorConfig` defaults are unchanged. `max_snapshots` still limits
   how far back an as-of search can go. Use a larger value for long history.
 
 ## Rejected alternatives
 
-- **Persist HNSW snapshots.** A large new format that must follow WAL,
-  encryption, and key rotation. Possible later, to make open faster.
-- **Keep all snapshots by default.** Memory has no limit for all users.
+- **Persist HNSW snapshots.** This needs a large new file format. The format
+  must agree with the WAL, encryption, and key rotation. We can add it later
+  to make open faster.
+- **Keep all snapshots by default.** Memory use has no limit.

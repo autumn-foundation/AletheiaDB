@@ -79,8 +79,9 @@ pub struct TemporalVectorConfig {
     ///
     /// This limit also sets how far back an as-of search can go. A search
     /// before the oldest snapshot gives no hits. For long history, set a
-    /// larger value. The rebuild from history (Issue #3888) also keeps only
-    /// the newest `max_snapshots` vector changes.
+    /// larger value. The rebuild from history (Issue #3888) also makes
+    /// snapshots for only the newest `max_snapshots` commits that change a
+    /// vector.
     pub max_snapshots: usize,
 
     /// Interval for creating full snapshots (default: 10)

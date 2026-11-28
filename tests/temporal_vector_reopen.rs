@@ -232,30 +232,119 @@ fn corrupt_sidecar_is_quarantined() {
 /// Enable during concurrent commits: no vector is lost or added two times.
 #[test]
 fn enable_during_concurrent_writes_loses_nothing() {
-    let db = std::sync::Arc::new(AletheiaDB::new().unwrap());
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let db = Arc::new(AletheiaDB::new().unwrap());
+    let committed = Arc::new(AtomicUsize::new(0));
     let writer = {
-        let db = std::sync::Arc::clone(&db);
+        let db = Arc::clone(&db);
+        let committed = Arc::clone(&committed);
         std::thread::spawn(move || {
-            (0..200)
+            (0..400)
                 .map(|i| {
-                    db.create_node(
-                        "Doc",
-                        PropertyMapBuilder::new()
-                            .insert_vector("embedding", &[1.0, i as f32 / 200.0])
-                            .build(),
-                    )
-                    .unwrap()
+                    let id = db
+                        .create_node(
+                            "Doc",
+                            PropertyMapBuilder::new()
+                                .insert_vector("embedding", &[1.0, i as f32 / 400.0])
+                                .build(),
+                        )
+                        .unwrap();
+                    committed.fetch_add(1, Ordering::SeqCst);
+                    id
                 })
                 .collect::<BTreeSet<NodeId>>()
         })
     };
-    std::thread::sleep(std::time::Duration::from_millis(5));
+    // Enable while the writer is in the middle of its commits.
+    while committed.load(Ordering::SeqCst) < 50 {
+        std::thread::yield_now();
+    }
     db.enable_temporal_vector_index("embedding", keep_all())
         .unwrap();
+    let during = committed.load(Ordering::SeqCst);
     let written = writer.join().unwrap();
+    assert!(during < 400, "the enable must overlap the writes");
 
     db.create_temporal_vector_snapshot("embedding").unwrap();
     assert_eq!(ids_at(&db, time::now()), written);
+}
+
+/// Equal-config enable after reopen is a no-op, also when the caller gives no
+/// HNSW config and the vector index has non-default fields.
+#[test]
+fn temporal_only_config_is_a_no_op_after_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let hnsw = hnsw().with_capacity(100);
+    {
+        let db = AletheiaDB::open(dir.path()).unwrap();
+        db.enable_vector_index("embedding", hnsw).unwrap();
+        db.enable_temporal_vector_index("embedding", TemporalVectorConfig::default_temporal_only())
+            .unwrap();
+        db.persist_indexes().unwrap();
+    }
+    let db = AletheiaDB::open(dir.path()).unwrap();
+    assert!(db.is_temporal_vector_index_enabled());
+    db.enable_temporal_vector_index("embedding", TemporalVectorConfig::default_temporal_only())
+        .expect("same config is a no-op");
+}
+
+/// Two temporal properties: both are restored, and both get new snapshots
+/// after the reopen.
+#[test]
+fn two_properties_survive_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let both = || {
+        PropertyMapBuilder::new()
+            .insert_vector("a", &[1.0, 0.0])
+            .insert_vector("b", &[0.0, 1.0])
+            .build()
+    };
+    let t1 = {
+        let db = AletheiaDB::open(dir.path()).unwrap();
+        db.enable_temporal_vector_index("a", keep_all()).unwrap();
+        db.enable_temporal_vector_index("b", keep_all()).unwrap();
+        db.create_node("Doc", both()).unwrap();
+        time::now()
+    };
+    let db = AletheiaDB::open(dir.path()).unwrap();
+    let mut names = db.list_temporal_vector_indexes();
+    names.sort();
+    assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
+    for p in ["a", "b"] {
+        let hits = db.find_similar_as_of_in(p, &[1.0, 1.0], 10, t1).unwrap();
+        assert_eq!(hits.len(), 1, "property {p}");
+    }
+
+    let before = (
+        db.temporal_vector_snapshot_count("a").unwrap(),
+        db.temporal_vector_snapshot_count("b").unwrap(),
+    );
+    // A new node is an anchor. Each index makes a snapshot for it.
+    db.create_node("Doc", both()).unwrap();
+    assert!(db.temporal_vector_snapshot_count("a").unwrap() > before.0);
+    assert!(db.temporal_vector_snapshot_count("b").unwrap() > before.1);
+}
+
+/// A failed enable leaves no index behind.
+#[test]
+fn failed_enable_rolls_back() {
+    let db = AletheiaDB::new().unwrap();
+    // A vector with the wrong dimension stops the current-state fill.
+    db.create_node(
+        "Doc",
+        PropertyMapBuilder::new()
+            .insert_vector("embedding", &[1.0, 0.0, 0.0])
+            .build(),
+    )
+    .unwrap();
+    assert!(
+        db.enable_temporal_vector_index("embedding", keep_all())
+            .is_err()
+    );
+    assert!(!db.is_vector_index_enabled_for("embedding"));
+    assert!(!db.is_temporal_vector_index_enabled());
 }
 
 #[derive(Debug, Clone)]

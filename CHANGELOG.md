@@ -74,16 +74,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The temporal vector index survives a reopen (Issue #3888, ADR-0062).
   - `enable_temporal_vector_index` builds the snapshots from historical
-    storage, so as-of vector search also covers data written before the
-    enable. If no vector index exists, the enable fills one from current nodes.
-  - With index persistence, the config goes to
+    storage. Thus as-of vector search also covers data that was written
+    before the call. If no vector index exists, the call fills one from
+    current nodes. If the call fails, it removes the indexes that it created.
+  - With index persistence, the database writes the config to
     `{data_dir}/indexes/temporal_vector_indexes.dat`. A reopen enables the
-    index again and rebuilds it. A bad file is quarantined.
-  - Enable with a config equal to the active one is now a no-op (it was an
-    error). A different config is still an error.
-  - New API: `AletheiaDB::temporal_vector_snapshot_count`,
-    `AletheiaDB::create_temporal_vector_snapshot`,
-    `HistoricalStorage::node_vector_changes`, `TemporalVectorIndex::backfill`.
+    index again and rebuilds it. The database moves a bad file aside.
+  - A second call with a config equal to the active one now does nothing (it
+    was an error). A different config is still an error.
+  - Each temporal vector index now adds its own pre-anchor hook. Before, each
+    enable replaced the hooks of the other indexes.
+  - New API: `AletheiaDB::temporal_vector_snapshot_count` and
+    `AletheiaDB::create_temporal_vector_snapshot`.
 
 - Adjacency compaction could tear a concurrent read (Issue #3810). It retired
   the delta entries **before** publishing the CSR that absorbed them, so a

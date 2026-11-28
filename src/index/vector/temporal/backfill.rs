@@ -16,24 +16,24 @@ use crate::index::vector::VectorIndex;
 
 /// One change to the vector of one node, read from history.
 #[derive(Debug, Clone, PartialEq)]
-pub struct VectorChange {
+pub(crate) struct VectorChange {
     /// Commit (transaction) time of the change.
-    pub at: Timestamp,
+    pub(crate) at: Timestamp,
     /// The node that changed.
-    pub node: NodeId,
+    pub(crate) node: NodeId,
     /// The vector after the change. `None` means the node has no vector.
-    pub vector: Option<Arc<[f32]>>,
+    pub(crate) vector: Option<Arc<[f32]>>,
 }
 
 /// The result of a backfill.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct BackfillReport {
+pub(crate) struct BackfillReport {
     /// Number of changes replayed.
-    pub changes: usize,
+    pub(crate) changes: usize,
     /// Number of snapshots created.
-    pub snapshots: usize,
+    pub(crate) snapshots: usize,
     /// Number of vectors skipped (wrong dimension, NaN, or infinity).
-    pub skipped: usize,
+    pub(crate) skipped: usize,
 }
 
 impl TemporalVectorIndex {
@@ -55,7 +55,7 @@ impl TemporalVectorIndex {
     ///
     /// Returns an error if the index is not new (it has vectors or snapshots),
     /// or if a snapshot build fails.
-    pub fn backfill(
+    pub(crate) fn backfill(
         &self,
         mut changes: Vec<VectorChange>,
         live: impl IntoIterator<Item = (NodeId, Arc<[f32]>)>,
@@ -74,10 +74,10 @@ impl TemporalVectorIndex {
         changes.sort_by_key(|c| c.at);
         report.changes = changes.len();
 
-        let commits = changes.chunk_by(|a, b| a.at == b.at).count();
-        let first_snapshot = commits.saturating_sub(self.config.max_snapshots);
+        let commits: Vec<&[VectorChange]> = changes.chunk_by(|a, b| a.at == b.at).collect();
+        let first_snapshot = commits.len().saturating_sub(self.config.max_snapshots);
 
-        for (i, commit) in changes.chunk_by(|a, b| a.at == b.at).enumerate() {
+        for (i, commit) in commits.into_iter().enumerate() {
             {
                 let mut state = self.current_state.write();
                 for change in commit {
@@ -103,7 +103,7 @@ impl TemporalVectorIndex {
     /// Fail if this index has vectors or snapshots.
     fn ensure_new(&self) -> Result<()> {
         let has_snapshots = self.snapshot_data.read().len() > 0;
-        let has_vectors = !self.current_state.read().vectors.is_empty() || self.current.len() > 0;
+        let has_vectors = !self.current_state.read().vectors.is_empty() || !self.current.is_empty();
         if has_snapshots || has_vectors {
             return Err(VectorError::IndexError(
                 "Backfill needs a new temporal vector index".to_string(),

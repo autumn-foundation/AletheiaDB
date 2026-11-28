@@ -7,7 +7,7 @@
 //! `(valid = MAX_VALID_TIMESTAMP, tx = c)`:
 //!
 //! - A normal or backdated update leaves an open head with the new content.
-//! - A backfill update re-asserts the open head, so the content stays.
+//! - A backfill update keeps the open head, so the content stays.
 //! - Structural carry-forward versions have a closed valid interval, so they
 //!   are not visible at the far-future valid time.
 //! - Delete and retract leave no open head, so the read gives "no vector".
@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use super::HistoricalStorage;
-use crate::core::error::Result;
 use crate::core::hlc::HybridTimestamp;
 use crate::core::id::NodeId;
 use crate::core::property::PropertyValue;
@@ -23,17 +22,30 @@ use crate::core::temporal::{MAX_VALID_TIMESTAMP, Timestamp};
 use crate::core::version::FastHashMap;
 use crate::index::vector::temporal::VectorChange;
 
+/// The vector timeline of one property, read from hot history.
+#[derive(Debug, Default)]
+pub(crate) struct VectorTimeline {
+    /// One entry for each commit that changed the vector of a node. Not sorted.
+    pub(crate) changes: Vec<VectorChange>,
+    /// Number of change points that could not be read (the version is in the
+    /// cold tier, or its properties cannot be rebuilt). The previous value is
+    /// kept for these points.
+    pub(crate) unreadable: usize,
+}
+
+/// The vector of a node at one commit.
+enum Probe {
+    Known(Option<Arc<[f32]>>),
+    Unknown,
+}
+
 impl HistoricalStorage {
     /// Get each change to the `property` vector of each node, from hot history.
     ///
-    /// The result has one entry for each commit that changed the vector of a
-    /// node. `vector: None` means the node has no vector after that commit.
-    /// The result is not sorted. Versions in the cold tier are not read.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the properties of a version cannot be rebuilt.
-    pub fn node_vector_changes(&self, property: &str) -> Result<Vec<VectorChange>> {
+    /// `vector: None` in a change means the node has no vector after that
+    /// commit. A change point that cannot be read is counted in
+    /// [`VectorTimeline::unreadable`] and does not stop the read.
+    pub(crate) fn node_vector_changes(&self, property: &str) -> VectorTimeline {
         let mut commits: FastHashMap<NodeId, Vec<Timestamp>> = FastHashMap::default();
         for version in self.node_versions.values() {
             commits
@@ -42,24 +54,21 @@ impl HistoricalStorage {
                 .push(version.commit_timestamp);
         }
 
-        let far_valid = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
-        let mut changes = Vec::new();
+        let mut timeline = VectorTimeline::default();
         for (node, mut times) in commits {
             times.sort_unstable();
             times.dedup();
             let mut previous: Option<Arc<[f32]>> = None;
             for at in times {
-                let vector = match self.find_node_version_at_time(node, far_valid, at) {
-                    Some(version_id) => {
-                        match self.reconstruct_node_properties(version_id)?.get(property) {
-                            Some(PropertyValue::Vector(v)) => Some(Arc::clone(v)),
-                            _ => None,
-                        }
+                let vector = match self.probe_vector(node, at, property) {
+                    Probe::Known(vector) => vector,
+                    Probe::Unknown => {
+                        timeline.unreadable += 1;
+                        continue;
                     }
-                    None => None,
                 };
                 if vector != previous {
-                    changes.push(VectorChange {
+                    timeline.changes.push(VectorChange {
                         at,
                         node,
                         vector: vector.clone(),
@@ -68,7 +77,34 @@ impl HistoricalStorage {
                 }
             }
         }
-        Ok(changes)
+        timeline
+    }
+
+    /// Read the `property` vector of `node` as current storage held it after
+    /// the commit at `at`.
+    fn probe_vector(&self, node: NodeId, at: Timestamp, property: &str) -> Probe {
+        let far_valid = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP, 0);
+        let Some(version_id) = self.find_node_version_at_time(node, far_valid, at) else {
+            // A visible version that is not in hot storage is in the cold
+            // tier. Its content is unknown, not absent.
+            let in_cold = self.temporal_indexes.as_ref().is_some_and(|indexes| {
+                indexes
+                    .find_node_version_at_point_iter(node, far_valid, at)
+                    .any(|id| !self.node_versions.contains_key(&id))
+            });
+            return if in_cold {
+                Probe::Unknown
+            } else {
+                Probe::Known(None)
+            };
+        };
+        match self.reconstruct_node_properties(version_id) {
+            Ok(properties) => match properties.get(property) {
+                Some(PropertyValue::Vector(v)) => Probe::Known(Some(Arc::clone(v))),
+                _ => Probe::Known(None),
+            },
+            Err(_) => Probe::Unknown,
+        }
     }
 }
 
@@ -90,7 +126,7 @@ mod tests {
             .historical
             .read()
             .node_vector_changes("embedding")
-            .unwrap();
+            .changes;
         changes.sort_by_key(|c| c.at);
         changes
             .into_iter()

@@ -8,7 +8,9 @@ use crate::db::AletheiaDB;
 use crate::db::similarity_query::{SimilarityQuery, SimilaritySource};
 use crate::db::vector_builder::VectorIndexBuilder;
 use crate::index::vector::hnsw::HnswConfig;
-use crate::index::vector::temporal::{TemporalVectorConfig, VectorIndexObserver};
+use crate::index::vector::temporal::{
+    TemporalVectorConfig, TemporalVectorIndex, VectorIndexObserver,
+};
 use std::sync::Arc;
 
 impl AletheiaDB {
@@ -124,19 +126,20 @@ impl AletheiaDB {
     ///
     /// # History and reopen (Issue #3888, ADR-0062)
     ///
-    /// - The enable builds the snapshots from historical storage, so the
-    ///   index also covers data written before the enable.
-    /// - If no vector index exists for the property, the enable creates one
+    /// - This call builds the snapshots from historical storage. Thus the
+    ///   index also covers data that was written before this call.
+    /// - If no vector index exists for the property, this call creates one
     ///   and fills it from current nodes (see
     ///   [`rebuild_vector_index`](Self::rebuild_vector_index)).
-    /// - With index persistence, the config goes to a sidecar file. A reopen
-    ///   enables the index again and rebuilds it from history.
-    /// - Enable with a config equal to the active one is a no-op.
-    /// - Only the newest `max_snapshots` vector changes get a snapshot. Use a
-    ///   larger `max_snapshots` to search further back.
+    /// - With index persistence, this call writes the config to a sidecar
+    ///   file. A reopen enables the index again and rebuilds it from history.
+    /// - If the config is equal to the active config, this call does nothing.
+    /// - Only the newest `max_snapshots` commits that change a vector get a
+    ///   snapshot. To search further back, use a larger `max_snapshots`.
+    /// - If this call fails, it removes the indexes that it created.
     ///
-    /// Commits wait while the enable runs. The time grows with the hot
-    /// history size.
+    /// Commits wait while this call runs. The duration increases with the
+    /// size of hot history.
     ///
     /// # Arguments
     ///
@@ -183,18 +186,36 @@ impl AletheiaDB {
     ) -> Result<()> {
         use crate::core::error::{Error, VectorError};
 
+        #[cfg(feature = "observability")]
+        let _span =
+            crate::observability::vector_index_span("enable_temporal_vector_index", property_name)
+                .entered();
+
+        // Hold the commit guard for the full enable. No commit can run
+        // between the history read and the install, so no change is lost or
+        // applied two times.
+        let mut historical = self.historical.write();
+
+        if let Some(active) = self.current.get_temporal_vector_config_for(property_name) {
+            // No HNSW config from the caller means "use the active one".
+            let requested = TemporalVectorConfig {
+                hnsw_config: config.hnsw_config.clone().or(active.hnsw_config.clone()),
+                ..config
+            };
+            if active == requested {
+                return Ok(());
+            }
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Temporal vector index is already enabled for property '{property_name}' \
+                 with a different configuration"
+            ))));
+        }
+
         // Use the given HNSW config, or the config of the existing vector index.
         let resolved_hnsw_config = if let Some(hnsw_config) = config.hnsw_config.clone() {
             hnsw_config
-        } else if self.current.is_vector_index_enabled_for(property_name) {
-            self.current
-                .get_hnsw_config_for(property_name)
-                .ok_or_else(|| {
-                    Error::Vector(VectorError::IndexError(format!(
-                        "Vector index exists for '{}' but could not retrieve its configuration",
-                        property_name
-                    )))
-                })?
+        } else if let Some(existing) = self.current.get_hnsw_config_for(property_name) {
+            existing
         } else {
             return Err(Error::Vector(VectorError::IndexError(
                 "HNSW configuration is required when no vector index exists. \
@@ -208,71 +229,65 @@ impl AletheiaDB {
             ..config
         };
 
-        #[cfg(feature = "observability")]
-        let _span =
-            crate::observability::vector_index_span("enable_temporal_vector_index", property_name)
-                .entered();
-
-        // Hold the commit guard: no commit can run between the history read
-        // and the hook registration, so no change is lost or applied twice.
-        let mut historical = self.historical.write();
-
-        if let Some(active) = self.current.get_temporal_vector_config_for(property_name) {
-            if active == resolved_config {
-                return Ok(());
-            }
-            return Err(Error::Vector(VectorError::IndexError(format!(
-                "Temporal vector index is already enabled for property '{}' \
-                 with a different configuration",
-                property_name
-            ))));
-        }
-
         // An empty current-state index would later overwrite good persisted
         // files, so fill it from current nodes.
-        if !self.current.is_vector_index_enabled_for(property_name) {
-            self.current
-                .rebuild_vector_index(property_name, resolved_hnsw_config)?;
-            if let Some(ref tracker) = self.persistence_tracker {
-                tracker.record_vector_mutation();
+        let created_vector_index = !self.current.is_vector_index_enabled_for(property_name);
+
+        let installed = (|| {
+            if created_vector_index {
+                self.current
+                    .rebuild_vector_index(property_name, resolved_hnsw_config)?;
             }
-        }
 
-        self.current
-            .enable_temporal_vector_index(property_name, resolved_config.clone())?;
-        let temporal_index = self
-            .current
-            .get_temporal_vector_index_for(property_name)
-            .ok_or_else(|| {
-                Error::Vector(VectorError::IndexError(
-                    "Temporal vector index not found after enabling".to_string(),
-                ))
-            })?;
-
-        let filled = (|| {
-            let changes = historical.node_vector_changes(property_name)?;
+            // Fill a detached index. Writes reach it only after the install.
+            let temporal_index = Arc::new(TemporalVectorIndex::new(resolved_config.clone())?);
+            let timeline = historical.node_vector_changes(property_name);
             let live = self.current.node_vectors(property_name);
-            temporal_index.backfill(changes, live)?;
-            if persist {
-                self.persist_temporal_vector_config(property_name, &resolved_config)?;
+            let report = temporal_index.backfill(timeline.changes, live)?;
+            let skipped = report.skipped + timeline.unreadable;
+            if skipped > 0 {
+                crate::db::temporal_vector_sidecar::log_warning(&format!(
+                    "temporal vector index '{property_name}': {skipped} vectors or versions \
+                     were not usable and were skipped"
+                ));
             }
-            Ok::<(), Error>(())
+
+            self.current.install_temporal_vector_index(
+                property_name,
+                Arc::clone(&temporal_index),
+                resolved_config.clone(),
+            )?;
+            if persist
+                && let Err(e) = self.persist_temporal_vector_config(property_name, &resolved_config)
+            {
+                self.current.remove_temporal_vector_index(property_name);
+                return Err(e);
+            }
+            Ok::<_, Error>(temporal_index)
         })();
-        if let Err(e) = filled {
-            self.current.remove_temporal_vector_index(property_name);
-            return Err(e);
+        let temporal_index = match installed {
+            Ok(index) => index,
+            Err(e) => {
+                if created_vector_index {
+                    self.current.remove_vector_index(property_name);
+                }
+                return Err(e);
+            }
+        };
+        if created_vector_index && let Some(ref tracker) = self.persistence_tracker {
+            tracker.record_vector_mutation();
         }
 
         // Pre-anchor hooks keep vector snapshots in step with graph anchors.
-        // The node and edge hooks do the same action.
+        // Append them: each temporal index needs its own hook.
         let hook: crate::storage::historical::PreAnchorHook = {
             let index = Arc::clone(&temporal_index);
             Arc::new(move |_entity_type, _entity_id, timestamp, _properties| {
                 index.create_snapshot_for_anchor(timestamp)
             })
         };
-        historical.register_pre_node_anchor_hook(Arc::clone(&hook));
-        historical.register_pre_edge_anchor_hook(hook);
+        historical.add_pre_node_anchor_hook(Arc::clone(&hook));
+        historical.add_pre_edge_anchor_hook(hook);
         historical.add_observer(Arc::new(VectorIndexObserver::new(temporal_index)));
 
         Ok(())
@@ -452,15 +467,21 @@ impl AletheiaDB {
     /// or if the snapshot build fails.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn create_temporal_vector_snapshot(&self, property_name: &str) -> Result<()> {
-        let index = self
-            .current
+        #[cfg(feature = "observability")]
+        let _span = crate::observability::vector_index_span(
+            "create_temporal_vector_snapshot",
+            property_name,
+        )
+        .entered();
+        self.current
             .get_temporal_vector_index_for(property_name)
             .ok_or_else(|| {
                 crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
                     format!("No temporal vector index enabled for property '{property_name}'"),
                 ))
-            })?;
-        index.create_manual_snapshot().record_error_metric()
+            })
+            .and_then(|index| index.create_manual_snapshot())
+            .record_error_metric()
     }
 
     /// Create a builder for configuring a vector index on a property.

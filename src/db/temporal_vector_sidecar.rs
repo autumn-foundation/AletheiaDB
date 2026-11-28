@@ -184,6 +184,12 @@ impl PersistedEntry {
             PersistedRetention::KeepAll => RetentionPolicy::KeepAll,
             PersistedRetention::KeepN(n) => RetentionPolicy::KeepN(to_usize(n)?),
             PersistedRetention::KeepDuration { secs, nanos } => {
+                if nanos >= 1_000_000_000 {
+                    return Err(StorageError::CorruptedData(format!(
+                        "retention nanos {nanos} is not less than one second"
+                    ))
+                    .into());
+                }
                 RetentionPolicy::KeepDuration(Duration::new(secs, nanos))
             }
         };
@@ -280,8 +286,14 @@ pub(crate) fn load_entries(path: &Path) -> Vec<PersistedEntry> {
 ///
 /// Returns an error if the file cannot be written.
 pub(crate) fn upsert_entry(path: &Path, entry: PersistedEntry) -> Result<()> {
-    // A bad file was quarantined at open; if it is bad now, write a new one.
-    let mut entries = read_entries(path).unwrap_or_default();
+    // Keep a bad file for diagnosis, then write a new one.
+    let mut entries = match read_entries(path) {
+        Ok(entries) => entries,
+        Err(e) => {
+            quarantine(path, &e.to_string());
+            Vec::new()
+        }
+    };
     entries.retain(|e| e.property != entry.property);
     entries.push(entry);
     entries.sort_by(|a, b| a.property.cmp(&b.property));
@@ -422,6 +434,58 @@ mod tests {
         let mut entry = PersistedEntry::new("p", &configs()[0]).unwrap();
         entry.config.hnsw.metric = 200;
         assert!(entry.to_config().is_err());
+    }
+
+    #[test]
+    fn bad_retention_nanos_is_an_error() {
+        let mut entry = PersistedEntry::new("p", &configs()[2]).unwrap();
+        entry.config.retention = PersistedRetention::KeepDuration {
+            secs: u64::MAX,
+            nanos: 1_000_000_000,
+        };
+        assert!(entry.to_config().is_err());
+    }
+
+    #[test]
+    fn upsert_over_bad_file_keeps_it_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SIDECAR_FILE);
+        std::fs::write(&path, b"bad").unwrap();
+        upsert_entry(&path, PersistedEntry::new("a", &configs()[0]).unwrap()).unwrap();
+        assert_eq!(load_entries(&path).len(), 1);
+        let aside = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .any(|e| e.file_name().to_string_lossy().contains(".corrupt-"));
+        assert!(aside);
+    }
+
+    #[test]
+    fn failed_restore_keeps_entry_and_open_continues() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("indexes").join(SIDECAR_FILE);
+        {
+            let db = AletheiaDB::open(dir.path()).unwrap();
+            drop(db);
+        }
+        // `max_snapshots == 0` fails config validation at restore.
+        let bad = TemporalVectorConfig {
+            max_snapshots: 0,
+            ..configs().remove(0)
+        };
+        upsert_entry(&sidecar, PersistedEntry::new("p", &bad).unwrap()).unwrap();
+
+        let db = AletheiaDB::open(dir.path()).unwrap();
+        assert!(!db.is_temporal_vector_index_enabled());
+        assert_eq!(load_entries(&sidecar).len(), 1, "the entry stays");
+    }
+
+    #[test]
+    fn ephemeral_database_writes_no_sidecar() {
+        let db = AletheiaDB::new().unwrap();
+        assert!(sidecar_path(&db.persistence_config).is_none());
+        db.enable_temporal_vector_index("p", configs().remove(0))
+            .unwrap();
     }
 
     #[test]
