@@ -57,7 +57,7 @@ default-members = ["."]
 # `python/` and `fuzz/` are independent crates with their own manifests (the
 # Python wheels + cargo-fuzz workflows build them standalone); keep them OUT of
 # this workspace so those workflows still resolve.
-exclude = ["python", "fuzz"]
+exclude = ["python", "fuzz", "vendor"]
 
 [dependencies]
 # CLI shell completions (Issue #3619). `clap`/`clap_complete` drive
@@ -998,3 +998,12 @@ required-features = []
 name = "query_resource_limits"
 harness = false
 path = "benches/query_resource_limits.rs"
+
+# Vendored copies that fix RustSec advisories upstream has not fixed yet. Both
+# are reached only through the optional `embeddings` feature (embed_anything ->
+# processors-rs). See each vendor/*/Cargo.toml header for the change.
+# - docx-rust 0.1.8 with zip 9 (processors-rs pins docx-rust =0.1.8).
+# - processors-rs 0.7.1 with pdf-extract 0.12 (lopdf 0.42).
+[patch.crates-io]
+docx-rust = { path = "vendor/docx-rust" }
+processors-rs = { path = "vendor/processors-rs" }
