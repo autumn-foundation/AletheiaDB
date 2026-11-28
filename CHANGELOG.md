@@ -104,6 +104,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Dependency upgrades for security advisories (`cargo audit`: 43 -> 7).
+  - `rmcp` 2.1 -> 3.12 (MCP server). The handler uses `ServerConfig` and
+    returns `CallToolResponse`. The tool behavior does not change.
+  - `embed_anything` 0.6.7 -> 0.7.1 and `candle-*` -> 0.11.1 (optional
+    `embeddings` features). candle now uses `zip` 9.
+  - In-range updates: `rustls`, `rustls-webpki`, `webpki-roots`,
+    `webpki-root-certs`, `quinn-proto`, `quinn-udp`, `url`, `zstd`,
+    `zstd-safe`, `zstd-sys`, `pulldown-cmark`, `ctutils`.
+  - The Python 3.9 wheel test runs on `ubuntu-24.04`. `ubuntu-latest`
+    (26.04) has no Python 3.9 build.
+
 - **BEHAVIORAL:** WAL appends can now fail instead of blocking indefinitely
   (Issue #3798). When a stripe ring buffer stays full for
   `max_append_block_ms` (default 30s), the append returns a structured
