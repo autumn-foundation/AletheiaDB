@@ -2024,6 +2024,31 @@ mod tests {
         assert!(abort_record_on_disk(&wal));
     }
 
+    /// Issue #3799: `append_batch_and_commit` still returns the base LSN and,
+    /// in GroupCommit mode, the epoch to wait on.
+    #[test]
+    fn append_batch_and_commit_returns_base_lsn_and_epoch() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path()).with_durability_mode(
+            DurabilityMode::GroupCommit {
+                max_delay_ms: 2,
+                max_batch_size: 8,
+            },
+        );
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+        let first = wal.current_lsn();
+        let (base, epoch) = wal
+            .append_batch_and_commit(vec![create_test_operation(1), create_test_operation(2)])
+            .unwrap();
+        assert_eq!(base, Some(first));
+        let epoch = epoch.expect("GroupCommit returns an epoch");
+        wal.group_commit_coordinator()
+            .unwrap()
+            .wait_for_flush(epoch)
+            .unwrap();
+        assert_eq!(wal.read_from(LSN::initial()).unwrap().len(), 2);
+    }
+
     #[test]
     fn abort_record_is_not_confirmed_in_async_mode() {
         let dir = tempdir().unwrap();

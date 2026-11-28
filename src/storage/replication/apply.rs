@@ -682,6 +682,50 @@ mod tests {
         );
     }
 
+    /// Issue #3799: an abort record inside an open band ends the band and is
+    /// itself a complete boundary.
+    #[test]
+    fn boundary_at_abort_record_inside_open_frame() {
+        let entries = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 1 }, ts(10)),
+            framed(2, create_node_op(1), ts(11)),
+            framed(
+                3,
+                WalOperation::AbortTx {
+                    tx_id: 1,
+                    begin_lsn: LSN(1),
+                },
+                ts(12),
+            ),
+        ];
+        assert_eq!(last_complete_frame_boundary(&entries), Some(2));
+    }
+
+    /// Issue #3799: an abort whose band is in the same batch is not reported;
+    /// an abort whose begin LSN holds no `BeginTx` in the batch is.
+    #[test]
+    fn already_applied_aborts_matches_the_begin_marker_only() {
+        let abort_of = |lsn: u64| {
+            framed(
+                9,
+                WalOperation::AbortTx {
+                    tx_id: 1,
+                    begin_lsn: LSN(lsn),
+                },
+                ts(19),
+            )
+        };
+        let same_batch = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 1 }, ts(10)),
+            framed(2, create_node_op(1), ts(11)),
+            abort_of(1),
+        ];
+        assert!(already_applied_aborts(&same_batch).is_empty());
+        // The entry at the begin LSN is a data op, not a `BeginTx`.
+        let wrong_marker = vec![framed(1, create_node_op(1), ts(10)), abort_of(1)];
+        assert_eq!(already_applied_aborts(&wrong_marker), vec![LSN(1)]);
+    }
+
     /// Issue #3799: when a band and its abort record arrive in one batch, the
     /// replica does not apply the band.
     #[test]

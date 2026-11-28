@@ -1035,16 +1035,23 @@ pub(crate) fn aborted_band_keys(entries: &[WalEntry]) -> HashSet<(LSN, u64)> {
 /// op, or unframed entry. That entry stays (an abort record never stays). All other entries stay, in order. With no
 /// abort record, the input is returned as it is.
 pub(crate) fn drop_aborted_frames(entries: Vec<WalEntry>) -> Vec<WalEntry> {
+    drop_aborted_frames_counted(entries).0
+}
+
+/// [`drop_aborted_frames`], plus the number of dropped data ops (the markers
+/// and abort records are not counted).
+fn drop_aborted_frames_counted(entries: Vec<WalEntry>) -> (Vec<WalEntry>, usize) {
     if !entries
         .iter()
         .any(|e| matches!(e.operation, WalOperation::AbortTx { .. }))
     {
-        return entries;
+        return (entries, 0);
     }
     let aborted = aborted_band_keys(&entries);
     let mut kept = Vec::with_capacity(entries.len());
     // Ops dropped from the band that is open now, if any.
     let mut dropping: Option<usize> = None;
+    let mut total_dropped = 0;
 
     for entry in entries {
         if let Some(dropped) = dropping.as_mut() {
@@ -1062,6 +1069,7 @@ pub(crate) fn drop_aborted_frames(entries: Vec<WalEntry>) -> Vec<WalEntry> {
             if in_band {
                 if matches!(entry.operation, WalOperation::CommitTx { .. }) {
                     warn_discarded_frame("the frame has an AbortTx record", *dropped);
+                    total_dropped += *dropped;
                     dropping = None;
                 } else {
                     *dropped += 1;
@@ -1069,6 +1077,7 @@ pub(crate) fn drop_aborted_frames(entries: Vec<WalEntry>) -> Vec<WalEntry> {
                 continue;
             }
             warn_discarded_frame("the frame has an AbortTx record (torn frame)", *dropped);
+            total_dropped += *dropped;
             dropping = None;
         }
         if matches!(entry.operation, WalOperation::AbortTx { .. }) {
@@ -1085,8 +1094,9 @@ pub(crate) fn drop_aborted_frames(entries: Vec<WalEntry>) -> Vec<WalEntry> {
     }
     if let Some(dropped) = dropping {
         warn_discarded_frame("the frame has an AbortTx record (torn frame)", dropped);
+        total_dropped += dropped;
     }
-    kept
+    (kept, total_dropped)
 }
 
 /// Warn about a discarded (torn / uncommitted) transaction frame during replay.
@@ -1261,18 +1271,9 @@ fn resolve_transaction_frames(entries: Vec<WalEntry>) -> Vec<(WalOperation, Time
                 open_tx = None;
                 resolved.push((op, entry_ts));
             }
-            // `drop_aborted_frames` removed every abort record above. This arm
-            // is for match exhaustiveness: treat it as a band end.
-            WalOperation::AbortTx { .. } => {
-                if !pending.is_empty() {
-                    warn_discarded_frame(
-                        "AbortTx record encountered inside an open transaction frame",
-                        pending.len(),
-                    );
-                    pending.clear();
-                }
-                open_tx = None;
-            }
+            // Never reached: `drop_aborted_frames` (above) removed every abort
+            // record. The arm exists for match exhaustiveness only.
+            WalOperation::AbortTx { .. } => {}
             // A framed data op.
             op => {
                 if open_tx.is_some() {
@@ -1799,6 +1800,28 @@ mod framing_tests {
             .map(|e| e.lsn.0)
             .collect();
         assert_eq!(kept, vec![3, 6]);
+    }
+
+    /// Issue #3799: the drop count is the number of data ops removed, for
+    /// whole, torn, and trailing torn bands.
+    #[test]
+    fn drop_aborted_frames_counts_dropped_data_ops() {
+        let mut entries = band(1, 7, &[1, 2], 100); // 2 data ops, LSN 1..=4
+        entries.push(framed(5, WalOperation::BeginTx { tx_id: 8 }, ts(101)));
+        entries.push(framed(6, create_node_op(3), ts(101))); // torn: ends at LSN 7
+        entries.extend(band(7, 9, &[4], 102)); // LSN 7..=9, kept
+        entries.push(framed(10, WalOperation::BeginTx { tx_id: 10 }, ts(103)));
+        entries.push(framed(11, create_node_op(5), ts(103))); // trailing torn
+        entries.push(framed(12, create_node_op(6), ts(103)));
+        entries.push(abort(13, 7, 1));
+        entries.push(abort(14, 8, 5));
+        entries.push(abort(15, 10, 10));
+        let (kept, dropped) = drop_aborted_frames_counted(entries);
+        assert_eq!(dropped, 5);
+        assert_eq!(
+            kept.iter().map(|e| e.lsn.0).collect::<Vec<_>>(),
+            vec![7, 8, 9]
+        );
     }
 
     /// Issue #3799: an aborted band that is torn (no `CommitTx`) is dropped up

@@ -12441,6 +12441,62 @@ mod server_unit_tests {
         AletheiaMcpServer::new(Arc::new(AletheiaDB::new().expect("db init")))
     }
 
+    /// Issue #3799 (rmcp 3 upgrade): `tools/list` over the real protocol
+    /// returns every advertised tool, not an empty default list.
+    #[tokio::test]
+    async fn list_tools_over_the_protocol_returns_every_tool() {
+        use rmcp::ServiceExt;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 22);
+        let server = tokio::spawn(async move {
+            let running = make_server()
+                .serve(tokio::io::split(server_io))
+                .await
+                .expect("serve");
+            let _ = running.waiting().await;
+        });
+        let (client_read, mut client_write) = tokio::io::split(client_io);
+        let mut lines = BufReader::new(client_read).lines();
+        let mut send = async |frame: serde_json::Value| {
+            let mut line = frame.to_string();
+            line.push('\n');
+            client_write
+                .write_all(line.as_bytes())
+                .await
+                .expect("write");
+        };
+
+        send(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"}
+            }
+        }))
+        .await;
+        send(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).await;
+        send(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).await;
+
+        let listed = loop {
+            let line = lines.next_line().await.expect("read").expect("response");
+            let frame: serde_json::Value = serde_json::from_str(&line).expect("json");
+            if frame["id"] == 2 {
+                break frame;
+            }
+        };
+        let names: Vec<&str> = listed["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert_eq!(names.len(), super::tool_definitions().len(), "{listed}");
+        assert!(names.contains(&"get_node"), "{listed}");
+        server.abort();
+    }
+
     /// Configurable interner cap (finding 1): a REAL `create_node` whose property
     /// KEY tips the interner over must render as an actionable
     /// `FAILED_PRECONDITION` with `{resource,current,limit}` details naming

@@ -283,6 +283,12 @@ impl PersistSuspension {
     }
 }
 
+/// Whether a worker cycle writes the manifest (Issue #3799): only after an
+/// index was persisted, and never while the divergence fence is set.
+fn should_update_manifest(any_index_persisted: bool, fenced: bool) -> bool {
+    any_index_persisted && !fenced
+}
+
 /// Spawn a background thread for automatic index persistence.
 ///
 /// This thread periodically checks persistence policies and triggers index saves when:
@@ -411,7 +417,7 @@ pub(crate) fn spawn_background_persistence_thread(
                 // We use the safe LSN from tracker (min of component LSNs) to ensuring
                 // the manifest doesn't jump ahead of lagging components.
                 // Issue #3799: no manifest if the fence was set during the cycle.
-                if any_index_persisted && in_flight.diverged_lsn().is_none() {
+                if should_update_manifest(any_index_persisted, in_flight.diverged_lsn().is_some()) {
                     update_manifest(
                         &manager,
                         &historical,
@@ -460,6 +466,16 @@ pub(crate) fn spawn_background_persistence_thread(
 
 #[cfg(test)]
 mod tests {
+    /// Issue #3799: the manifest is written only after a persist, and never
+    /// under the divergence fence.
+    #[test]
+    fn manifest_update_needs_a_persist_and_no_fence() {
+        assert!(super::should_update_manifest(true, false));
+        assert!(!super::should_update_manifest(false, false));
+        assert!(!super::should_update_manifest(true, true));
+        assert!(!super::should_update_manifest(false, true));
+    }
+
     use super::*;
     use crate::core::error::{Error, StorageError};
 
