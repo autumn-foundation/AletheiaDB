@@ -819,6 +819,26 @@ pub(crate) fn apply_changes<'a>(
     Ok(historical)
 }
 
+/// Commit-time check that every buffered node vector fits its vector indexes
+/// (Issue #3799).
+///
+/// A bad vector (wrong dimension, NaN, infinity) used to fail inside
+/// `apply_changes`, after the WAL append. That now sets the divergence fence,
+/// which refuses all later writes. Thus check it here, before the append: the
+/// rejection then writes no frame. Reads only current storage.
+pub(super) fn detect_vector_index_violations(tx: &WriteTransaction) -> Result<()> {
+    use crate::api::transaction::BufferedWrite;
+
+    for write in tx.buffer.operations() {
+        if let BufferedWrite::CreateNode { properties, .. }
+        | BufferedWrite::UpdateNode { properties, .. } = write
+        {
+            tx.current.check_vectors_indexable(properties)?;
+        }
+    }
+    Ok(())
+}
+
 /// Test seam (Issue #3799): the armed apply failure for op `index`, if any.
 #[cfg(test)]
 fn injected_apply_failure(index: usize) -> Option<crate::core::error::Error> {

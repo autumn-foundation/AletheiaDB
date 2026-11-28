@@ -89,8 +89,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Issue #3413 did not add an abort record. Docs that said so are corrected.
 - **BEHAVIORAL:** after a failed `apply_changes`, the live state holds writes
   that the WAL disowns. Until the database is reopened, commits,
-  `persist_indexes`, and `backup` refuse with `FailedPrecondition`, and the
-  background persistence worker skips its cycles and the shutdown persist.
+  `persist_indexes`, `backup`, and encryption enable/disable refuse with
+  `FailedPrecondition`, and the background persistence worker skips its cycles
+  and the shutdown persist.
+- **BEHAVIORAL:** a node vector with a wrong dimension, NaN, or infinity is now
+  rejected before the WAL append (Issue #3799). Before, it failed during the
+  apply, after the frame was appended.
 - **On-disk format:** new WAL op tag 14 (`AbortTx`), no WAL version bump. Do
   not downgrade after a WAL holds the record: an older binary reads a final
   record as a torn tail and replays the aborted band.

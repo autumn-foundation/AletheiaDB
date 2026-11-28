@@ -404,18 +404,24 @@ Other error types keep their type. Their outcome goes to the WAL diagnostic
 log.
 
 **Fence.** After a failed `apply_changes`, the live state holds part of the
-frame. Commits, `persist_indexes`, and `backup` then refuse with
-`FailedPrecondition`. The background persistence worker skips its cycles and
-the shutdown persist. Reopen the database to clear the fence.
+frame. Commits, `persist_indexes`, `backup`, and encryption enable/disable then
+refuse with `FailedPrecondition`. The background persistence worker skips its
+cycles and the shutdown persist. Reopen the database to clear the fence.
+
+A caller-made vector error (wrong dimension, NaN, infinity) does not reach
+`apply_changes`. The commit path rejects it before the WAL append, so it
+writes no frame and sets no fence.
 
 **Windows that stay unknown:**
 
 - A crash after the frame is durable and before the abort record is durable.
 - A failed `wait_for_flush` (see above).
-- A background worker cycle that overlaps a failed apply. The worker persists
-  each index without the historical lock.
+- A failed apply that occurs while an index file is written from live state
+  (background worker cycles; the vector and temporal-adjacency files of
+  `persist_indexes`). Both re-check the fence before each write and before the
+  manifest.
 - A replica that applied the band in an earlier batch than the abort record.
-  The replica logs this. Re-bootstrap it to repair it.
+  The replica logs this but does not refuse promotion. Re-bootstrap it.
 
 **Compatibility.** The record uses op tag 14 and needs no WAL version bump: a
 healthy WAL never holds it. **Do not downgrade** after a WAL holds the record.

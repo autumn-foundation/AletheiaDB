@@ -227,6 +227,9 @@ impl AletheiaDB {
         // Stop + join while the whole DB is still encrypted, so the worker's
         // shutdown final-persist is a safe encrypted write. NOT restarted here (see
         // the reopen contract) — respawn is the reopen's fresh worker.
+        // Issue #3799: refuse before the worker stops. A fenced database
+        // cannot persist, so the worker would never start again.
+        self.in_flight.check_not_diverged("disable encryption")?;
         if let Some(tracker) = self.persistence_tracker.as_ref() {
             tracker.signal_shutdown();
         }

@@ -607,11 +607,12 @@ a batch whole or not at all: the WAL frames each transaction
 
 If the commit step or the apply fails after the WAL append, the engine writes
 an `AbortTx` record (issue #3799). When that record is durable, recovery does
-not replay the batch. An error that says "durability status is UNKNOWN" can
-still replay as a whole batch. A failed flush wait always gives this result,
-because other transactions can already depend on the writes. After a failed
-apply, live reads can see part of the batch until you reopen the database.
-Writes, index persistence, and backup refuse until then.
+not replay the batch. A WAL error states the outcome: "Transaction aborted",
+or "durability status is UNKNOWN" (the batch can still replay as a whole). A
+failed flush wait always gives UNKNOWN, because other transactions can already
+depend on the writes. Other error types do not state the outcome. After a
+failed apply, live reads can see part of the batch, and later writes refuse
+with `FAILED_PRECONDITION` until you reopen the database.
 
 Separately, readers using non-snapshot read paths can briefly
 observe a commit in progress mid-apply — also pre-existing behavior for

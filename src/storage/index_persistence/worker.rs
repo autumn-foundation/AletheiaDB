@@ -410,7 +410,8 @@ pub(crate) fn spawn_background_persistence_thread(
                 //
                 // We use the safe LSN from tracker (min of component LSNs) to ensuring
                 // the manifest doesn't jump ahead of lagging components.
-                if any_index_persisted {
+                // Issue #3799: no manifest if the fence was set during the cycle.
+                if any_index_persisted && in_flight.diverged_lsn().is_none() {
                     update_manifest(
                         &manager,
                         &historical,

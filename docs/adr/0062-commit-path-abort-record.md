@@ -60,7 +60,14 @@ Some earlier documents said that it did. Those documents are corrected.
      persist.
    A reopen clears the fence. Recovery rebuilds the state from the last good
    snapshot and the WAL.
-7. **No WAL version bump.** A healthy WAL never holds the record, so its
+7. **Caller-made vector errors fail early.** A wrong dimension, NaN, or
+   infinity used to fail inside `apply_changes`. That would now fence the
+   whole database (and an ephemeral database loses its data at reopen). The
+   commit path checks every buffered node vector against the enabled vector
+   indexes before the WAL append, next to the #3413 guards. Thus such an
+   error writes no frame and sets no fence. The fence stays for failures that
+   break an internal invariant.
+8. **No WAL version bump.** A healthy WAL never holds the record, so its
    bytes do not change. A version bump is not possible without new numbers
    for every format: version 15 is reserved, and version 16 is the
    key-versioned container.
@@ -82,10 +89,14 @@ Thus do not downgrade a database whose WAL holds an abort record.
 - A crash after the frame is durable and before the record is durable.
 - An abort record that is not confirmed durable.
 - Site C, as described above.
-- The background worker persists each index without `historical.read()`. A
-  worker cycle that overlaps a failed apply can keep part of it.
+- The background worker persists each index without `historical.read()`, and
+  `persist_indexes` writes the vector and temporal-adjacency files from live
+  state. Both re-check the fence before each such write and before the
+  manifest. A failed apply between the last check and the write can still
+  reach that file.
 - A replica that applied the band in an earlier batch than the record keeps
-  it. The replica logs this. Re-bootstrap the replica to repair it.
+  it. The replica logs this, but it does not refuse promotion. Re-bootstrap
+  the replica to repair it.
 - Live readers see the partly applied writes of site B until reopen.
 
 ## Consequences

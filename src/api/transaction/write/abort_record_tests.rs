@@ -222,3 +222,38 @@ fn empty_transaction_writes_no_abort_record() {
     drop(db);
     assert!(aborted_bands_on_disk(dir.path()).is_empty());
 }
+
+/// A caller-made vector error is rejected BEFORE the WAL append. It writes no
+/// frame, sets no fence, and later commits work. (Review round 2: such an
+/// error must not lock the database.)
+#[test]
+fn bad_vector_is_rejected_before_append_without_fence() {
+    use crate::core::property::PropertyMapBuilder;
+    use crate::index::vector::{DistanceMetric, HnswConfig};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = open(dir.path());
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(3, DistanceMetric::Cosine))
+        .enable()
+        .expect("enable vector index");
+
+    for bad in [vec![1.0_f32, 2.0], vec![1.0, f32::NAN, 3.0]] {
+        let props = PropertyMapBuilder::new()
+            .insert_vector("embedding", &bad)
+            .build();
+        let err = db
+            .create_node("Doc", props)
+            .expect_err("a bad vector must fail");
+        assert!(matches!(err, Error::Vector(_)), "{err}");
+    }
+
+    create(&db, "Later").expect("no fence: later commits work");
+    db.persist_indexes().expect("no fence: persistence works");
+    drop(db);
+    let begins = wal_entries(dir.path())
+        .iter()
+        .filter(|e| matches!(e.operation, WalOperation::BeginTx { .. }))
+        .count();
+    assert_eq!(begins, 1, "only `Later` wrote a frame");
+}

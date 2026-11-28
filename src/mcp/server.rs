@@ -11533,8 +11533,8 @@ fn tool_definitions() -> Vec<Tool> {
                      (validation, unknown ref, constraint violation, detach refusal), NONE of \
                      the batch's writes take effect: atomicity holds for every acknowledged \
                      outcome and all non-crash failures. Recovery replays a batch whole or not \
-                     at all; an error that says 'durability status is UNKNOWN' can still replay \
-                     as a whole batch (issues #3413, #3799). The error reports \
+                     at all; a WAL error that says 'durability status is UNKNOWN' can still \
+                     replay as a whole batch (issues #3413, #3799). The error reports \
                      `details.failed_op_index`. `delete_node` honors the safe-by-default DETACH \
                      contract against committed AND batch-created edges. On success the response \
                      returns per-operation results in input order (ids and version ids for \

@@ -479,6 +479,41 @@ impl CurrentStorage {
     ///
     /// Returns Ok(true) if any vector was indexed, Ok(false) if none applicable,
     /// Err on failure (will have already done partial work).
+    /// Check that each vector in `properties` fits every enabled vector and
+    /// temporal vector index: finite values and the index dimension
+    /// (Issue #3799).
+    ///
+    /// The commit path calls this BEFORE the WAL append. Thus a caller-made
+    /// vector error is a clean rejection and not a failed apply.
+    pub(crate) fn check_vectors_indexable(&self, properties: &PropertyMap) -> Result<()> {
+        use crate::core::error::{Error, VectorError};
+
+        let check = |vector: &[f32], dimensions: usize| -> Result<()> {
+            crate::core::vector::validation::validate_vector(vector)?;
+            if vector.len() == dimensions {
+                Ok(())
+            } else {
+                Err(Error::Vector(VectorError::DimensionMismatch {
+                    expected: dimensions,
+                    actual: vector.len(),
+                }))
+            }
+        };
+        if !self.vector_indexes.is_empty() {
+            for entry in self.vector_indexes.iter() {
+                if let Some(vector) = properties.get(entry.key()).and_then(|v| v.as_vector()) {
+                    check(vector, entry.value().config.dimensions)?;
+                }
+            }
+        }
+        for (property_name, index) in self.collect_temporal_vector_indexes() {
+            if let Some(vector) = properties.get(&property_name).and_then(|v| v.as_vector()) {
+                check(vector, index.dimensions())?;
+            }
+        }
+        Ok(())
+    }
+
     fn try_index_vector(&self, node_id: NodeId, properties: &PropertyMap) -> Result<bool> {
         // DashMap::iter() allocates a guard per shard even when the map is
         // empty; every node write pays that cost otherwise, so short-circuit

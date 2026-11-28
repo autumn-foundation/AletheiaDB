@@ -275,6 +275,8 @@ impl AletheiaDB {
                 // (both fixed above); a snapshot-coherent vector persist (snapshot the
                 // vectors under the same barrier, or gate loaded vector entries by
                 // lsn <= manifest on restore) is tracked follow-up F7. See design doc.
+                // Issue #3799: re-check before each write from LIVE state.
+                self.in_flight.check_not_diverged("persist indexes")?;
                 persist_vector_indexes(&self.current, manager, Some(tracker), manifest_lsn)?;
                 // Temporal index from the COHERENT historical snapshot (off-lock).
                 persist_temporal_index_from_snapshot(
@@ -297,6 +299,7 @@ impl AletheiaDB {
             // torn-snapshot follow-up (F7). This is NOT a lost write — replay
             // reconstructs adjacency for every entry with lsn >= manifest_lsn, so the
             // on-disk file is re-covered on restore.
+            self.in_flight.check_not_diverged("persist indexes")?;
             persist_temporal_adjacency_index(&self.historical, manager)?;
 
             // Record WAL position for future replay coordination. Safe LSN = min
@@ -306,6 +309,7 @@ impl AletheiaDB {
                 .map(|t| t.get_safe_manifest_lsn())
                 .unwrap_or(manifest_lsn);
 
+            self.in_flight.check_not_diverged("persist indexes")?;
             let manifest = IndexManifest::new(safe_lsn);
             manager.save_manifest(&manifest).map_err(|e| {
                 StorageError::persistence_with_kind(

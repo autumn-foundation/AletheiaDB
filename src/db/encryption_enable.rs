@@ -380,6 +380,9 @@ impl AletheiaDB {
         // the worker is respawned IN-PROCESS at Step 5 (Issue #3708), after every
         // live keyring is installed, so post-enable persists write ciphertext. (A
         // reopen also brings a fresh worker up, but is no longer mandatory.)
+        // Issue #3799: refuse before the worker stops. A fenced database
+        // cannot persist, so the worker would never start again.
+        self.in_flight.check_not_diverged("enable encryption")?;
         if let Some(tracker) = self.persistence_tracker.as_ref() {
             tracker.signal_shutdown();
         }

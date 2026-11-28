@@ -823,6 +823,9 @@ impl WriteTransaction {
         apply::detect_delete_orphan_write_skew(self)?;
         apply::detect_create_edge_dangling_endpoint(self)?;
         cas::detect_cas_precondition_violations(self, commit_timestamp)?;
+        // Issue #3799: a caller-made vector error must not fail the apply, which
+        // would fence the database. Reject it here, before the WAL append.
+        apply::detect_vector_index_violations(self)?;
 
         #[cfg(feature = "observability")]
         let wal_start = std::time::Instant::now();
