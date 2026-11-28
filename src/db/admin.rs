@@ -229,6 +229,10 @@ impl AletheiaDB {
             // below runs OFF-LOCK from the immutable snapshots, like checkpoint /
             // backup.
             let hist = self.historical.read();
+            // Issue #3799: a failed apply sets the fence under
+            // `historical.write()`, so this check sees every such failure
+            // that this snapshot could contain.
+            self.in_flight.check_not_diverged("persist indexes")?;
             let current_snapshot = {
                 let _snap_lock = self.current.snapshot_lock.write();
                 self.current

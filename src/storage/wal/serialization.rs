@@ -1272,6 +1272,9 @@ mod prop_tests {
             // Checkpoint
             (any::<u64>().prop_map(LSN), arb_timestamp())
                 .prop_map(|(lsn, timestamp)| { WalOperation::Checkpoint { lsn, timestamp } }),
+            // AbortTx (Issue #3799)
+            (any::<u64>(), any::<u64>().prop_map(LSN))
+                .prop_map(|(tx_id, begin_lsn)| { WalOperation::AbortTx { tx_id, begin_lsn } }),
             // DeclareUniqueConstraint
             (arb_interned_string(), arb_interned_string()).prop_map(|(label, property)| {
                 WalOperation::DeclareUniqueConstraint { label, property }

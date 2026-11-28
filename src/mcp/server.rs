@@ -11532,9 +11532,9 @@ fn tool_definitions() -> Vec<Tool> {
                      an endpoint — forward references are rejected. If ANY operation fails \
                      (validation, unknown ref, constraint violation, detach refusal), NONE of \
                      the batch's writes take effect: atomicity holds for every acknowledged \
-                     outcome and all non-crash failures (narrow caveat: a process crash during \
-                     the commit flush can persist a prefix of a batch until WAL transaction \
-                     framing lands, issue #3413), and the error reports \
+                     outcome and all non-crash failures. Recovery replays a batch whole or not \
+                     at all; an error that says 'durability status is UNKNOWN' can still replay \
+                     as a whole batch (issues #3413, #3799). The error reports \
                      `details.failed_op_index`. `delete_node` honors the safe-by-default DETACH \
                      contract against committed AND batch-created edges. On success the response \
                      returns per-operation results in input order (ids and version ids for \

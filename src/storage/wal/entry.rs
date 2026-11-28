@@ -214,10 +214,10 @@ pub enum WalOperation {
     },
     /// Abort a transaction frame that was already appended (Issue #3799).
     ///
-    /// The commit path writes this record when a step after the frame append
-    /// fails. Recovery, PITR, and the replica applier then drop the band that
-    /// starts at `begin_lsn`. The record is always appended after its band, but
-    /// the match does not depend on order.
+    /// The commit path writes this record when the commit step in the append,
+    /// or the apply, fails. Recovery, PITR, and the replica applier then drop
+    /// the band that starts at `begin_lsn`. The record always comes after its
+    /// band, but the match does not depend on order.
     AbortTx {
         /// The `tx_id` of the band's [`WalOperation::BeginTx`].
         tx_id: u64,

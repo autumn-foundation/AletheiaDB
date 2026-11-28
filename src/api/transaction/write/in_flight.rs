@@ -29,12 +29,12 @@
 //!
 //! # Divergence fence (Issue #3799)
 //!
-//! If a commit fails after its in-memory apply, the commit path aborts the
-//! WAL frame, but the live state still holds the writes.
-//! [`InFlightLsns::mark_diverged`] records this. While it is set, index
-//! persistence and backup refuse ([`InFlightLsns::check_not_diverged`]), so no
-//! snapshot keeps writes that the WAL disowns. Only a reopen clears it. See
-//! ADR-0062.
+//! If `apply_changes` fails, the commit path aborts the WAL frame, but the
+//! live state can still hold part of it. [`InFlightLsns::mark_diverged`]
+//! records this. While it is set, commits, index persistence, and backup
+//! refuse ([`InFlightLsns::check_not_diverged`]). Thus no durable write and no
+//! snapshot can keep or depend on the disowned writes. Only a reopen clears
+//! it. See ADR-0062.
 //!
 //! # Lock ordering
 //!
@@ -65,7 +65,7 @@ pub(crate) struct InFlightLsns {
     /// — works in raw `u64` LSN values; wrapping here would ripple `LSN`
     /// wrap/unwrap into several call sites for no safety gain in this leaf type.
     lsns: Mutex<BTreeSet<u64>>,
-    /// Divergence fence (Issue #3799). `0` means "not set". Else it holds the
+    /// Divergence fence (Issue #3799). `0` means "not set". Otherwise, it holds the
     /// `BeginTx` LSN of a frame that was applied in memory and then aborted.
     /// The live state then holds writes that the WAL disowns, so no snapshot
     /// may capture it. Only a reopen clears the fence.
@@ -123,7 +123,6 @@ impl InFlightLsns {
 
     /// The `BeginTx` LSN of the first aborted-but-applied frame, if the
     /// divergence fence is set (Issue #3799).
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn diverged_lsn(&self) -> Option<u64> {
         match self.diverged.load(Ordering::Acquire) {
             0 => None,
@@ -133,15 +132,14 @@ impl InFlightLsns {
 
     /// Refuse a snapshot while the divergence fence is set (Issue #3799).
     /// `what` names the refused operation in the error text.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn check_not_diverged(&self, what: &str) -> crate::core::error::Result<()> {
         match self.diverged_lsn() {
             None => Ok(()),
             Some(lsn) => Err(crate::core::error::Error::FailedPrecondition(format!(
-                "cannot {what}: a failed commit (WAL frame at LSN {lsn}) was applied in memory \
-                 and then aborted, so the live state holds writes that the WAL does not keep. \
-                 A snapshot now would keep those writes. Reopen the database: recovery \
-                 rebuilds the state without them (Issue #3799)."
+                "cannot {what}: a failed commit (WAL frame at LSN {lsn}) was partly applied \
+                 in memory and then aborted. The live state holds writes that the WAL does \
+                 not keep, so the database refuses writes and snapshots. Reopen the \
+                 database: recovery rebuilds the state without them (Issue #3799)."
             ))),
         }
     }

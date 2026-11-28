@@ -73,23 +73,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **DURABILITY:** a commit that failed after its WAL append could come back
-  after a restart (Issue #3799, ADR-0062). The frame stayed in the ring
-  buffer, so the flusher could still write it and recovery replayed it,
-  although the caller got an error. The commit path now writes a new
-  `AbortTx { tx_id, begin_lsn }` WAL record after such a failure (register or
-  sync flush error in the append step, `apply_changes` error, or
-  `wait_for_flush` error). Crash recovery, PITR, and the replica applier drop
-  the band that the record names. When the record is durable, the error says
-  "Transaction aborted: the abort record is durable". When it is not, the
-  error keeps "durability status UNKNOWN". The commit clock is released before
-  the record is written. Issue #3413 did not add an abort record; docs that
-  said so are corrected.
-- **BEHAVIORAL:** after an `apply_changes` or `wait_for_flush` failure, the
-  live state holds writes that the WAL disowns. `persist_indexes`, `backup`,
-  and the background persistence worker (also at shutdown) now refuse with
-  `FailedPrecondition` until the database is reopened, so no snapshot keeps
-  those writes. On-disk format: new op tag 14, no WAL version bump; an older
-  binary refuses to open a WAL that holds the record.
+  after a restart (Issue #3799, ADR-0062). The frame could still reach disk,
+  and recovery replayed it, although the caller got an error. Now, when the
+  commit step in the append or `apply_changes` fails, the commit path writes
+  a new `AbortTx { tx_id, begin_lsn }` WAL record. Crash recovery, PITR, and
+  the replica applier drop the band that the record names. The commit path
+  releases the commit clock before it writes the record.
+  - A `StorageError::WalError` then says "Transaction aborted: the abort
+    record is durable", or "The durability status is UNKNOWN" if the record
+    is not confirmed. Other error types keep their type; the outcome goes to
+    the WAL diagnostic log.
+  - A failed `wait_for_flush` writes no record: other transactions can
+    already depend on the published writes. Its error says that the
+    durability status is UNKNOWN.
+  - Issue #3413 did not add an abort record. Docs that said so are corrected.
+- **BEHAVIORAL:** after a failed `apply_changes`, the live state holds writes
+  that the WAL disowns. Until the database is reopened, commits,
+  `persist_indexes`, and `backup` refuse with `FailedPrecondition`, and the
+  background persistence worker skips its cycles and the shutdown persist.
+- **On-disk format:** new WAL op tag 14 (`AbortTx`), no WAL version bump. Do
+  not downgrade after a WAL holds the record: an older binary reads a final
+  record as a torn tail and replays the aborted band.
 
 - Adjacency compaction could tear a concurrent read (Issue #3810). It retired
   the delta entries **before** publishing the CSR that absorbed them, so a
@@ -337,8 +341,9 @@ pre-v13 WAL tail is now refused on open (see On-disk format below).
   binaries reject these versions cleanly rather than misparsing them; 0.2.0
   still *reads* ≤v12 segments, but refuses to *replay* a pre-v13 tail (see
   Breaking changes).
-- WAL commit **and abort** framing (`[BeginTx, ..ops.., CommitTx]` /
-  `AbortTx`, Issue #3413): a transaction whose frame is durably fsync'd and is
+- WAL commit framing (`[BeginTx, ..ops.., CommitTx]`, Issue #3413;
+  correction: this release wrote no `AbortTx` record, see Issue #3799): a
+  transaction whose frame is durably fsync'd and is
   *then* rejected at the commit guard is no longer re-applied by crash
   recovery. Previously such a runtime-refused write could be resurrected on
   replay (a lost CAS/lease claim, a stale fence, an orphaning delete).

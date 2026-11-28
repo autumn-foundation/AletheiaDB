@@ -603,13 +603,17 @@ acknowledged outcome** (any success or error response the caller receives)
 and for **all non-crash failure modes**. Across a crash, recovery replays
 a batch whole or not at all: the WAL frames each transaction
 (`BeginTx`/`CommitTx`, issue #3413), and recovery discards a frame whose
-`CommitTx` did not reach disk. If the commit fails after the WAL append, the
-engine writes an `AbortTx` record (issue #3799). When that record is durable,
-the error says "Transaction aborted" and recovery does not replay the batch.
-When it is not, the error says "durability status UNKNOWN": the whole batch
-can still replay. If the failure came after the in-memory apply (a flush
-wait failure), live reads can see the batch until the database is reopened;
-index persistence and backup refuse until then. Separately, readers using non-snapshot read paths can briefly
+`CommitTx` did not reach disk.
+
+If the commit step or the apply fails after the WAL append, the engine writes
+an `AbortTx` record (issue #3799). When that record is durable, recovery does
+not replay the batch. An error that says "durability status is UNKNOWN" can
+still replay as a whole batch. A failed flush wait always gives this result,
+because other transactions can already depend on the writes. After a failed
+apply, live reads can see part of the batch until you reopen the database.
+Writes, index persistence, and backup refuse until then.
+
+Separately, readers using non-snapshot read paths can briefly
 observe a commit in progress mid-apply — also pre-existing behavior for
 all multi-op transactions, not specific to `apply_batch`. The error
 response reports the failing operation:

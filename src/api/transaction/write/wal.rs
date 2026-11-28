@@ -15,8 +15,8 @@
 //! This ensures that if the system crashes after step 2/3 but before step 4,
 //! the changes can be recovered from the WAL on restart.
 //!
-//! If a step after step 2 fails, the commit path writes an `AbortTx` record
-//! for the frame, so recovery does not replay it (Issue #3799).
+//! If the commit step in step 2 or the apply fails, the commit path writes an
+//! `AbortTx` record for the frame, so recovery does not replay it (Issue #3799).
 //!
 //! # Performance
 //!

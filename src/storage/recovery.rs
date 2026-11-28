@@ -1031,8 +1031,8 @@ pub(crate) fn aborted_band_keys(entries: &[WalEntry]) -> HashSet<(LSN, u64)> {
 ///
 /// A band is aborted when a framed `AbortTx` names its `BeginTx` LSN and
 /// `tx_id`. The record position does not matter. The band ends at its
-/// `CommitTx`, or (if it is torn) at the next `BeginTx`, control op, or
-/// unframed entry, which stays. All other entries stay, in order. With no
+/// `CommitTx`, or (if it is torn) at the next `BeginTx`, abort record, control
+/// op, or unframed entry. That entry stays (an abort record never stays). All other entries stay, in order. With no
 /// abort record, the input is returned as it is.
 pub(crate) fn drop_aborted_frames(entries: Vec<WalEntry>) -> Vec<WalEntry> {
     if !entries
@@ -1047,14 +1047,14 @@ pub(crate) fn drop_aborted_frames(entries: Vec<WalEntry>) -> Vec<WalEntry> {
     let mut dropping: Option<usize> = None;
 
     for entry in entries {
-        if matches!(entry.operation, WalOperation::AbortTx { .. }) {
-            continue;
-        }
         if let Some(dropped) = dropping.as_mut() {
+            // Like the resolver, a band ends at any record that cannot be
+            // inside a band, including an abort record.
             let in_band = entry.framed
                 && !matches!(
                     entry.operation,
                     WalOperation::BeginTx { .. }
+                        | WalOperation::AbortTx { .. }
                         | WalOperation::Checkpoint { .. }
                         | WalOperation::DeclareUniqueConstraint { .. }
                         | WalOperation::DropUniqueConstraint { .. }
@@ -1070,6 +1070,9 @@ pub(crate) fn drop_aborted_frames(entries: Vec<WalEntry>) -> Vec<WalEntry> {
             }
             warn_discarded_frame("the frame has an AbortTx record (torn frame)", *dropped);
             dropping = None;
+        }
+        if matches!(entry.operation, WalOperation::AbortTx { .. }) {
+            continue;
         }
         if entry.framed
             && let WalOperation::BeginTx { tx_id } = entry.operation
@@ -1756,6 +1759,46 @@ mod framing_tests {
         let entries = band(1, 7, &[1, 2], 100);
         let before = entries.clone();
         assert_eq!(drop_aborted_frames(entries), before);
+    }
+
+    /// Issue #3799: the abort record can come before its band, and it can
+    /// repeat. The result is the same.
+    #[test]
+    fn abort_record_position_and_duplicates_do_not_matter() {
+        let mut entries = vec![abort(1, 7, 2), abort(2, 7, 2)];
+        entries.extend(band(2, 7, &[1], 100)); // LSN 2..=4 (abort LSNs are synthetic)
+        entries.extend(band(5, 8, &[2], 101));
+        entries.push(abort(8, 7, 2));
+        let ids: Vec<u64> = resolve_transaction_frames(entries)
+            .iter()
+            .map(|(op, _)| node_id_of(op))
+            .collect();
+        assert_eq!(ids, vec![2]);
+    }
+
+    /// Issue #3799: a torn aborted band ends at a control op or an unframed
+    /// entry. Both stay.
+    #[test]
+    fn drop_aborted_frames_keeps_control_op_and_legacy_entry_after_torn_band() {
+        let checkpoint = WalOperation::Checkpoint {
+            lsn: LSN(1),
+            timestamp: ts(1),
+        };
+        let entries = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 7 }, ts(100)),
+            framed(2, create_node_op(1), ts(100)),
+            framed(3, checkpoint, ts(100)),
+            framed(4, WalOperation::BeginTx { tx_id: 9 }, ts(100)),
+            framed(5, create_node_op(2), ts(100)),
+            legacy(6, create_node_op(3), ts(100)),
+            abort(7, 7, 1),
+            abort(8, 9, 4),
+        ];
+        let kept: Vec<u64> = drop_aborted_frames(entries)
+            .iter()
+            .map(|e| e.lsn.0)
+            .collect();
+        assert_eq!(kept, vec![3, 6]);
     }
 
     /// Issue #3799: an aborted band that is torn (no `CommitTx`) is dropped up

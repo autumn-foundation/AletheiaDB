@@ -122,6 +122,17 @@ pub(crate) fn apply_replica_batch(
     // corrupting the stream. The clone is bounded by one apply batch.
     let truncated: Vec<WalEntry> = pending[..=boundary_idx].to_vec();
 
+    // Issue #3799: an abort record whose band an earlier batch applied cannot
+    // be undone here. Say so loudly: this replica now holds a transaction
+    // that the primary drops at its next restart. Re-bootstrap to repair it.
+    for begin_lsn in already_applied_aborts(&truncated) {
+        crate::storage::wal::log_wal_diagnostic(&format!(
+            "replica keeps an aborted transaction (WAL frame at LSN {}): its band was applied \
+             before the abort record arrived. Re-bootstrap this replica to drop it (Issue #3799).",
+            begin_lsn.0
+        ));
+    }
+
     let initial_version_id = handles.version_id_gen.current();
     {
         let mut hist = handles.historical.write();
@@ -294,6 +305,24 @@ fn last_complete_frame_boundary(entries: &[WalEntry]) -> Option<usize> {
     }
 
     last_complete
+}
+
+/// The `begin_lsn` of each abort record in `applied` whose band is not in
+/// `applied` (Issue #3799). An earlier batch applied that band, and the replica
+/// cannot undo it.
+fn already_applied_aborts(applied: &[WalEntry]) -> Vec<LSN> {
+    applied
+        .iter()
+        .filter_map(|e| match e.operation {
+            WalOperation::AbortTx { begin_lsn, .. } => Some(begin_lsn),
+            _ => None,
+        })
+        .filter(|begin| {
+            !applied
+                .iter()
+                .any(|e| e.lsn == *begin && matches!(e.operation, WalOperation::BeginTx { .. }))
+        })
+        .collect()
 }
 
 /// The maximum transaction-commit timestamp among `applied` (a slice already
@@ -602,6 +631,55 @@ mod tests {
             ts(999),
         )];
         assert_eq!(max_applied_timestamp(&entries), None);
+    }
+
+    /// Issue #3799 (known limit, ADR-0062): a band applied in an earlier batch
+    /// stays applied when its abort record arrives later. The replica logs it.
+    #[test]
+    fn apply_replica_batch_keeps_band_aborted_in_later_batch() {
+        let (_dir, handles) = test_handles();
+        let mut first = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 1 }, ts(10)),
+            framed(2, create_node_op(1), ts(11)),
+            framed(
+                3,
+                WalOperation::CommitTx {
+                    tx_id: 1,
+                    entry_count: 1,
+                    commit_timestamp: ts(100),
+                },
+                ts(12),
+            ),
+        ];
+        apply_replica_batch(&handles, &mut first).expect("apply must succeed");
+        let mut second = vec![framed(
+            4,
+            WalOperation::AbortTx {
+                tx_id: 1,
+                begin_lsn: LSN(1),
+            },
+            ts(13),
+        )];
+        apply_replica_batch(&handles, &mut second).expect("apply must succeed");
+        assert!(second.is_empty());
+        assert_eq!(
+            already_applied_aborts(&[framed(
+                4,
+                WalOperation::AbortTx {
+                    tx_id: 1,
+                    begin_lsn: LSN(1),
+                },
+                ts(13),
+            )]),
+            vec![LSN(1)],
+            "an abort that names no band in its batch is reported"
+        );
+        assert!(
+            handles
+                .current
+                .get_node(crate::core::NodeId::new(1).unwrap())
+                .is_ok()
+        );
     }
 
     /// Issue #3799: when a band and its abort record arrive in one batch, the

@@ -91,9 +91,9 @@
 //!    (`src/api/transaction/write/mod.rs`). Any single indefinite block
 //!    underneath it becomes an untimed, zero-CPU convoy of every other
 //!    committing thread. **Mitigation deferred:** that hold is deliberate and
-//!    documented at the site. The commit path now writes an `AbortTx` record
-//!    when a step after the append fails (Issue #3799), and it writes it
-//!    after it releases the commit clock. Shortening the hold itself is
+//!    documented at the site. When a step before the apply is published fails,
+//!    the commit path now writes an `AbortTx` record (Issue #3799). It writes
+//!    the record after it releases the commit clock. Shortening the hold itself is
 //!    Issue #3804. Out of scope here.
 //!
 //! ## Lock-leaf contract
@@ -140,21 +140,20 @@
 //! ## Durability disclosure
 //!
 //! An acquisition timeout at a **commit-path** site (`register_transaction`,
-//! `wait_for_flush`) says so in its message: the frame can already be in the
-//! ring buffer, so it can still become durable and replay at recovery, unless
-//! the caller writes an abort record for it.
+//! `wait_for_flush`) says so in its message: the frame can already be
+//! appended, so it can still become durable and replay at recovery.
 //!
-//! The transaction commit path does this (Issue #3799, ADR-0062). It writes an
-//! `AbortTx` record and adds the outcome to the error:
+//! The transaction commit path adds the final outcome (Issue #3799, ADR-0062):
 //!
-//! - Abort record durable: the transaction is aborted. Recovery does not
-//!   replay it.
-//! - Abort record not confirmed: durability status UNKNOWN. The transaction
-//!   can still replay.
+//! - `register_transaction` failed: the commit path writes an `AbortTx`
+//!   record. If the record is durable, recovery does not replay the
+//!   transaction. If not, the durability status is UNKNOWN.
+//! - `wait_for_flush` failed: the writes are already visible, so the commit
+//!   path writes no record. The durability status is UNKNOWN.
 //!
-//! A crash after the frame is durable and before the abort record is durable
-//! stays unknown by nature. Observation sites wrote nothing and make no
-//! durability claim.
+//! If a crash occurs after the frame is durable and before the abort record
+//! is durable, the outcome stays unknown. Observation sites wrote nothing and
+//! make no durability claim.
 //!
 //! ## Escalation flag
 //!
@@ -947,10 +946,9 @@ impl GroupCommitCoordinator {
             // Commit-path sites only. The caller cannot tell whether its
             // transaction reached the WAL, so it must not report a clean
             // failure to its own client.
-            " The in-flight WAL frame may already be appended, so it can still become \
-             durable and replay at recovery, unless the caller writes an abort record for \
-             it. The transaction commit path does this and adds the final outcome \
-             (Issue #3799)."
+            " The in-flight WAL frame can already be appended, so it can still become \
+             durable and replay at recovery. The transaction commit path adds the final \
+             outcome below (Issue #3799)."
         } else {
             // An observation site wrote nothing; claiming durability is at risk
             // would be a false alarm an operator would escalate for nothing.
@@ -1082,9 +1080,9 @@ impl GroupCommitCoordinator {
     ///   (re-entrancy detection), or if the acquisition exceeds
     ///   `acquire_timeout_ms`; setting that to `0` removes the timeout mode.
     /// - An acquisition timeout here is a **commit-path** failure: the
-    ///   transaction's WAL frame can already be appended. The caller must write
-    ///   an abort record before it reports a clean failure (see the module's
-    ///   durability disclosure, Issue #3799).
+    ///   transaction's WAL frame can already be appended. The caller must not
+    ///   report a clean failure unless it writes a durable abort record (see
+    ///   the module's durability disclosure, Issue #3799).
     pub fn register_transaction(&self) -> Result<(u64, bool), Error> {
         let mut state = self.lock_state(LockSite::RegisterTransaction)?;
 
@@ -1134,9 +1132,9 @@ impl GroupCommitCoordinator {
     ///   `StorageError::WalError` in both cases
     ///
     /// This is a **commit-path** site: after a flush timeout or an acquisition
-    /// timeout the WAL frame can already be appended. The caller must write an
-    /// abort record before it reports a clean failure (see the module's
-    /// durability disclosure, Issue #3799).
+    /// timeout the WAL frame can already be appended. The caller must not
+    /// report a clean failure unless it writes a durable abort record (see the
+    /// module's durability disclosure, Issue #3799).
     ///
     /// # Examples
     ///
@@ -1823,8 +1821,7 @@ mod tests {
     /// watchdog fires.
     ///
     /// `register_transaction` is on the commit path, so the message must also
-    /// say that the frame can still replay at recovery unless the caller writes
-    /// an abort record (Issue #3799).
+    /// say that the frame can still replay at recovery (Issue #3799).
     #[test]
     fn test_acquisition_returns_diagnosable_error_when_guard_held_elsewhere() {
         let coord = Arc::new(GroupCommitCoordinator::with_defaults());
@@ -1852,7 +1849,7 @@ mod tests {
             "flushed_epoch",
             "batch_count",
             "can still become durable and replay at recovery",
-            "abort record",
+            "final outcome",
         ] {
             assert!(
                 msg.contains(needle),

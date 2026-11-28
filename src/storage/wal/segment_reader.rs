@@ -2161,7 +2161,8 @@ fn parse_commit_tx_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation>
 
 /// Parse an `AbortTx` payload: `[tx_id: 8][begin_lsn: 8]` (Issue #3799).
 ///
-/// No version gate: only a framed (v7+) writer emits the tag.
+/// The caller accepts the tag only in a framed (v7+) segment. A pre-v7 segment
+/// with tag 14 is corrupt.
 fn parse_abort_tx_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation> {
     require_bytes(buffer, *offset, 16, "AbortTx")?;
     let tx_id = u64::from_le_bytes(buffer[*offset..*offset + 8].try_into().unwrap());
@@ -2260,7 +2261,7 @@ pub(crate) fn parse_entry_at(
         }
         OP_BEGIN_TX => parse_begin_tx_op(buffer, &mut cur)?,
         OP_COMMIT_TX => parse_commit_tx_op(buffer, &mut cur)?,
-        OP_ABORT_TX => parse_abort_tx_op(buffer, &mut cur)?,
+        OP_ABORT_TX if is_framed_version(version) => parse_abort_tx_op(buffer, &mut cur)?,
         _ => {
             return Err(StorageError::CorruptedData(format!(
                 "Unknown WAL operation type: {}",
@@ -2760,6 +2761,18 @@ mod tests {
         serialize_entry_into(&entry, &mut buffer).unwrap();
         buffer.truncate(buffer.len() - 3);
         assert!(parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS).is_err());
+    }
+
+    /// Issue #3799: an `AbortTx` tag in a pre-framing segment is corrupt data.
+    #[test]
+    fn test_abort_tx_rejected_in_pre_framing_segment() {
+        let op = WalOperation::AbortTx {
+            tx_id: 9,
+            begin_lsn: LSN(41),
+        };
+        let mut buffer = Vec::new();
+        serialize_entry_into(&WalEntry::new(LSN(50), op), &mut buffer).unwrap();
+        assert!(parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE_PRINCIPAL).is_err());
     }
 
     /// Issue #3413: a pre-framing (v6) segment parses entries with

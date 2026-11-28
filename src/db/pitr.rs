@@ -545,13 +545,19 @@ fn compute_window(all: &[WalEntry], source_lsn: u64) -> PitrWindow {
     let mut open_band: Option<(LSN, u64)> = None;
 
     for e in all {
-        if let WalOperation::BeginTx { tx_id } = e.operation {
-            open_band = Some((e.lsn, tx_id));
-        }
-        if matches!(e.operation, WalOperation::CommitTx { .. })
-            && open_band.take().is_some_and(|key| aborted.contains(&key))
-        {
-            continue;
+        match e.operation {
+            WalOperation::BeginTx { tx_id } if e.framed => open_band = Some((e.lsn, tx_id)),
+            WalOperation::CommitTx { .. } => {
+                if open_band.take().is_some_and(|key| aborted.contains(&key)) {
+                    continue;
+                }
+            }
+            WalOperation::AbortTx { .. }
+            | WalOperation::Checkpoint { .. }
+            | WalOperation::DeclareUniqueConstraint { .. }
+            | WalOperation::DropUniqueConstraint { .. } => open_band = None,
+            _ if !e.framed => open_band = None,
+            _ => {}
         }
         // A transaction's commit coordinate: the framed `CommitTx`, or a legacy
         // (unframed) data op's own coordinate. Control ops and framed data ops

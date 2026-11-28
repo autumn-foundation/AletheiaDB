@@ -73,6 +73,9 @@ impl AletheiaDB {
         // takes no `historical`/`wal`/`current_timestamp` lock, so no inversion.
         let (current_snapshot, historical_snapshot, tiered_arc) = {
             let hist = self.historical.read();
+            // Issue #3799: re-check under the lock that a failed apply holds
+            // when it sets the fence.
+            self.in_flight.check_not_diverged("take a backup")?;
             let current_snapshot = {
                 let _snap_lock = self.current.snapshot_lock.write();
                 self.current

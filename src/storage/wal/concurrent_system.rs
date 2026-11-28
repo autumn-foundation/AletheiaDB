@@ -1218,11 +1218,22 @@ impl ConcurrentWalSystem {
     /// Append an abort record for the band at `begin_lsn` and try to make it
     /// durable (Issue #3799).
     ///
-    /// Durability follows the mode: `Synchronous` flushes inline;
-    /// `GroupCommit` waits for the record's epoch. A mode that does not wait
+    /// Durability follows the mode: `Synchronous` flushes and waits on the
+    /// record's completion handle; `GroupCommit` waits for the record's epoch. A mode that does not wait
     /// for durability (`Async`, `AsyncBatched`) cannot confirm it. This call
     /// never fails: a failure becomes [`AbortRecordOutcome::NotConfirmed`].
     pub(crate) fn append_abort_record(&self, tx_id: u64, begin_lsn: LSN) -> AbortRecordOutcome {
+        if matches!(self.durability_mode, DurabilityMode::Synchronous) {
+            // Wait on the record's own completion handle. A plain `commit()`
+            // can return before the flush of another thread that drained the
+            // record completes.
+            return match self.append_sync(WalOperation::AbortTx { tx_id, begin_lsn }) {
+                Ok(_) => AbortRecordOutcome::Durable,
+                Err(e) => AbortRecordOutcome::NotConfirmed(format!(
+                    "the synchronous flush of the abort record failed: {e}"
+                )),
+            };
+        }
         let record = vec![WalOperation::AbortTx { tx_id, begin_lsn }];
         let epoch = match self.append_frame_and_commit(record) {
             Ok((_, Ok(epoch))) => epoch,
@@ -1250,7 +1261,7 @@ impl ConcurrentWalSystem {
                     "the wait for the abort record failed: {e}"
                 )),
             },
-            // `Synchronous` (or no coordinator): `commit()` flushed inline.
+            // No coordinator: `commit()` fell back to an inline flush.
             _ => AbortRecordOutcome::Durable,
         }
     }
@@ -1971,6 +1982,60 @@ mod tests {
             properties: PropertyMap::new(),
             valid_from: time::now(),
             provenance: None,
+        }
+    }
+
+    // ── Issue #3799: abort record durability per mode ─────────────────────
+
+    fn abort_record_on_disk(wal: &ConcurrentWalSystem) -> bool {
+        wal.read_from(LSN::initial())
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e.operation, WalOperation::AbortTx { .. }))
+    }
+
+    #[test]
+    fn abort_record_is_durable_in_synchronous_mode() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path())
+            .with_durability_mode(DurabilityMode::Synchronous);
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+        assert_eq!(
+            wal.append_abort_record(1, LSN(1)),
+            AbortRecordOutcome::Durable
+        );
+        assert!(abort_record_on_disk(&wal));
+    }
+
+    #[test]
+    fn abort_record_is_durable_in_group_commit_mode() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path()).with_durability_mode(
+            DurabilityMode::GroupCommit {
+                max_delay_ms: 2,
+                max_batch_size: 8,
+            },
+        );
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+        assert_eq!(
+            wal.append_abort_record(1, LSN(1)),
+            AbortRecordOutcome::Durable
+        );
+        assert!(abort_record_on_disk(&wal));
+    }
+
+    #[test]
+    fn abort_record_is_not_confirmed_in_async_mode() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path()).with_durability_mode(
+            DurabilityMode::Async {
+                flush_interval_ms: 5,
+            },
+        );
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+        match wal.append_abort_record(1, LSN(1)) {
+            AbortRecordOutcome::NotConfirmed(why) => assert!(why.contains("fsync"), "{why}"),
+            other => panic!("Async mode cannot confirm durability: {other:?}"),
         }
     }
 
