@@ -74,6 +74,7 @@ What other options were evaluated?
 | [ADR-0023](0023-index-persistence-layer.md) | Index Persistence Layer | 2026-01-16 | storage, performance |
 | [ADR-0024](0024-hybrid-logical-clock-timestamps.md) | Hybrid Logical Clock Timestamps | 2026-01-20 | core, temporal, distributed |
 | [ADR-0061](0061-append-only-valid-time-supersession.md) | Append-Only Valid-Time Supersession on Update | 2026-10-01 | temporal, storage, core |
+| [ADR-0062](0062-commit-path-abort-record.md) | Commit-Path Abort Record | 2026-11-28 | wal, recovery, durability |
 
 ### Proposed
 

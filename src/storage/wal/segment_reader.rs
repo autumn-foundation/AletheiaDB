@@ -90,7 +90,7 @@ use crate::core::property::PropertyMap;
 use crate::core::provenance::Provenance;
 
 use super::serialization::{
-    OP_BEGIN_TX, OP_CHECKPOINT, OP_COMMIT_TX, OP_CREATE_EDGE, OP_CREATE_NODE,
+    OP_ABORT_TX, OP_BEGIN_TX, OP_CHECKPOINT, OP_COMMIT_TX, OP_CREATE_EDGE, OP_CREATE_NODE,
     OP_DECLARE_UNIQUE_CONSTRAINT, OP_DELETE_EDGE, OP_DELETE_NODE, OP_DROP_UNIQUE_CONSTRAINT,
     OP_RETRACT_EDGE, OP_RETRACT_NODE, OP_UPDATE_EDGE, OP_UPDATE_NODE, TOMBSTONE_VERSION_ID_ABSENT,
 };
@@ -2159,6 +2159,21 @@ fn parse_commit_tx_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation>
     })
 }
 
+/// Parse an `AbortTx` payload: `[tx_id: 8][begin_lsn: 8]` (Issue #3799).
+///
+/// The caller accepts the tag only in a framed (v7+) segment. A pre-v7 segment
+/// with tag 14 is corrupt.
+fn parse_abort_tx_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation> {
+    require_bytes(buffer, *offset, 16, "AbortTx")?;
+    let tx_id = u64::from_le_bytes(buffer[*offset..*offset + 8].try_into().unwrap());
+    advance(offset, 8)?;
+    let begin_lsn = LSN(u64::from_le_bytes(
+        buffer[*offset..*offset + 8].try_into().unwrap(),
+    ));
+    advance(offset, 8)?;
+    Ok(WalOperation::AbortTx { tx_id, begin_lsn })
+}
+
 /// Parse a single WAL entry from a buffer at the specified offset.
 ///
 /// This function extracts the parsing logic that was previously duplicated
@@ -2246,6 +2261,7 @@ pub(crate) fn parse_entry_at(
         }
         OP_BEGIN_TX => parse_begin_tx_op(buffer, &mut cur)?,
         OP_COMMIT_TX => parse_commit_tx_op(buffer, &mut cur)?,
+        OP_ABORT_TX if is_framed_version(version) => parse_abort_tx_op(buffer, &mut cur)?,
         _ => {
             return Err(StorageError::CorruptedData(format!(
                 "Unknown WAL operation type: {}",
@@ -2706,6 +2722,57 @@ mod tests {
         assert_eq!(consumed, buffer.len());
         assert_eq!(parsed.operation, op);
         assert!(parsed.framed);
+    }
+
+    /// Issue #3799: `AbortTx` round-trips and is flagged `framed` in every
+    /// framed version, including the current one.
+    #[test]
+    fn test_abort_tx_round_trip() {
+        let op = WalOperation::AbortTx {
+            tx_id: 9,
+            begin_lsn: LSN(41),
+        };
+        let entry = WalEntry::new(LSN(50), op.clone());
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        assert_eq!(
+            buffer.len(),
+            crate::storage::wal::serialization::estimate_entry_capacity(&op),
+            "size calculation must match the bytes written"
+        );
+        for version in [WAL_VERSION_TX_FRAMING, WAL_VERSION_STRING_LABELS] {
+            let (parsed, consumed) = parse_entry_at(&buffer, 0, version).unwrap();
+            assert_eq!(consumed, buffer.len());
+            assert_eq!(parsed.operation, op);
+            assert!(parsed.framed);
+        }
+    }
+
+    /// Issue #3799: a truncated `AbortTx` payload is a parse error, not a
+    /// panic.
+    #[test]
+    fn test_abort_tx_truncated_payload_errors() {
+        let op = WalOperation::AbortTx {
+            tx_id: 9,
+            begin_lsn: LSN(41),
+        };
+        let entry = WalEntry::new(LSN(50), op);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        buffer.truncate(buffer.len() - 3);
+        assert!(parse_entry_at(&buffer, 0, WAL_VERSION_STRING_LABELS).is_err());
+    }
+
+    /// Issue #3799: an `AbortTx` tag in a pre-framing segment is corrupt data.
+    #[test]
+    fn test_abort_tx_rejected_in_pre_framing_segment() {
+        let op = WalOperation::AbortTx {
+            tx_id: 9,
+            begin_lsn: LSN(41),
+        };
+        let mut buffer = Vec::new();
+        serialize_entry_into(&WalEntry::new(LSN(50), op), &mut buffer).unwrap();
+        assert!(parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE_PRINCIPAL).is_err());
     }
 
     /// Issue #3413: a pre-framing (v6) segment parses entries with

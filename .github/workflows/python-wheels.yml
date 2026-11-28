@@ -111,7 +111,9 @@ jobs:
   test:
     name: Test (${{ matrix.os }} / Python ${{ matrix.python }})
     needs: [linux]
-    runs-on: ${{ matrix.os }}
+    # The ubuntu-latest image (26.04) has no Python 3.9 build, so 3.9 runs on
+    # ubuntu-24.04. The check name keeps `matrix.os`, so it does not change.
+    runs-on: ${{ matrix.python == '3.9' && 'ubuntu-24.04' || matrix.os }}
     strategy:
       fail-fast: false
       matrix:

@@ -449,8 +449,13 @@ batches (default 1000 ops, `with_max_batch_operations`, limit echoed per
 per-operation error carries `details.failed_op_index` (JSON `null` for
 commit-phase failures like a retriable `CONFLICT` and for the over-cap
 rejection; absent on top-level malformed-request errors); any acknowledged
-failure means **zero** writes take effect (narrow crash-during-commit-flush
-caveat until WAL transaction framing lands: #3413).
+failure means **zero** writes take effect. The WAL frames each transaction
+(#3413), so recovery replays a batch whole or not at all. If the commit step or
+the apply fails after the WAL append, an `AbortTx` record makes recovery drop
+the batch (#3799). An error that says the durability status is UNKNOWN can
+still replay (always so after a failed flush wait). After a failed apply, live
+reads can see part of the batch, and the database refuses writes and snapshots
+until reopen (ADR-0062).
 In-batch `delete_node` honors the #3209 DETACH contract against committed
 AND batch-created edges (batch-local adjacency ledger; distinct edges, a
 self-loop counts once). Success returns per-op results in input order (ids +

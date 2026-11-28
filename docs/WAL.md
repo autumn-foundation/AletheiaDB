@@ -328,6 +328,7 @@ The following table describes recovery behavior for different crash scenarios:
 | **Power failure mid-fsync** | Synchronous/GroupCommit | OS guarantees atomicity, last entry may be incomplete | None or last transaction only |
 | **Disk full during WAL write** | Any | Recovery stops at last complete entry | Recent uncommitted writes |
 | **Vector index config invalid** | Any | **Recovery fails** to maintain integrity | None - prevents inconsistent state |
+| **Commit failed after the WAL append** | Any | Band dropped if its `AbortTx` record is durable (Issue #3799) | None: the caller got an error |
 
 #### Durability Guarantees by Mode
 
@@ -370,6 +371,62 @@ The following table describes recovery behavior for different crash scenarios:
 ```
 
 **Key Point:** GroupCommit blocks the caller until fsync completes, guaranteeing durability. This is why it's ACID-compliant despite batching.
+
+### Commit-path abort record (Issue #3799)
+
+A commit appends its frame `[BeginTx, ..ops.., CommitTx]` before it waits for
+durability. If a later step fails, the frame can still reach disk. For two of
+the three failure sites, the commit path then writes an
+`AbortTx { tx_id, begin_lsn }` record. Recovery, PITR, and the replica
+applier drop the band that the record names. See
+[ADR-0062](adr/0062-commit-path-abort-record.md).
+
+| Failed step | Live state | Abort record | Fence |
+|-------------|------------|--------------|-------|
+| Commit step in the append (register timeout, sync flush error) | Not applied | Yes | No |
+| `apply_changes` | Partly applied | Yes | Yes |
+| `wait_for_flush` | Applied and visible | No | No |
+
+After a failed `wait_for_flush`, other transactions can already depend on the
+writes. Thus the commit path does not abort them, and the outcome stays
+UNKNOWN.
+
+The commit path releases the commit clock, then writes the record and waits
+for it with the mode rules. A `StorageError::WalError` then says one of these:
+
+- **"Transaction aborted: the abort record is durable"**: recovery does not
+  replay the transaction.
+- **"The abort record is not confirmed durable ... The durability status is
+  UNKNOWN"**: the write or the wait failed, or the mode (`Async`,
+  `AsyncBatched`) does not wait for fsync. The transaction can still replay.
+
+Other error types keep their type. Their outcome goes to the WAL diagnostic
+log.
+
+**Fence.** After a failed `apply_changes`, the live state holds part of the
+frame. Commits, `persist_indexes`, `backup`, and encryption enable/disable then
+refuse with `FailedPrecondition`. The background persistence worker skips its
+cycles and the shutdown persist. Reopen the database to clear the fence.
+
+A caller-made vector error (wrong dimension, NaN, infinity) does not reach
+`apply_changes`. The commit path rejects it before the WAL append, so it
+writes no frame and sets no fence.
+
+**Windows that stay unknown:**
+
+- A crash after the frame is durable and before the abort record is durable.
+- A failed `wait_for_flush` (see above).
+- A failed apply that occurs while an index file is written from live state
+  (background worker cycles; the vector and temporal-adjacency files of
+  `persist_indexes`). Both re-check the fence before each write and before the
+  manifest.
+- A replica that applied the band in an earlier batch than the abort record.
+  The replica logs this but does not refuse promotion. Re-bootstrap it.
+
+**Compatibility.** The record uses op tag 14 and needs no WAL version bump: a
+healthy WAL never holds it. **Do not downgrade** after a WAL holds the record.
+An older binary reads a final abort record as a torn tail, replays the aborted
+band, and can allocate the record's LSN again.
 
 ### Handling Corrupted Segments
 
@@ -975,15 +1032,11 @@ Counters `GroupCommitCoordinator::reentrancy_detections()` and
 `acquire_timeouts()` expose both classes for health checks and soak tests; a
 non-zero `reentrancy_detections` is always a caller bug.
 
-> **Durability-unknown caveat.** An acquisition timeout at a *commit-path* site
-> (`register_transaction`, `wait_for_flush`) says so explicitly: the in-flight
-> transaction's WAL frame may already have been appended, so it **may still
-> become durable and replay at recovery**. Do not report such a failure to a
-> client as a clean abort. The WAL transaction frame format that would make
-> this precise has already landed (Issue #3413 — `BeginTx`/`CommitTx`/
-> `AbortTx`); what is still missing is the **commit path emitting an abort
-> record** when a step after the append fails, tracked as **Issue #3799**.
-> Until then the outcome is genuinely unknown and is disclosed as such.
+> **Durability disclosure.** An acquisition timeout at a *commit-path* site
+> (`register_transaction`, `wait_for_flush`) says so in its message: the
+> frame can already be appended, so it can still replay at recovery. The
+> transaction commit path adds the final outcome to the error. See
+> [Commit-path abort record](#commit-path-abort-record-issue-3799).
 > Observation sites wrote nothing and make no durability claim.
 
 For the full call-site audit behind this hardening — including why re-entrant

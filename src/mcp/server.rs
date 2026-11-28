@@ -136,8 +136,9 @@ use chrono::{DateTime, Utc};
 use rmcp::{
     ErrorData as RmcpErrorData, ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResult, ContentBlock, Implementation, ListToolsResult,
-        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+        ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig,
+        Tool,
     },
     service::{RequestContext, RoleServer},
 };
@@ -11532,9 +11533,9 @@ fn tool_definitions() -> Vec<Tool> {
                      an endpoint — forward references are rejected. If ANY operation fails \
                      (validation, unknown ref, constraint violation, detach refusal), NONE of \
                      the batch's writes take effect: atomicity holds for every acknowledged \
-                     outcome and all non-crash failures (narrow caveat: a process crash during \
-                     the commit flush can persist a prefix of a batch until WAL transaction \
-                     framing lands, issue #3413), and the error reports \
+                     outcome and all non-crash failures. Recovery replays a batch whole or not \
+                     at all; a WAL error that says 'durability status is UNKNOWN' can still \
+                     replay as a whole batch (issues #3413, #3799). The error reports \
                      `details.failed_op_index`. `delete_node` honors the safe-by-default DETACH \
                      contract against committed AND batch-created edges. On success the response \
                      returns per-operation results in input order (ids and version ids for \
@@ -12375,8 +12376,8 @@ const BUDGET_TOOL_HINT: &str = " Optional token budget (Issue #3353): pass \
     unchanged (row-limit) behavior.";
 
 impl ServerHandler for AletheiaMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
@@ -12393,8 +12394,7 @@ impl ServerHandler for AletheiaMcpServer {
     ) -> Result<ListToolsResult, RmcpErrorData> {
         Ok(ListToolsResult {
             tools: tool_definitions(),
-            next_cursor: None,
-            meta: None,
+            ..Default::default()
         })
     }
 
@@ -12402,7 +12402,7 @@ impl ServerHandler for AletheiaMcpServer {
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, RmcpErrorData> {
+    ) -> Result<CallToolResponse, RmcpErrorData> {
         let args = request
             .arguments
             .map(serde_json::Value::Object)
@@ -12417,12 +12417,12 @@ impl ServerHandler for AletheiaMcpServer {
         // here to mirror `dispatch_tool`.
         if request.name.as_ref() == "await_changes" {
             if let Err(err) = self.auth.authorize_tool("await_changes") {
-                return Ok(self.error_result(err));
+                return Ok(self.error_result(err).into());
             }
-            return Ok(self.dispatch_await_changes_async(args, None).await);
+            return Ok(self.dispatch_await_changes_async(args, None).await.into());
         }
 
-        Ok(self.dispatch_tool(request.name.as_ref(), args))
+        Ok(self.dispatch_tool(request.name.as_ref(), args).into())
     }
 }
 
@@ -12439,6 +12439,62 @@ mod server_unit_tests {
 
     fn make_server() -> AletheiaMcpServer {
         AletheiaMcpServer::new(Arc::new(AletheiaDB::new().expect("db init")))
+    }
+
+    /// Issue #3799 (rmcp 3 upgrade): `tools/list` over the real protocol
+    /// returns every advertised tool, not an empty default list.
+    #[tokio::test]
+    async fn list_tools_over_the_protocol_returns_every_tool() {
+        use rmcp::ServiceExt;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 22);
+        let server = tokio::spawn(async move {
+            let running = make_server()
+                .serve(tokio::io::split(server_io))
+                .await
+                .expect("serve");
+            let _ = running.waiting().await;
+        });
+        let (client_read, mut client_write) = tokio::io::split(client_io);
+        let mut lines = BufReader::new(client_read).lines();
+        let mut send = async |frame: serde_json::Value| {
+            let mut line = frame.to_string();
+            line.push('\n');
+            client_write
+                .write_all(line.as_bytes())
+                .await
+                .expect("write");
+        };
+
+        send(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"}
+            }
+        }))
+        .await;
+        send(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).await;
+        send(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).await;
+
+        let listed = loop {
+            let line = lines.next_line().await.expect("read").expect("response");
+            let frame: serde_json::Value = serde_json::from_str(&line).expect("json");
+            if frame["id"] == 2 {
+                break frame;
+            }
+        };
+        let names: Vec<&str> = listed["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert_eq!(names.len(), super::tool_definitions().len(), "{listed}");
+        assert!(names.contains(&"get_node"), "{listed}");
+        server.abort();
     }
 
     /// Configurable interner cap (finding 1): a REAL `create_node` whose property

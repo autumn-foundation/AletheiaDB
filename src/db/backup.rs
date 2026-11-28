@@ -30,8 +30,13 @@ impl AletheiaDB {
     ///
     /// # Errors
     ///
-    /// Returns `Error::Backup` on any serialization or I/O failure.
+    /// Returns `Error::Backup` on any serialization or I/O failure, and
+    /// `Error::FailedPrecondition` after a failed commit left writes in memory
+    /// that the WAL does not keep (Issue #3799; reopen to clear).
     pub fn backup(&self, path: &Path) -> Result<BackupSummary> {
+        // Issue #3799: refuse while a failed commit's writes are in memory.
+        self.in_flight.check_not_diverged("take a backup")?;
+
         // Capture the LSN coordinate under the commit clock
         // (`current_timestamp`, lock order #1 -- released before any other
         // lock below is taken). A committer holds this lock across its
@@ -68,6 +73,9 @@ impl AletheiaDB {
         // takes no `historical`/`wal`/`current_timestamp` lock, so no inversion.
         let (current_snapshot, historical_snapshot, tiered_arc) = {
             let hist = self.historical.read();
+            // Issue #3799: re-check under the lock that a failed apply holds
+            // when it sets the fence.
+            self.in_flight.check_not_diverged("take a backup")?;
             let current_snapshot = {
                 let _snap_lock = self.current.snapshot_lock.write();
                 self.current

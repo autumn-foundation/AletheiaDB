@@ -30,6 +30,19 @@
 //! frames into an epoch it never registers into. The full statement of the
 //! (now closed) race, and why the flush coordinator's LSN watermark cannot be
 //! used to detect it, lives on `ConcurrentWalSystem::commit`.
+//!
+//! # A failure after the append (Issue #3799)
+//!
+//! After the append, three steps can fail. The frame can then still become
+//! durable, so the commit path acts by site (ADR-0062):
+//!
+//! - The commit step inside the append, or `apply_changes`: the writes are not
+//!   published. The commit path releases the commit clock, writes an `AbortTx`
+//!   record (recovery then drops the frame), and adds the outcome to the
+//!   error. A failed apply also sets the divergence fence on `InFlightLsns`.
+//! - `wait_for_flush`: the writes are already visible, and other transactions
+//!   can depend on them. The commit path writes no record. The error says that
+//!   the durability status is UNKNOWN.
 
 use super::{
     ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager, WriteBuffer,
@@ -66,6 +79,9 @@ pub(crate) mod constraint;
 mod in_flight;
 mod validation;
 mod wal;
+
+#[cfg(test)]
+mod abort_record_tests;
 
 pub(crate) use in_flight::InFlightLsns;
 
@@ -663,6 +679,14 @@ impl WriteTransaction {
         #[cfg(feature = "observability")]
         let ts_lock_acquired = std::time::Instant::now();
 
+        // Issue #3799: after a failed apply, the live state holds writes that
+        // the WAL disowns. Refuse every later commit, so no durable write can
+        // depend on them. Checked under the commit clock, which the failed
+        // commit held when it set the fence.
+        if let Some(tracker) = self.in_flight.as_ref() {
+            tracker.check_not_diverged("commit")?;
+        }
+
         let commit_timestamp = {
             let observed_at = Instant::now();
             let (mut previous_observed_at, adaptive_forward_limit_us) =
@@ -799,6 +823,9 @@ impl WriteTransaction {
         apply::detect_delete_orphan_write_skew(self)?;
         apply::detect_create_edge_dangling_endpoint(self)?;
         cas::detect_cas_precondition_violations(self, commit_timestamp)?;
+        // Issue #3799: a caller-made vector error must not fail the apply, which
+        // would fence the database. Reject it here, before the WAL append.
+        apply::detect_vector_index_violations(self)?;
 
         #[cfg(feature = "observability")]
         let wal_start = std::time::Instant::now();
@@ -815,8 +842,22 @@ impl WriteTransaction {
         // `wal.commit()` call here, because the append→register window between
         // them is what let a flush cycle drain this frame into an earlier
         // epoch and then fail it without the transaction ever learning.
+        //
+        // Issue #3799: if the commit step fails AFTER the append (site A), the
+        // frame is in the ring buffer. Release the commit clock, then write an
+        // abort record so recovery does not replay the frame.
         let (base_lsn, wait_epoch) =
-            wal::log_operations_to_wal(self, commit_timestamp, &closing_version_ids)?;
+            match wal::log_operations_to_wal(self, commit_timestamp, &closing_version_ids) {
+                Ok(logged) => logged,
+                Err(wal::LogFailure::NotAppended(error)) => return Err(error),
+                Err(wal::LogFailure::Appended { begin_lsn, error }) => {
+                    drop(ts);
+                    // Release the reserved changefeed slot before the abort
+                    // wait, so later deliveries do not stall on it.
+                    drop(emit_ticket.take());
+                    return Err(self.abort_appended_frame(begin_lsn, error));
+                }
+            };
 
         // Register the commit's base LSN as in-flight BEFORE the durability fsync,
         // so a write that becomes durable is always registered. The guard survives
@@ -910,7 +951,24 @@ impl WriteTransaction {
         // a single relaxed atomic load (unarmed), so it is effectively zero-cost.
         race_seam::run_pre_apply_once();
 
-        let historical_guard = apply::apply_changes(self, commit_timestamp, &closing_version_ids)?;
+        // Issue #3799 (site B): if apply fails, `apply_changes` sets the
+        // divergence fence before it returns. Then release the commit clock and
+        // abort the frame. The writes were never published: the fence stops
+        // all later commits and snapshots, so nothing can depend on them.
+        let historical_guard =
+            match apply::apply_changes(self, commit_timestamp, &closing_version_ids, base_lsn) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    drop(ts);
+                    return Err(match base_lsn {
+                        Some(begin_lsn) => {
+                            drop(emit_ticket.take());
+                            self.abort_appended_frame(begin_lsn, error)
+                        }
+                        None => error,
+                    });
+                }
+            };
 
         // Test-only interleaving hook (Issue #3425): fires at the exact point
         // between the historical writes and the commit-timestamp finalization,
@@ -980,11 +1038,17 @@ impl WriteTransaction {
         // (a WAL flush failure means the in-memory state is ahead of the log and
         // the database can no longer honour its own durability contract). It
         // affects GroupCommit only.
+        //
+        // Issue #3799 (site C): do NOT write an abort record here. The writes
+        // are already published, and other transactions can have read them
+        // and committed on top of them. Dropping this frame at recovery would
+        // then break those transactions. The outcome stays UNKNOWN.
         if let Some(epoch) = wait_epoch
             && let Some(gc) = self.wal.group_commit_coordinator()
             && self.durability_mode.waits_for_durability()
+            && let Err(error) = gc.wait_for_flush(epoch)
         {
-            gc.wait_for_flush(epoch)?;
+            return Err(disclose_published_failure(error));
         }
 
         // Durable AND applied: deregister the in-flight LSN so index persistence
@@ -1067,6 +1131,20 @@ impl WriteTransaction {
         }
 
         Ok(commit_timestamp)
+    }
+
+    /// Abort a frame that is in the WAL ring buffer after a commit step failed
+    /// (Issue #3799), and return `error` with the outcome added.
+    ///
+    /// Call it with no commit-path lock held: the abort record can wait for a
+    /// flush. Call it only for writes that were never published.
+    fn abort_appended_frame(
+        &self,
+        begin_lsn: crate::storage::wal::LSN,
+        error: crate::core::error::Error,
+    ) -> crate::core::error::Error {
+        let outcome = self.wal.append_abort_record(self.tx_id.as_u64(), begin_lsn);
+        disclose_abort_outcome(error, begin_lsn, &outcome)
     }
 
     /// Pre-generate the closing version ids for every buffered delete/retract
@@ -2960,6 +3038,67 @@ pub mod race_seam {
     }
 }
 
+/// Add the site-C note to a failed flush wait (Issue #3799).
+///
+/// The writes are already published, so the commit path writes no abort
+/// record. A `WalError` gets the note in its text.
+fn disclose_published_failure(error: crate::core::error::Error) -> crate::core::error::Error {
+    use crate::core::error::Error;
+    const NOTE: &str = " No abort record is written: the writes of this transaction are \
+        already visible to other transactions, which can depend on them. The durability \
+        status is UNKNOWN: this transaction can still replay at recovery. Do not report \
+        it as a clean failure.";
+    match error {
+        Error::Storage(StorageError::WalError { reason }) => {
+            Error::Storage(StorageError::WalError {
+                reason: format!("{reason}{NOTE}"),
+            })
+        }
+        other => other,
+    }
+}
+
+/// Add the abort-record outcome to a post-append commit error (Issue #3799).
+///
+/// A `WalError` gets the outcome in its text. Other error types keep their
+/// type, so their classification does not change; the outcome goes to the WAL
+/// diagnostic log only.
+fn disclose_abort_outcome(
+    error: crate::core::error::Error,
+    begin_lsn: crate::storage::wal::LSN,
+    outcome: &crate::storage::wal::concurrent_system::AbortRecordOutcome,
+) -> crate::core::error::Error {
+    use crate::core::error::Error;
+    use crate::storage::wal::concurrent_system::AbortRecordOutcome;
+
+    let note = match outcome {
+        AbortRecordOutcome::Durable => format!(
+            " Transaction aborted: the abort record is durable, so recovery will not \
+             replay this transaction (WAL frame at LSN {}).",
+            begin_lsn.0
+        ),
+        AbortRecordOutcome::NotConfirmed(why) => format!(
+            " The abort record is not confirmed durable ({why}). The durability status is \
+             UNKNOWN: this transaction (WAL frame at LSN {}) can still replay at \
+             recovery. Do not report it as a clean failure.",
+            begin_lsn.0
+        ),
+    };
+    match error {
+        Error::Storage(StorageError::WalError { reason }) => {
+            Error::Storage(StorageError::WalError {
+                reason: format!("{reason}{note}"),
+            })
+        }
+        other => {
+            crate::storage::wal::log_wal_diagnostic(&format!(
+                "commit failed after the WAL append: {other}.{note}"
+            ));
+            other
+        }
+    }
+}
+
 /// Test-only interleaving hooks for the commit path (Issue #3425).
 ///
 /// These let a test park a committing writer at a precise point — between the
@@ -2969,7 +3108,45 @@ pub mod race_seam {
 /// out of production builds and adds zero cost to the commit hot path.
 #[cfg(test)]
 pub(crate) mod commit_test_hooks {
+    use std::cell::Cell;
     use std::sync::{Arc, Mutex};
+
+    thread_local! {
+        /// One-shot apply failure for the next commit on THIS thread only
+        /// (Issue #3799): fail after this many ops are applied.
+        /// Thread-local, so parallel tests do not see it.
+        static FAIL_APPLY_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    /// Make the next `apply_changes` on this thread fail after `ops` ops.
+    pub(crate) fn fail_apply_after_ops_on_this_thread(ops: usize) {
+        FAIL_APPLY_AFTER.with(|f| f.set(Some(ops)));
+    }
+
+    /// Disarm the apply failure on this thread.
+    pub(crate) fn clear_apply_failure() {
+        FAIL_APPLY_AFTER.with(|f| f.set(None));
+    }
+
+    /// Return the injected error if the armed failure is due at op `index`.
+    /// A due failure disarms itself.
+    pub(crate) fn take_apply_failure_at(index: usize) -> Option<crate::core::error::Error> {
+        FAIL_APPLY_AFTER.with(|f| {
+            if f.get() == Some(index) {
+                f.set(None);
+                Some(injected_apply_error())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// The error an injected apply failure returns.
+    pub(crate) fn injected_apply_error() -> crate::core::error::Error {
+        crate::core::error::Error::Storage(crate::core::error::StorageError::InconsistentState {
+            reason: "injected apply failure (test hook)".to_string(),
+        })
+    }
 
     type Hook = Arc<dyn Fn() + Send + Sync>;
 

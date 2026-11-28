@@ -300,6 +300,10 @@ fn parse_bands(entries: Vec<WalEntry>) -> Vec<Band> {
         }
     }
 
+    // Issue #3799: a failed commit's band never replays and is never counted,
+    // even when its abort record lies past the target.
+    let entries = crate::storage::recovery::drop_aborted_frames(entries);
+
     let mut bands: Vec<Band> = Vec::new();
     let mut open: Vec<WalEntry> = Vec::new();
     let mut open_active = false;
@@ -536,8 +540,25 @@ fn compute_window(all: &[WalEntry], source_lsn: u64) -> PitrWindow {
     let mut latest_lsn = source_lsn;
     let mut latest_ts = Timestamp::from(0);
     let mut have_latest = false;
+    // Issue #3799: skip the commit coordinate of an aborted band.
+    let aborted = crate::storage::recovery::aborted_band_keys(all);
+    let mut open_band: Option<(LSN, u64)> = None;
 
     for e in all {
+        match e.operation {
+            WalOperation::BeginTx { tx_id } if e.framed => open_band = Some((e.lsn, tx_id)),
+            WalOperation::CommitTx { .. } => {
+                if open_band.take().is_some_and(|key| aborted.contains(&key)) {
+                    continue;
+                }
+            }
+            WalOperation::AbortTx { .. }
+            | WalOperation::Checkpoint { .. }
+            | WalOperation::DeclareUniqueConstraint { .. }
+            | WalOperation::DropUniqueConstraint { .. } => open_band = None,
+            _ if !e.framed => open_band = None,
+            _ => {}
+        }
         // A transaction's commit coordinate: the framed `CommitTx`, or a legacy
         // (unframed) data op's own coordinate. Control ops and framed data ops
         // (accounted by their `CommitTx`) are skipped to avoid double counting.
@@ -1015,6 +1036,99 @@ mod band_filter_tests {
             !entry_needs_vocab_check(&entry_with_version(Some(13))),
             "a v13+ (inline-string) entry needs no range check"
         );
+    }
+
+    fn abort_entry(lsn: u64, tx_id: u64, begin_lsn: u64) -> WalEntry {
+        framed(
+            lsn,
+            WalOperation::AbortTx {
+                tx_id,
+                begin_lsn: LSN(begin_lsn),
+            },
+            ts(0),
+        )
+    }
+
+    /// Issue #3799: PITR never replays or counts an aborted band, even when
+    /// its abort record lies after the target.
+    #[test]
+    fn aborted_band_is_neither_replayed_nor_counted() {
+        let mut entries = all_of(vec![tx(1, 1, 1, ts(100)), tx(4, 2, 1, ts(200))]);
+        entries.push(abort_entry(7, 1, 1));
+        let f = filter_bands(entries.clone(), &PitrTarget::AsOf(ts(150)), 0);
+        assert_eq!(f.applied, 0, "the aborted band must not apply");
+        assert!(f.entries.is_empty());
+        assert_eq!(f.discarded, 1, "only the live band counts as discarded");
+        assert_eq!(count_transactions(&entries, 0), 1);
+    }
+
+    fn stray_commit(lsn: u64, tx_id: u64, commit_ts: i64) -> WalEntry {
+        framed(
+            lsn,
+            WalOperation::CommitTx {
+                tx_id,
+                entry_count: 0,
+                commit_timestamp: ts(commit_ts),
+            },
+            ts(0),
+        )
+    }
+
+    /// Issue #3799 (mutation gap): a control op ends a torn aborted band, so
+    /// a later `CommitTx` is not charged to that band.
+    #[test]
+    fn control_op_ends_torn_aborted_band_in_window() {
+        let checkpoint = WalOperation::Checkpoint {
+            lsn: LSN(1),
+            timestamp: ts(0),
+        };
+        let entries = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 7 }, ts(0)),
+            framed(2, create_node_op(2), ts(0)),
+            framed(3, checkpoint, ts(0)),
+            stray_commit(4, 9, 400),
+            abort_entry(5, 7, 1),
+        ];
+        let window = compute_window(&entries, 0);
+        assert_eq!(window.latest_lsn, 4);
+        assert_eq!(window.latest_ts, ts(400));
+    }
+
+    /// Issue #3799 (mutation gap): an unframed `BeginTx` opens no band, so an
+    /// abort record cannot hide the next `CommitTx`.
+    #[test]
+    fn unframed_begin_opens_no_band_in_window() {
+        let entries = vec![
+            legacy(1, WalOperation::BeginTx { tx_id: 7 }, ts(0)),
+            stray_commit(2, 7, 200),
+            abort_entry(3, 7, 1),
+        ];
+        let window = compute_window(&entries, 0);
+        assert_eq!(window.latest_lsn, 2);
+    }
+
+    /// Issue #3799 (mutation gap): an unframed entry ends a torn aborted band.
+    #[test]
+    fn unframed_entry_ends_torn_aborted_band_in_window() {
+        let entries = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 7 }, ts(0)),
+            legacy(2, create_node_op(2), ts(100)),
+            stray_commit(3, 9, 300),
+            abort_entry(4, 7, 1),
+        ];
+        let window = compute_window(&entries, 0);
+        assert_eq!(window.latest_lsn, 3);
+        assert_eq!(window.latest_ts, ts(300));
+    }
+
+    /// Issue #3799: an aborted band does not define the window edge.
+    #[test]
+    fn aborted_band_does_not_extend_the_window() {
+        let mut entries = all_of(vec![tx(1, 1, 1, ts(100)), tx(4, 2, 1, ts(200))]);
+        entries.push(abort_entry(7, 2, 4));
+        let window = compute_window(&entries, 0);
+        assert_eq!(window.latest_lsn, 3, "latest is the last live CommitTx");
+        assert_eq!(window.latest_ts, ts(100));
     }
 
     #[test]

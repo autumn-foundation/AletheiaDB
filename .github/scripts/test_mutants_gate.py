@@ -320,5 +320,64 @@ class TestSummarize(GateTestBase):
         self.assertEqual(data["shards"], 3)
 
 
+
+class TestGateShards(GateTestBase):
+    """`gate --shards-dir`: one PR-diff gate over a sharded run (Issue #3799)."""
+
+    def make_shards(self):
+        shards = self.tmp / "pr-shards"
+        write_mutants_out(shards / "mutants-pr-shard-0", caught=10, missed=5)
+        write_mutants_out(shards / "mutants-pr-shard-1" / "mutants.out",
+                          caught=20, missed=5, timeout=5, unviable=3)
+        return shards
+
+    def run_shard_gate(self, shards, *extra):
+        return self.run_cmd("gate", "--shards-dir", str(shards),
+                            "--config", str(self.config), *extra)
+
+    def test_sums_counts_across_shards(self):
+        # caught 30 + timeout 5 = 35 of 45 viable -> 77.8% >= 60%.
+        r = self.run_shard_gate(self.make_shards(), "--expected-shards", "2")
+        self.assertEqual(r.returncode, EXIT_PASS, r.stdout + r.stderr)
+        self.assertIn("77.8", r.stdout)
+        self.assertIn("| Missed | 10 |", r.stdout)
+
+    def test_fails_on_combined_score(self):
+        shards = self.tmp / "pr-shards"
+        write_mutants_out(shards / "mutants-pr-shard-0", caught=3, missed=4)
+        write_mutants_out(shards / "mutants-pr-shard-1", caught=3, missed=4)
+        r = self.run_shard_gate(shards, "--expected-shards", "2")
+        self.assertEqual(r.returncode, EXIT_GATE_FAIL, r.stdout + r.stderr)
+        self.assertIn("thing_missed_0", r.stdout)
+
+    def test_missing_shard_is_infra_error(self):
+        # A shard that did not upload output must not pass as "fewer mutants".
+        r = self.run_shard_gate(self.make_shards(), "--expected-shards", "3")
+        self.assertEqual(r.returncode, EXIT_INFRA, r.stdout + r.stderr)
+        self.assertIn("expected 3", r.stderr)
+
+    def test_empty_shard_artifact_is_infra_error(self):
+        shards = self.make_shards()
+        (shards / "mutants-pr-shard-2").mkdir()
+        r = self.run_shard_gate(shards, "--expected-shards", "3")
+        self.assertEqual(r.returncode, EXIT_INFRA, r.stdout + r.stderr)
+        self.assertIn("mutants-pr-shard-2", r.stderr)
+
+    def test_requires_exactly_one_input(self):
+        r = self.run_cmd("gate", "--config", str(self.config))
+        self.assertEqual(r.returncode, EXIT_INFRA, r.stdout + r.stderr)
+        out = self.tmp / "mutants.out"
+        write_mutants_out(out)
+        r = self.run_cmd("gate", "--config", str(self.config), "--mutants-out",
+                         str(out), "--shards-dir", str(self.make_shards()))
+        self.assertEqual(r.returncode, EXIT_INFRA, r.stdout + r.stderr)
+
+    def test_expected_shards_requires_shards_dir(self):
+        out = self.tmp / "mutants.out"
+        write_mutants_out(out)
+        r = self.run_gate(out, "--expected-shards", "2")
+        self.assertEqual(r.returncode, EXIT_INFRA, r.stdout + r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

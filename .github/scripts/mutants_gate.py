@@ -3,8 +3,10 @@
 
 Subcommands:
   gate       Enforce the PR-diff mutation-score threshold against one
-             mutants.out directory. Exit 0 = pass, 2 = score below threshold,
-             1 = infrastructure error (bad config, unreadable output dir).
+             mutants.out directory (--mutants-out), or against the sum of a
+             sharded PR run (--shards-dir, --expected-shards). Exit 0 = pass,
+             2 = score below threshold, 1 = infrastructure error (bad config,
+             unreadable output dir, a missing or empty shard).
   summarize  Aggregate several weekly shard artifacts (each containing a
              mutants.out) into a combined, informational project score.
              Writes score.json and combined-missed.txt into the shards dir.
@@ -202,10 +204,41 @@ def missed_details(missed_lines: tuple[str, ...]) -> str:
     )
 
 
+def read_shard_counts(shards_dir: Path, expected: int | None) -> Counts:
+    """Sum the outcome counts of every PR-diff shard artifact.
+
+    Every expected shard must hold usable output. A missing or empty shard
+    means part of the diff was never tested, so it is an infrastructure
+    error, never a smaller sample.
+    """
+    shard_outputs, skipped = find_shard_outputs(shards_dir)
+    if skipped:
+        raise InfraError(
+            "shard artifacts without mutants output: " + ", ".join(skipped)
+        )
+    if expected is not None and len(shard_outputs) != expected:
+        raise InfraError(
+            f"found {len(shard_outputs)} shard artifacts, expected {expected}: "
+            + ", ".join(shard_outputs)
+        )
+    total = Counts()
+    for out_dir in shard_outputs.values():
+        total.add(read_counts(out_dir))
+    return total
+
+
 def cmd_gate(args: argparse.Namespace) -> int:
     config = load_config(Path(args.config))
     threshold: float = config["threshold"]
     min_mutants: int = config["min_mutants"]
+
+    if (args.mutants_out is None) == (args.shards_dir is None):
+        raise InfraError("gate needs exactly one of --mutants-out or --shards-dir")
+    if args.shards_dir is not None:
+        counts = read_shard_counts(Path(args.shards_dir), args.expected_shards)
+        return report_gate(counts, threshold, min_mutants)
+    if args.expected_shards is not None:
+        raise InfraError("--expected-shards needs --shards-dir")
 
     mutants_out = Path(args.mutants_out)
     if not mutants_out.exists() and args.allow_missing:
@@ -218,7 +251,11 @@ def cmd_gate(args: argparse.Namespace) -> int:
         )
         return EXIT_PASS
 
-    counts = read_counts(mutants_out)
+    return report_gate(read_counts(mutants_out), threshold, min_mutants)
+
+
+def report_gate(counts: Counts, threshold: float, min_mutants: int) -> int:
+    """Render the gate verdict for `counts` and return its exit code."""
     score = counts.score()
     score_s = fmt_score(score, threshold)
     threshold_s = fmt_threshold(threshold, score)
@@ -368,7 +405,17 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_gate = sub.add_parser("gate", help="enforce PR-diff mutation-score threshold")
-    p_gate.add_argument("--mutants-out", required=True, help="path to mutants.out directory")
+    p_gate.add_argument("--mutants-out", help="path to one mutants.out directory")
+    p_gate.add_argument(
+        "--shards-dir",
+        help="directory of downloaded PR-diff shard artifacts; the gate uses their sum",
+    )
+    p_gate.add_argument(
+        "--expected-shards",
+        type=int,
+        default=None,
+        help="with --shards-dir: the exact number of shard artifacts that must be present",
+    )
     p_gate.add_argument("--config", required=True, help="path to mutants-gate.toml")
     p_gate.add_argument(
         "--allow-missing",

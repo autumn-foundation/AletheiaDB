@@ -57,7 +57,7 @@ default-members = ["."]
 # `python/` and `fuzz/` are independent crates with their own manifests (the
 # Python wheels + cargo-fuzz workflows build them standalone); keep them OUT of
 # this workspace so those workflows still resolve.
-exclude = ["python", "fuzz"]
+exclude = ["python", "fuzz", "vendor"]
 
 [dependencies]
 # CLI shell completions (Issue #3619). `clap`/`clap_complete` drive
@@ -126,7 +126,7 @@ tracing-subscriber = { version = "0.3", optional = true, features = ["registry",
 
 # MCP server support (optional)
 # Note: rmcp re-exports schemars, so we don't need a separate dependency
-rmcp = { version = "2.1", features = ["server", "transport-io"], optional = true }
+rmcp = { version = "3.12", features = ["server", "transport-io"], optional = true }
 base64 = { version = "0.22", optional = true }
 
 # HTTP server support (optional) — built on autumn-web (Axum-based).
@@ -143,12 +143,12 @@ tower-http = { version = "0.6", optional = true, features = ["cors", "trace", "s
 # `sync` (Notify) + `time` (sleep/select) power the event-driven changefeed
 # long-poll wait (Issue #3673); harmless when tokio is pulled by another feature.
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time"], optional = true }
-embed_anything = { version = "0.6.7", optional = true }
-# embed_anything 0.6.7 accepts candle ^0.9.1 but does not build against 0.9.2's
-# wider CpuStorage enum yet. Keep these pins until upstream handles the new variants.
-candle-core = { version = "=0.9.1", optional = true }
-candle-nn = { version = "=0.9.1", optional = true }
-candle-transformers = { version = "=0.10.2", optional = true }
+# embed_anything 0.7 builds on candle 0.11 (zip >= 9) and makes its S3 loader
+# an opt-in `aws` feature, so the legacy AWS TLS stack is no longer pulled in.
+embed_anything = { version = "0.7.1", optional = true }
+candle-core = { version = "0.11.1", optional = true }
+candle-nn = { version = "0.11.1", optional = true }
+candle-transformers = { version = "0.11.1", optional = true }
 
 # HTTP client for sharding RPC and optional integrations
 reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false, optional = true }
@@ -998,3 +998,12 @@ required-features = []
 name = "query_resource_limits"
 harness = false
 path = "benches/query_resource_limits.rs"
+
+# Vendored copies that fix RustSec advisories upstream has not fixed yet. Both
+# are reached only through the optional `embeddings` feature (embed_anything ->
+# processors-rs). See each vendor/*/Cargo.toml header for the change.
+# - docx-rust 0.1.8 with zip 9 (processors-rs pins docx-rust =0.1.8).
+# - processors-rs 0.7.1 with pdf-extract 0.12 (lopdf 0.42).
+[patch.crates-io]
+docx-rust = { path = "vendor/docx-rust" }
+processors-rs = { path = "vendor/processors-rs" }

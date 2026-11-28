@@ -72,6 +72,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SECURITY:** `cargo audit` is clean with no ignores (was 43 advisories plus
+  4 ignores).
+  - Bumped: rmcp 2.1 -> 3.12, embed_anything 0.6.7 -> 0.7.1,
+    candle 0.9/0.10 -> 0.11.1, and autumn-web 0.6 -> 0.11 in
+    `aletheia-server` and the spike. autumn-web 0.11 makes `jsonwebtoken`
+    optional, so `rsa` and `crypto-bigint` 0.5 are gone. `aletheia-server`
+    now needs Rust 1.97.
+  - Semver bumps: quinn, rustls, rustls-webpki, url, webpki-roots, zstd,
+    pulldown-cmark, ctutils.
+  - Vendored with a minimal patch (`[patch.crates-io]`, see `vendor/`):
+    docx-rust 0.1.8 on zip 9, and processors-rs 0.7.1 on pdf-extract 0.12
+    (lopdf 0.42). Upstream pins kept them on vulnerable versions.
+- **DURABILITY:** a commit that failed after its WAL append could come back
+  after a restart (Issue #3799, ADR-0062). The frame could still reach disk,
+  and recovery replayed it, although the caller got an error. Now, when the
+  commit step in the append or `apply_changes` fails, the commit path writes
+  a new `AbortTx { tx_id, begin_lsn }` WAL record. Crash recovery, PITR, and
+  the replica applier drop the band that the record names. The commit path
+  releases the commit clock before it writes the record.
+  - A `StorageError::WalError` then says "Transaction aborted: the abort
+    record is durable", or "The durability status is UNKNOWN" if the record
+    is not confirmed. Other error types keep their type; the outcome goes to
+    the WAL diagnostic log.
+  - A failed `wait_for_flush` writes no record: other transactions can
+    already depend on the published writes. Its error says that the
+    durability status is UNKNOWN.
+  - Issue #3413 did not add an abort record. Docs that said so are corrected.
+- **BEHAVIORAL:** after a failed `apply_changes`, the live state holds writes
+  that the WAL disowns. Until the database is reopened, commits,
+  `persist_indexes`, `backup`, and encryption enable/disable refuse with
+  `FailedPrecondition`, and the background persistence worker skips its cycles
+  and the shutdown persist.
+- **BEHAVIORAL:** a node vector with a wrong dimension, NaN, or infinity is now
+  rejected before the WAL append (Issue #3799). Before, it failed during the
+  apply, after the frame was appended.
+- **On-disk format:** new WAL op tag 14 (`AbortTx`), no WAL version bump. Do
+  not downgrade after a WAL holds the record: an older binary reads a final
+  record as a torn tail and replays the aborted band.
+
 - Adjacency compaction could tear a concurrent read (Issue #3810). It retired
   the delta entries **before** publishing the CSR that absorbed them, so a
   reader landing in that window got an adjacency list missing those edges — an
@@ -167,17 +206,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contention could not be told apart from a suspected deadlock. It also appears
   in the acquisition-failure forensic payload.
 
-- Documented the durability-unknown caveat on commit-path acquisition timeouts
-  (Issue #3798): a timeout at `register_transaction` or `wait_for_flush` may
-  leave a WAL frame already appended, so the transaction **may still become
-  durable and replay at recovery** and must not be reported to a client as a
-  clean abort. The WAL transaction frame format that would make this precise
-  already shipped in 0.2.0 (Issue #3413 — `BeginTx`/`CommitTx`/`AbortTx`); what
-  is still missing is the commit path **emitting** an abort record when a step
-  after the append fails, tracked as Issue #3799. See
-  [docs/WAL.md](docs/WAL.md) ("Stall Diagnosability") and the module
-  documentation on `src/storage/wal/group_commit.rs` for the full call-site
-  audit.
+- Documented the durability disclosure on commit-path acquisition timeouts
+  (Issue #3798): after a timeout at `register_transaction` or
+  `wait_for_flush`, the WAL frame can already be appended. The commit path now
+  writes an abort record and reports the final outcome (Issue #3799, see
+  above). See [docs/WAL.md](docs/WAL.md) ("Stall Diagnosability") and the
+  module documentation on `src/storage/wal/group_commit.rs` for the full
+  call-site audit.
 
 ### Known issues
 
@@ -322,8 +357,9 @@ pre-v13 WAL tail is now refused on open (see On-disk format below).
   binaries reject these versions cleanly rather than misparsing them; 0.2.0
   still *reads* ≤v12 segments, but refuses to *replay* a pre-v13 tail (see
   Breaking changes).
-- WAL commit **and abort** framing (`[BeginTx, ..ops.., CommitTx]` /
-  `AbortTx`, Issue #3413): a transaction whose frame is durably fsync'd and is
+- WAL commit framing (`[BeginTx, ..ops.., CommitTx]`, Issue #3413;
+  correction: this release wrote no `AbortTx` record, see Issue #3799): a
+  transaction whose frame is durably fsync'd and is
   *then* rejected at the commit guard is no longer re-applied by crash
   recovery. Previously such a runtime-refused write could be resurrected on
   replay (a lost CAS/lease claim, a stale fence, an orphaning delete).

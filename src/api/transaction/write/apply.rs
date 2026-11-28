@@ -737,10 +737,17 @@ pub(crate) fn apply_single_write(
 /// - **Locking**: Single lock acquisition for historical storage, held across finalize.
 /// - **ID Generation**: Tombstone IDs are pre-generated in a batch to minimize lock contention.
 /// - **Adjacency**: Adjacency indexes are compacted *once* after all edge operations are complete.
+///
+/// # Failure (Issue #3799)
+///
+/// `frame_lsn` is the `BeginTx` LSN of this transaction's WAL frame. If an op
+/// fails, this function sets the divergence fence for it before it releases
+/// `historical.write()`.
 pub(crate) fn apply_changes<'a>(
     tx: &'a WriteTransaction,
     commit_timestamp: Timestamp,
     closing_version_ids: &[VersionId],
+    frame_lsn: Option<crate::storage::wal::LSN>,
 ) -> Result<parking_lot::RwLockWriteGuard<'a, HistoricalStorage>> {
     // Create temporal interval for all operations in this transaction.
     let _temporal = BiTemporalInterval::current(commit_timestamp);
@@ -772,15 +779,28 @@ pub(crate) fn apply_changes<'a>(
         .collect::<Vec<u64>>()
         .into_iter();
 
-    for write in tx.buffer.operations() {
-        apply_single_write(
-            tx,
-            write,
-            commit_timestamp,
-            &mut historical,
-            &mut tombstone_ids,
-            num_deletes,
-        )?;
+    for (index, write) in tx.buffer.operations().iter().enumerate() {
+        let result = match injected_apply_failure(index) {
+            Some(error) => Err(error),
+            None => apply_single_write(
+                tx,
+                write,
+                commit_timestamp,
+                &mut historical,
+                &mut tombstone_ids,
+                num_deletes,
+            ),
+        };
+        if let Err(error) = result {
+            // Issue #3799: the live state can now hold part of this frame. Set
+            // the divergence fence while `historical.write()` and the commit
+            // clock are still held, so no snapshot or commit can see this
+            // state before the fence.
+            if let (Some(tracker), Some(lsn)) = (tx.in_flight.as_ref(), frame_lsn) {
+                tracker.mark_diverged(lsn.0);
+            }
+            return Err(error);
+        }
     }
 
     // Safety check
@@ -797,6 +817,39 @@ pub(crate) fn apply_changes<'a>(
     // `finalize_current_commit_timestamps` so a concurrent `historical.read()`
     // snapshot cannot observe a committed node/edge with `commit_timestamp: None`.
     Ok(historical)
+}
+
+/// Commit-time check that every buffered node vector fits its vector indexes
+/// (Issue #3799).
+///
+/// A bad vector (wrong dimension, NaN, infinity) used to fail inside
+/// `apply_changes`, after the WAL append. That now sets the divergence fence,
+/// which refuses all later writes. Thus check it here, before the append: the
+/// rejection then writes no frame. Reads only current storage.
+pub(super) fn detect_vector_index_violations(tx: &WriteTransaction) -> Result<()> {
+    use crate::api::transaction::BufferedWrite;
+
+    for write in tx.buffer.operations() {
+        if let BufferedWrite::CreateNode { properties, .. }
+        | BufferedWrite::UpdateNode { properties, .. } = write
+        {
+            tx.current.check_vectors_indexable(properties)?;
+        }
+    }
+    Ok(())
+}
+
+/// Test seam (Issue #3799): the armed apply failure for op `index`, if any.
+#[cfg(test)]
+fn injected_apply_failure(index: usize) -> Option<crate::core::error::Error> {
+    super::commit_test_hooks::take_apply_failure_at(index)
+}
+
+/// Production builds never inject a failure.
+#[cfg(not(test))]
+#[inline(always)]
+fn injected_apply_failure(_index: usize) -> Option<crate::core::error::Error> {
+    None
 }
 
 /// Commit-time re-check that a buffered node delete/retract does not orphan an
